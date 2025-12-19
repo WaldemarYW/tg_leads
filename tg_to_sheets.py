@@ -15,54 +15,48 @@ from google.oauth2.service_account import Credentials
 from gspread.exceptions import WorksheetNotFound
 
 
-ANKETA_TEXT = "Фінальний етап перед навчанням. Заповніть анкету"
-REFERRAL_TEXT = "У нашій компанії діє реферальна програма"
-CONFIRM_TEXT = "Дякую! Передаю вас на навчання"
-HELLO_TEXT = "Доброго дня! 🙂 Мене звати Володимир"
-
-WAIT_TRIGGERS = [
-    "Супер! Чи готові ви перейти до навчання",
-    "можу надіслати вам коротке відео",
-    "як вам зручніше",
-    "Можу надіслати вам коротке відео",
-]
+HELLO_TEXT = "Доброго дня! 🙂 Мене звати Володимир, я HR компанії «Furioza»"
+COMPANY_TEXT = "Наша компанія називається \"Furioza\""
+INFO_TEXT = "Супер, аби зорієнтувати вас детальніше, я можу надіслати вам коротке відео з поясненням ваканс"
+LEARNING_TEXT = "Чи готові ви перейти до навчання"
+ANKETA_TEXT = "Фінальний етап перед навчанням. Заповніть анкету, та відправте мені"
 
 SCRIPT_TEMPLATES = [
-    ANKETA_TEXT,
-    REFERRAL_TEXT,
-    CONFIRM_TEXT,
     HELLO_TEXT,
-    *WAIT_TRIGGERS,
+    COMPANY_TEXT,
+    INFO_TEXT,
+    LEARNING_TEXT,
+    ANKETA_TEXT,
 ]
-NEUTRAL_IN = {
-    "ок", "ok", "добре", "хорошо", "зрозуміло",
-    "я зрозуміла", "я зрозумів", "понятно", "ясно", ""
-}
 
 
 def normalize_text(s: Optional[str]) -> str:
     return (s or "").strip().lower()
 
 
-def classify_status(last_out: str, last_in: str) -> str:
-    t_out = normalize_text(last_out)
-    t_in = normalize_text(last_in)
+def classify_status(
+    template_out: str,
+    last_msg_from_me: Optional[bool],
+    consecutive_out: int
+) -> str:
+    if last_msg_from_me is False:
+        return "📩 Останнє повідомлення від кандидата"
+    if consecutive_out >= 3:
+        return "📤 3+ повідомлення від нас без відповіді"
 
-    if normalize_text(CONFIRM_TEXT) in t_out:
-        return "✅ Согласился (передан на обучение)"
+    t_out = normalize_text(template_out)
+    if normalize_text(HELLO_TEXT) in t_out:
+        return "🟩 Привітання"
+    if normalize_text(COMPANY_TEXT) in t_out:
+        return "🟦 Знайомство з компанією"
+    if normalize_text(INFO_TEXT) in t_out:
+        return "🟨 Більше інформації"
+    if normalize_text(LEARNING_TEXT) in t_out:
+        return "🟧 Навчання"
     if normalize_text(ANKETA_TEXT) in t_out:
-        return "📝 Анкета отправлена (ждём данные)"
-    if normalize_text(REFERRAL_TEXT) in t_out:
-        return "❌ Холодный (рефералка)"
+        return "📝 Анкета"
 
-    if any(normalize_text(x) in t_out for x in WAIT_TRIGGERS):
-        if t_in in NEUTRAL_IN:
-            return "⏳ Ожидает ответа"
-
-    if normalize_text(HELLO_TEXT) in t_out and not t_in:
-        return "🆕 Новый"
-
-    return "💬 В диалоге"
+    return "💬 У діалозі"
 
 
 def is_script_template(message_text: str) -> bool:
@@ -275,25 +269,36 @@ async def update_google_sheet(
 
         last_in = ""
         last_out = ""
-        has_script_template = False
+        template_out = ""
+        last_msg_from_me: Optional[bool] = None
+        consecutive_out = 0
+        counting_consecutive_out = True
         async for m in client.iter_messages(entity, limit=40):
             if not m.message:
                 continue
+            if last_msg_from_me is None:
+                last_msg_from_me = m.out
+            if counting_consecutive_out:
+                if m.out:
+                    consecutive_out += 1
+                else:
+                    counting_consecutive_out = False
+
             if m.out and not last_out:
                 last_out = m.message
-            if m.out and not has_script_template and is_script_template(m.message):
-                has_script_template = True
             if not m.out and not last_in:
                 last_in = m.message
-            if last_in and last_out:
+            if m.out and not template_out and is_script_template(m.message):
+                template_out = m.message
+            if last_in and last_out and template_out and not counting_consecutive_out:
                 break
 
-        if not has_script_template:
+        if not template_out:
             continue
         if not last_in and not last_out:
             continue
 
-        status = classify_status(last_out, last_in)
+        status = classify_status(template_out, last_msg_from_me, consecutive_out)
 
         rows.append([
             str(msg_date),
