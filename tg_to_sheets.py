@@ -43,7 +43,7 @@ def classify_status(last_out: str, last_in: str) -> str:
     if normalize_text(CONFIRM_TEXT) in t_out:
         return "✅ Согласился (передан на обучение)"
     if normalize_text(ANKETA_TEXT) in t_out:
-        return "📝 Анкета отправлена (ждём данные)"
+        return "📝 Анкета отправлена (ждём данныее)"
     if normalize_text(REFERRAL_TEXT) in t_out:
         return "❌ Холодный (рефералка)"
 
