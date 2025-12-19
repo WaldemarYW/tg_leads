@@ -120,35 +120,6 @@ def get_or_create_worksheet(sh, title: str, rows: int, cols: int):
         return sh.add_worksheet(title=title, rows=rows, cols=cols)
 
 
-def load_status_overrides(ws) -> dict:
-    values = ws.get_all_values()
-    if not values or len(values) < 2:
-        return {}
-    headers = [h.strip().lower() for h in values[0]]
-    data = values[1:]
-
-    def get_col(name: str) -> Optional[int]:
-        try:
-            return headers.index(name)
-        except ValueError:
-            return None
-
-    peer_idx = get_col("peer_id")
-    status_idx = get_col("status")
-    if peer_idx is None or status_idx is None:
-        return {}
-
-    overrides = {}
-    for row in data:
-        if peer_idx >= len(row) or status_idx >= len(row):
-            continue
-        raw_peer = row[peer_idx].strip()
-        if not raw_peer.isdigit():
-            continue
-        status = row[status_idx].strip()
-        if "Погодився" in status:
-            overrides[int(raw_peer)] = status
-    return overrides
 
 
 def normalize_username(username: Optional[str]) -> str:
@@ -275,8 +246,6 @@ async def update_google_sheet(
     headers = ["date", "name", "chat_link_app", "username", "status", "last_in", "last_out", "peer_id"]
     ws = get_or_create_worksheet(sh, worksheet_name, rows=1000, cols=len(headers))
 
-    status_overrides = load_status_overrides(ws)
-
     if replace_existing:
         ws.clear()
         ws.append_row(headers)
@@ -325,6 +294,7 @@ async def update_google_sheet(
         last_in = ""
         last_out = ""
         template_out = ""
+        has_confirm_template = False
         last_msg_from_me: Optional[bool] = None
         consecutive_out = 0
         counting_consecutive_out = True
@@ -345,8 +315,14 @@ async def update_google_sheet(
                 last_in = m.message
             if m.out and not template_out and is_script_template(m.message):
                 template_out = m.message
+            if m.out and not has_confirm_template:
+                if normalize_text(CONFIRM_TEXT) in normalize_text(m.message):
+                    has_confirm_template = True
             if last_in and last_out and template_out and not counting_consecutive_out:
                 break
+
+        if has_confirm_template and not template_out:
+            template_out = CONFIRM_TEXT
 
         if not template_out:
             add_exclusion_entry(
@@ -359,9 +335,10 @@ async def update_google_sheet(
         if not last_in and not last_out:
             continue
 
-        status = classify_status(template_out, last_msg_from_me, consecutive_out)
-        if peer_id in status_overrides:
-            status = status_overrides[peer_id]
+        if has_confirm_template:
+            status = "✅ Погодився"
+        else:
+            status = classify_status(template_out, last_msg_from_me, consecutive_out)
 
         rows.append([
             str(msg_date),
