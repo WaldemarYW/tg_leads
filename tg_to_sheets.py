@@ -17,18 +17,25 @@ from gspread.exceptions import WorksheetNotFound
 
 HELLO_TEXT = "Доброго дня! 🙂 Мене звати Володимир, я HR компанії «Furioza»"
 COMPANY_TEXT = "Наша компанія називається \"Furioza\""
+SCHEDULE_TEXT = (
+    "Компанія пропонує два варіанти змін на вибір — "
+    "Ви обираєте лише одну зміну, по якій працюєте на постійній основі:"
+)
 INFO_TEXT = "Супер, аби зорієнтувати вас детальніше, я можу надіслати вам коротке відео з поясненням ваканс"
 LEARNING_TEXT = "Чи готові ви перейти до навчання"
 ANKETA_TEXT = "Фінальний етап перед навчанням. Заповніть анкету, та відправте мені"
 CONFIRM_TEXT = "Дякую! Передаю вас на навчання"
+REFERRAL_TEXT = "У нашій компанії діє реферальна програма"
 
 SCRIPT_TEMPLATES = [
     HELLO_TEXT,
     COMPANY_TEXT,
+    SCHEDULE_TEXT,
     INFO_TEXT,
     LEARNING_TEXT,
     ANKETA_TEXT,
     CONFIRM_TEXT,
+    REFERRAL_TEXT,
 ]
 
 
@@ -51,6 +58,8 @@ def classify_status(
         return "👋 Привітання"
     if normalize_text(COMPANY_TEXT) in t_out:
         return "🏢 Знайомство з компанією"
+    if normalize_text(SCHEDULE_TEXT) in t_out:
+        return "🕒 Графік"
     if normalize_text(INFO_TEXT) in t_out:
         return "🎥 Більше інформації"
     if normalize_text(LEARNING_TEXT) in t_out:
@@ -59,6 +68,8 @@ def classify_status(
         return "📝 Анкета"
     if normalize_text(CONFIRM_TEXT) in t_out:
         return "✅ Погодився"
+    if normalize_text(REFERRAL_TEXT) in t_out:
+        return "🎁 Реферал"
 
     return "💬 У діалозі"
 
@@ -295,6 +306,7 @@ async def update_google_sheet(
         last_out = ""
         template_out = ""
         has_confirm_template = False
+        has_referral_template = False
         last_msg_from_me: Optional[bool] = None
         consecutive_out = 0
         counting_consecutive_out = True
@@ -318,9 +330,14 @@ async def update_google_sheet(
             if m.out and not has_confirm_template:
                 if normalize_text(CONFIRM_TEXT) in normalize_text(m.message):
                     has_confirm_template = True
+            if m.out and not has_referral_template:
+                if normalize_text(REFERRAL_TEXT) in normalize_text(m.message):
+                    has_referral_template = True
             if last_in and last_out and template_out and not counting_consecutive_out:
                 break
 
+        if has_referral_template and not template_out:
+            template_out = REFERRAL_TEXT
         if has_confirm_template and not template_out:
             template_out = CONFIRM_TEXT
 
@@ -337,6 +354,8 @@ async def update_google_sheet(
 
         if has_confirm_template:
             status = "✅ Погодився"
+        elif has_referral_template:
+            status = "🎁 Реферал"
         else:
             status = classify_status(template_out, last_msg_from_me, consecutive_out)
 
