@@ -42,19 +42,19 @@ def classify_status(
     consecutive_out: int
 ) -> str:
     if last_msg_from_me is False:
-        return "📩 Останнє повідомлення від кандидата"
+        return "📨 Останнє повідомлення від кандидата"
     if consecutive_out >= 3:
-        return "📤 3+ повідомлення від нас без відповіді"
+        return "🔁 3+ повідомлення від нас без відповіді"
 
     t_out = normalize_text(template_out)
     if normalize_text(HELLO_TEXT) in t_out:
-        return "🟩 Привітання"
+        return "👋 Привітання"
     if normalize_text(COMPANY_TEXT) in t_out:
-        return "🟦 Знайомство з компанією"
+        return "🏢 Знайомство з компанією"
     if normalize_text(INFO_TEXT) in t_out:
-        return "🟨 Більше інформації"
+        return "🎥 Більше інформації"
     if normalize_text(LEARNING_TEXT) in t_out:
-        return "🟧 Навчання"
+        return "🎓 Навчання"
     if normalize_text(ANKETA_TEXT) in t_out:
         return "📝 Анкета"
     if normalize_text(CONFIRM_TEXT) in t_out:
