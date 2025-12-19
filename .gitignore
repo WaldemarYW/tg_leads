@@ -1,0 +1,9 @@
+.env
+keys/
+sessions/
+.venv/
+__pycache__/
+*.pyc
+*.session
+*.session-journal
+.update.lock

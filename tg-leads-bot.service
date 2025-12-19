@@ -1,0 +1,14 @@
+[Unit]
+Description=TG Leads Button Bot
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tg_leads
+EnvironmentFile=/opt/tg_leads/.env
+ExecStart=/opt/tg_leads/.venv/bin/python /opt/tg_leads/bot.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

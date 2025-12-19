@@ -1,0 +1,12 @@
+[Unit]
+Description=TG Leads updater (manual)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/tg_leads
+EnvironmentFile=/opt/tg_leads/.env
+ExecStart=/opt/tg_leads/.venv/bin/python /opt/tg_leads/tg_to_sheets.py
+
+[Install]
+WantedBy=multi-user.target
