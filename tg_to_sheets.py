@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import datetime
+from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple, List
 
@@ -12,6 +12,7 @@ from telethon.tl.types import User
 
 import gspread
 from google.oauth2.service_account import Credentials
+from gspread.exceptions import WorksheetNotFound
 
 
 ANKETA_TEXT = "Фінальний етап перед навчанням. Заповніть анкету"
@@ -90,6 +91,13 @@ def ensure_headers(ws, headers: List[str]):
         ws.append_row(headers)
 
 
+def get_or_create_worksheet(sh, title: str, rows: int, cols: int):
+    try:
+        return sh.worksheet(title)
+    except WorksheetNotFound:
+        return sh.add_worksheet(title=title, rows=rows, cols=cols)
+
+
 def acquire_lock(lock_path: str, ttl_sec: int = 300) -> bool:
     now = time.time()
     if os.path.exists(lock_path):
@@ -114,25 +122,34 @@ def release_lock(lock_path: str):
         pass
 
 
-async def update_google_sheet() -> Tuple[int, str]:
+async def update_google_sheet(
+    target_date: Optional[date] = None,
+    worksheet_override: Optional[str] = None,
+    replace_existing: bool = False
+) -> Tuple[int, str]:
     api_id = int(os.environ["API_ID"])
     api_hash = os.environ["API_HASH"]
     session_file = os.environ["SESSION_FILE"]
 
     tz = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Kyiv"))
-    only_today = os.environ.get("ONLY_TODAY", "true").lower() == "true"
-    today = datetime.now(tz).date()
+    env_only_today = os.environ.get("ONLY_TODAY", "true").lower() == "true"
+    filter_today = target_date is not None or env_only_today
+    today = target_date or datetime.now(tz).date()
 
     creds_path = os.environ["GOOGLE_CREDS"]
     sheet_name = os.environ["SHEET_NAME"]
-    worksheet_name = os.environ.get("WORKSHEET", "Leads")
+    worksheet_name = worksheet_override or os.environ.get("WORKSHEET", "Leads")
 
     gc = sheets_client(creds_path)
     sh = gc.open(sheet_name)
-    ws = sh.worksheet(worksheet_name)
-
     headers = ["date", "name", "chat_link_app", "username", "status", "last_in", "last_out", "peer_id"]
-    ensure_headers(ws, headers)
+    ws = get_or_create_worksheet(sh, worksheet_name, rows=1000, cols=len(headers))
+
+    if replace_existing:
+        ws.clear()
+        ws.append_row(headers)
+    else:
+        ensure_headers(ws, headers)
 
     client = TelegramClient(session_file, api_id, api_hash)
     await client.connect()
@@ -156,7 +173,7 @@ async def update_google_sheet() -> Tuple[int, str]:
             continue
 
         msg_date = last_msg.date.astimezone(tz).date()
-        if only_today and msg_date != today:
+        if filter_today and msg_date != today:
             continue
 
         peer_id = dialog.id
