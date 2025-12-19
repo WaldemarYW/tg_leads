@@ -1,6 +1,8 @@
 import os
 import re
-from datetime import datetime
+import asyncio
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Set, Optional, Tuple
 
 from dotenv import load_dotenv
@@ -49,8 +51,15 @@ async def cb_update(call: types.CallbackQuery):
     await call.answer("⏳ Оновлюю…")
 
     try:
-        n, _ = await update_google_sheet()
-        await call.message.reply(f"✅ Таблицю оновлено\nДодано: {n}")
+        tz = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Kyiv"))
+        today = datetime.now(tz).date()
+        sheet_title = today.strftime("%d.%m.%y")
+        n, _ = await update_google_sheet(
+            target_date=today,
+            worksheet_override=sheet_title,
+            replace_existing=True
+        )
+        await call.message.reply(f"✅ Таблицю оновлено\nЛист: {sheet_title}\nДодано: {n}")
     except Exception:
         await call.message.reply("❌ Помилка оновлення")
     finally:
@@ -122,7 +131,7 @@ async def handle_exclude_input(message: types.Message):
     WAITING_FOR_EXCLUDE.discard(message.from_user.id)
     added_by = str(message.from_user.id)
     norm_username = normalize_username(username)
-    ok, _ = add_exclusion_entry(peer_id, norm_username, added_by)
+    ok, _ = add_exclusion_entry(peer_id, norm_username, added_by, source="manual")
     if ok:
         who = f"id={peer_id}" if peer_id is not None else f"@{norm_username}"
         await message.reply(f"✅ Додано у виключення: {who}")
@@ -160,4 +169,29 @@ async def handle_date_input(message: types.Message):
 
 
 if __name__ == "__main__":
-    executor.start_polling(dp, skip_updates=True)
+    async def scheduled_daily_update():
+        tz = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Kyiv"))
+        while True:
+            now = datetime.now(tz)
+            target = now.replace(hour=23, minute=50, second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            await asyncio.sleep((target - now).total_seconds())
+
+            if not acquire_lock(LOCK_PATH, ttl_sec=300):
+                continue
+            try:
+                today = datetime.now(tz).date()
+                sheet_title = today.strftime("%d.%m.%y")
+                await update_google_sheet(
+                    target_date=today,
+                    worksheet_override=sheet_title,
+                    replace_existing=True
+                )
+            finally:
+                release_lock(LOCK_PATH)
+
+    async def on_startup(_):
+        asyncio.create_task(scheduled_daily_update())
+
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)

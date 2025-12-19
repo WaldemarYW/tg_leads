@@ -90,11 +90,23 @@ def sheets_client(creds_path: str):
     return gspread.authorize(creds)
 
 
-def ensure_headers(ws, headers: List[str]):
+def ensure_headers(ws, headers: List[str], strict: bool = True):
     first = ws.row_values(1)
-    if first != headers:
-        ws.clear()
+    if not first:
         ws.append_row(headers)
+        return
+    if strict:
+        if first != headers:
+            ws.clear()
+            ws.append_row(headers)
+        return
+    existing = [h.strip() for h in first]
+    if any(h not in existing for h in headers):
+        new_headers = first[:]
+        for h in headers:
+            if h not in existing:
+                new_headers.append(h)
+        ws.update("1:1", [new_headers])
 
 
 def get_or_create_worksheet(sh, title: str, rows: int, cols: int):
@@ -145,16 +157,21 @@ def load_exclusions(sh, worksheet_name: str) -> Tuple[Set[int], Set[str]]:
     return peer_ids, usernames
 
 
-def add_exclusion_entry(peer_id: Optional[int], username: Optional[str], added_by: str) -> Tuple[bool, str]:
+def add_exclusion_entry(
+    peer_id: Optional[int],
+    username: Optional[str],
+    added_by: str,
+    source: str
+) -> Tuple[bool, str]:
     creds_path = os.environ["GOOGLE_CREDS"]
     sheet_name = os.environ["SHEET_NAME"]
     worksheet_name = os.environ.get("EXCLUDED_WORKSHEET", "Excluded")
 
-    headers = ["peer_id", "username", "added_at", "added_by"]
+    headers = ["peer_id", "username", "added_at", "added_by", "source"]
     gc = sheets_client(creds_path)
     sh = gc.open(sheet_name)
     ws = get_or_create_worksheet(sh, worksheet_name, rows=1000, cols=len(headers))
-    ensure_headers(ws, headers)
+    ensure_headers(ws, headers, strict=False)
 
     peer_ids, usernames = load_exclusions(sh, worksheet_name)
     norm_username = normalize_username(username)
@@ -169,7 +186,8 @@ def add_exclusion_entry(peer_id: Optional[int], username: Optional[str], added_b
         str(peer_id) if peer_id is not None else "",
         ("@" + norm_username) if norm_username else "",
         added_at,
-        added_by
+        added_by,
+        source
     ]
     ws.append_row(row, value_input_option="USER_ENTERED")
     return True, "ok"
@@ -294,6 +312,12 @@ async def update_google_sheet(
                 break
 
         if not template_out:
+            add_exclusion_entry(
+                peer_id=peer_id,
+                username=norm_uname or None,
+                added_by="auto",
+                source="auto"
+            )
             continue
         if not last_in and not last_out:
             continue
