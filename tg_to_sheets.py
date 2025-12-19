@@ -120,6 +120,37 @@ def get_or_create_worksheet(sh, title: str, rows: int, cols: int):
         return sh.add_worksheet(title=title, rows=rows, cols=cols)
 
 
+def load_status_overrides(ws) -> dict:
+    values = ws.get_all_values()
+    if not values or len(values) < 2:
+        return {}
+    headers = [h.strip().lower() for h in values[0]]
+    data = values[1:]
+
+    def get_col(name: str) -> Optional[int]:
+        try:
+            return headers.index(name)
+        except ValueError:
+            return None
+
+    peer_idx = get_col("peer_id")
+    status_idx = get_col("status")
+    if peer_idx is None or status_idx is None:
+        return {}
+
+    overrides = {}
+    for row in data:
+        if peer_idx >= len(row) or status_idx >= len(row):
+            continue
+        raw_peer = row[peer_idx].strip()
+        if not raw_peer.isdigit():
+            continue
+        status = row[status_idx].strip()
+        if "Погодився" in status:
+            overrides[int(raw_peer)] = status
+    return overrides
+
+
 def normalize_username(username: Optional[str]) -> str:
     return (username or "").strip().lstrip("@").lower()
 
@@ -244,6 +275,8 @@ async def update_google_sheet(
     headers = ["date", "name", "chat_link_app", "username", "status", "last_in", "last_out", "peer_id"]
     ws = get_or_create_worksheet(sh, worksheet_name, rows=1000, cols=len(headers))
 
+    status_overrides = load_status_overrides(ws)
+
     if replace_existing:
         ws.clear()
         ws.append_row(headers)
@@ -327,6 +360,8 @@ async def update_google_sheet(
             continue
 
         status = classify_status(template_out, last_msg_from_me, consecutive_out)
+        if peer_id in status_overrides:
+            status = status_overrides[peer_id]
 
         rows.append([
             str(msg_date),
