@@ -2,7 +2,7 @@ import os
 import time
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Set
 
 from dotenv import load_dotenv
 load_dotenv("/opt/tg_leads/.env")
@@ -98,6 +98,77 @@ def get_or_create_worksheet(sh, title: str, rows: int, cols: int):
         return sh.add_worksheet(title=title, rows=rows, cols=cols)
 
 
+def normalize_username(username: Optional[str]) -> str:
+    return (username or "").strip().lstrip("@").lower()
+
+
+def load_exclusions(sh, worksheet_name: str) -> Tuple[Set[int], Set[str]]:
+    try:
+        ws = sh.worksheet(worksheet_name)
+    except WorksheetNotFound:
+        return set(), set()
+
+    values = ws.get_all_values()
+    if not values:
+        return set(), set()
+
+    headers = [h.strip().lower() for h in values[0]]
+    data = values[1:]
+    peer_ids: Set[int] = set()
+    usernames: Set[str] = set()
+
+    def get_col(name: str) -> Optional[int]:
+        try:
+            return headers.index(name)
+        except ValueError:
+            return None
+
+    peer_idx = get_col("peer_id")
+    user_idx = get_col("username")
+
+    for row in data:
+        if peer_idx is not None and peer_idx < len(row):
+            raw = row[peer_idx].strip()
+            if raw.isdigit():
+                peer_ids.add(int(raw))
+        if user_idx is not None and user_idx < len(row):
+            uname = normalize_username(row[user_idx])
+            if uname:
+                usernames.add(uname)
+
+    return peer_ids, usernames
+
+
+def add_exclusion_entry(peer_id: Optional[int], username: Optional[str], added_by: str) -> Tuple[bool, str]:
+    creds_path = os.environ["GOOGLE_CREDS"]
+    sheet_name = os.environ["SHEET_NAME"]
+    worksheet_name = os.environ.get("EXCLUDED_WORKSHEET", "Excluded")
+
+    headers = ["peer_id", "username", "added_at", "added_by"]
+    gc = sheets_client(creds_path)
+    sh = gc.open(sheet_name)
+    ws = get_or_create_worksheet(sh, worksheet_name, rows=1000, cols=len(headers))
+    ensure_headers(ws, headers)
+
+    peer_ids, usernames = load_exclusions(sh, worksheet_name)
+    norm_username = normalize_username(username)
+
+    if peer_id is not None and peer_id in peer_ids:
+        return False, "already"
+    if norm_username and norm_username in usernames:
+        return False, "already"
+
+    added_at = datetime.now(ZoneInfo(os.environ.get("TIMEZONE", "Europe/Kyiv"))).isoformat(timespec="seconds")
+    row = [
+        str(peer_id) if peer_id is not None else "",
+        ("@" + norm_username) if norm_username else "",
+        added_at,
+        added_by
+    ]
+    ws.append_row(row, value_input_option="USER_ENTERED")
+    return True, "ok"
+
+
 def acquire_lock(lock_path: str, ttl_sec: int = 300) -> bool:
     now = time.time()
     if os.path.exists(lock_path):
@@ -151,6 +222,10 @@ async def update_google_sheet(
     else:
         ensure_headers(ws, headers)
 
+    excluded_ids, excluded_usernames = load_exclusions(
+        sh, os.environ.get("EXCLUDED_WORKSHEET", "Excluded")
+    )
+
     client = TelegramClient(session_file, api_id, api_hash)
     await client.connect()
 
@@ -179,6 +254,10 @@ async def update_google_sheet(
         peer_id = dialog.id
         name = getattr(entity, "first_name", "") or "Unknown"
         uname = getattr(entity, "username", "") or ""
+        norm_uname = normalize_username(uname)
+
+        if peer_id in excluded_ids or (norm_uname and norm_uname in excluded_usernames):
+            continue
 
         chat_link = build_chat_link_app(entity, peer_id)
 
@@ -193,6 +272,9 @@ async def update_google_sheet(
                 last_in = m.message
             if last_in and last_out:
                 break
+
+        if not last_in and not last_out:
+            continue
 
         status = classify_status(last_out, last_in)
 

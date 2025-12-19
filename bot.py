@@ -1,6 +1,7 @@
 import os
+import re
 from datetime import datetime
-from typing import Set
+from typing import Set, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -9,7 +10,13 @@ load_dotenv("/opt/tg_leads/.env")
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 
-from tg_to_sheets import update_google_sheet, acquire_lock, release_lock
+from tg_to_sheets import (
+    update_google_sheet,
+    acquire_lock,
+    release_lock,
+    add_exclusion_entry,
+    normalize_username
+)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 LOCK_PATH = os.environ.get("LOCK_PATH", "/opt/tg_leads/.update.lock")
@@ -17,12 +24,14 @@ LOCK_PATH = os.environ.get("LOCK_PATH", "/opt/tg_leads/.update.lock")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 WAITING_FOR_DATE: Set[int] = set()
+WAITING_FOR_EXCLUDE: Set[int] = set()
 
 
 def kb_main():
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("📄 Оновити таблицю", callback_data="update"))
     kb.add(types.InlineKeyboardButton("📅 Історія за датою", callback_data="update_by_date"))
+    kb.add(types.InlineKeyboardButton("🚫 Виключити з таблиці", callback_data="exclude_user"))
     return kb
 
 
@@ -60,9 +69,65 @@ def parse_date(text: str):
 
 @dp.callback_query_handler(lambda c: c.data == "update_by_date")
 async def cb_update_by_date(call: types.CallbackQuery):
+    WAITING_FOR_EXCLUDE.discard(call.from_user.id)
     WAITING_FOR_DATE.add(call.from_user.id)
     await call.answer()
     await call.message.reply("Введіть дату у форматі ДД.ММ.РР або ДД.ММ.РРРР (наприклад, 19.08.25)")
+
+
+def extract_exclusion_target(message: types.Message) -> Tuple[Optional[int], Optional[str]]:
+    if message.forward_from:
+        return message.forward_from.id, message.forward_from.username
+
+    text = (message.text or "").strip()
+    if not text:
+        return None, None
+
+    tg_id_match = re.search(r"tg://user\\?id=(\\d+)", text)
+    if tg_id_match:
+        return int(tg_id_match.group(1)), None
+
+    tme_match = re.search(r"t\\.me/([A-Za-z0-9_]{5,})", text)
+    if tme_match:
+        return None, tme_match.group(1)
+
+    at_match = re.search(r"@([A-Za-z0-9_]{5,})", text)
+    if at_match:
+        return None, at_match.group(1)
+
+    id_match = re.search(r"\\b\\d{5,}\\b", text)
+    if id_match:
+        return int(id_match.group(0)), None
+
+    return None, None
+
+
+@dp.callback_query_handler(lambda c: c.data == "exclude_user")
+async def cb_exclude_user(call: types.CallbackQuery):
+    WAITING_FOR_DATE.discard(call.from_user.id)
+    WAITING_FOR_EXCLUDE.add(call.from_user.id)
+    await call.answer()
+    await call.message.reply(
+        "Надішліть username, user id, посилання t.me, tg://user?id або переслане повідомлення від користувача"
+    )
+
+
+@dp.message_handler(lambda m: m.from_user.id in WAITING_FOR_EXCLUDE)
+async def handle_exclude_input(message: types.Message):
+    peer_id, username = extract_exclusion_target(message)
+    if peer_id is None and not username:
+        await message.reply("Не зміг розпізнати користувача. Надішліть @username, id або переслане повідомлення.")
+        return
+
+    WAITING_FOR_EXCLUDE.discard(message.from_user.id)
+    added_by = str(message.from_user.id)
+    norm_username = normalize_username(username)
+    ok, _ = add_exclusion_entry(peer_id, norm_username, added_by)
+    if ok:
+        who = f"id={peer_id}" if peer_id is not None else f"@{norm_username}"
+        await message.reply(f"✅ Додано у виключення: {who}")
+    else:
+        await message.reply("ℹ️ Користувач вже у списку виключень")
 
 
 @dp.message_handler(lambda m: m.from_user.id in WAITING_FOR_DATE)
