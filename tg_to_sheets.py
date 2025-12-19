@@ -178,13 +178,15 @@ def add_exclusion_entry(
     peer_id: Optional[int],
     username: Optional[str],
     added_by: str,
-    source: str
+    source: str,
+    name: Optional[str] = None,
+    chat_link_app: Optional[str] = None
 ) -> Tuple[bool, str]:
     creds_path = os.environ["GOOGLE_CREDS"]
     sheet_name = os.environ["SHEET_NAME"]
     worksheet_name = os.environ.get("EXCLUDED_WORKSHEET", "Excluded")
 
-    headers = ["peer_id", "username", "added_at", "added_by", "source"]
+    headers = ["peer_id", "username", "name", "chat_link_app", "added_at", "added_by", "source"]
     gc = sheets_client(creds_path)
     sh = gc.open(sheet_name)
     ws = get_or_create_worksheet(sh, worksheet_name, rows=1000, cols=len(headers))
@@ -202,6 +204,8 @@ def add_exclusion_entry(
     row = [
         str(peer_id) if peer_id is not None else "",
         ("@" + norm_username) if norm_username else "",
+        name or "",
+        chat_link_app or "",
         added_at,
         added_by,
         source
@@ -346,7 +350,9 @@ async def update_google_sheet(
                 peer_id=peer_id,
                 username=norm_uname or None,
                 added_by="auto",
-                source="auto"
+                source="auto",
+                name=name,
+                chat_link_app=chat_link
             )
             continue
         if not last_in and not last_out:
