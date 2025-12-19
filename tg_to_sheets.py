@@ -27,6 +27,13 @@ WAIT_TRIGGERS = [
     "Можу надіслати вам коротке відео",
 ]
 
+SCRIPT_TEMPLATES = [
+    ANKETA_TEXT,
+    REFERRAL_TEXT,
+    CONFIRM_TEXT,
+    HELLO_TEXT,
+    *WAIT_TRIGGERS,
+]
 NEUTRAL_IN = {
     "ок", "ok", "добре", "хорошо", "зрозуміло",
     "я зрозуміла", "я зрозумів", "понятно", "ясно", ""
@@ -56,6 +63,11 @@ def classify_status(last_out: str, last_in: str) -> str:
         return "🆕 Новый"
 
     return "💬 В диалоге"
+
+
+def is_script_template(message_text: str) -> bool:
+    text = normalize_text(message_text)
+    return any(normalize_text(t) in text for t in SCRIPT_TEMPLATES)
 
 
 def build_chat_link_app(entity, peer_id: int) -> str:
@@ -263,16 +275,21 @@ async def update_google_sheet(
 
         last_in = ""
         last_out = ""
+        has_script_template = False
         async for m in client.iter_messages(entity, limit=40):
             if not m.message:
                 continue
             if m.out and not last_out:
                 last_out = m.message
+            if m.out and not has_script_template and is_script_template(m.message):
+                has_script_template = True
             if not m.out and not last_in:
                 last_in = m.message
             if last_in and last_out:
                 break
 
+        if not has_script_template:
+            continue
         if not last_in and not last_out:
             continue
 
