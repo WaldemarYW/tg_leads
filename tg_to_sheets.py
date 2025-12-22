@@ -292,6 +292,51 @@ def add_exclusion_entry(
     return True, "ok"
 
 
+def add_exclusion_entries_bulk(entries: List[Tuple[Optional[int], Optional[str], str, str, Optional[str], Optional[str]]]) -> int:
+    if not entries:
+        return 0
+
+    creds_path = os.environ["GOOGLE_CREDS"]
+    sheet_name = os.environ["SHEET_NAME"]
+    worksheet_name = os.environ.get("EXCLUDED_WORKSHEET", "Excluded")
+
+    headers = ["peer_id", "username", "name", "chat_link_app", "added_at", "added_by", "source"]
+    gc = sheets_client(creds_path)
+    sh = gc.open(sheet_name)
+    ws = get_or_create_worksheet(sh, worksheet_name, rows=1000, cols=len(headers))
+    ensure_headers(ws, headers, strict=False)
+
+    peer_ids, usernames = load_exclusions(sh, worksheet_name)
+    tz = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Kyiv"))
+    added_at = datetime.now(tz).isoformat(timespec="seconds")
+    rows = []
+
+    for peer_id, username, added_by, source, name, chat_link_app in entries:
+        norm_username = normalize_username(username)
+        if peer_id is not None and peer_id in peer_ids:
+            continue
+        if norm_username and norm_username in usernames:
+            continue
+
+        rows.append([
+            str(peer_id) if peer_id is not None else "",
+            ("@" + norm_username) if norm_username else "",
+            name or "",
+            chat_link_app or "",
+            added_at,
+            added_by,
+            source,
+        ])
+        if peer_id is not None:
+            peer_ids.add(peer_id)
+        if norm_username:
+            usernames.add(norm_username)
+
+    if rows:
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
+    return len(rows)
+
+
 def acquire_lock(lock_path: str, ttl_sec: int = 300) -> bool:
     now = time.time()
     if os.path.exists(lock_path):
@@ -362,6 +407,7 @@ async def update_google_sheet(
         return 0, "❌ Сессия не авторизована"
 
     rows = []
+    exclusions = []
 
     async for dialog in client.iter_dialogs():
         if not dialog.is_user:
@@ -429,6 +475,9 @@ async def update_google_sheet(
                 break
 
         if not template_out:
+            exclusions.append(
+                (peer_id, norm_uname or None, "auto", "auto", name, chat_link)
+            )
             continue
         if not last_in and not last_out:
             continue
@@ -453,6 +502,9 @@ async def update_google_sheet(
 
     if rows:
         ws.append_rows(rows, value_input_option="USER_ENTERED")
+
+    if exclusions:
+        add_exclusion_entries_bulk(exclusions)
 
     await client.disconnect()
     release_lock(session_lock)
