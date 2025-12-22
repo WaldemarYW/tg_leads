@@ -85,8 +85,8 @@ STOP_STATE_TTL_HOURS = int(os.environ.get("AUTO_REPLY_STOP_TTL_HOURS", "48"))
 STATUS_RULES_WORKSHEET = os.environ.get("STATUS_RULES_WORKSHEET", "StatusRules")
 STATUS_RULES_CACHE_PATH = os.environ.get("STATUS_RULES_CACHE_PATH", "/opt/tg_leads/.auto_reply.status_rules.json")
 STATUS_RULES_CACHE_TTL_HOURS = int(os.environ.get("STATUS_RULES_CACHE_TTL_HOURS", "48"))
-CONFIRM_STATUS = "✅ Погодився Дякую! 🙌 Передаю вас на етап навчання"
-REFERRAL_STATUS = "🎁 Реферал Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."
+CONFIRM_STATUS = "✅ Погодився"
+REFERRAL_STATUS = "🎁 Реферал"
 IMMUTABLE_STATUSES = {CONFIRM_STATUS, REFERRAL_STATUS}
 
 STEP_CONTACT = "contact"
@@ -715,14 +715,6 @@ async def main():
                 return
 
             if last_step == STEP_TRAINING_QUESTION:
-                sheet.upsert(
-                    tz=tz,
-                    peer_id=sender.id,
-                    name=name,
-                    username=username,
-                    chat_link=chat_link,
-                    status=CONFIRM_STATUS,
-                )
                 await send_and_update(client, sheet, tz, sender, FORM_TEXT, status_for_text(FORM_TEXT, status_rules))
                 last_reply_at[peer_id] = time.time()
                 return

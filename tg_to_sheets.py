@@ -108,7 +108,7 @@ DEFAULT_STATUS_RULES = [
     (FORMAT_QUESTION_TEXT, "🎥 Більше інформації"),
     (VIDEO_FOLLOWUP_TEXT, "🎥 Відео"),
     (TRAINING_QUESTION_TEXT, "🎓 Навчання"),
-    (CONFIRM_TEXT, "✅ Погодився Дякую! 🙌 Передаю вас на етап навчання"),
+    (CONFIRM_TEXT, "✅ Погодився"),
     (REFERRAL_TEXT, "🎁 Реферал Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."),
 ]
 
@@ -157,9 +157,9 @@ def classify_status(
 ) -> str:
     t_out = normalize_text(template_out)
     if normalize_text(REFERRAL_TEXT) in t_out:
-        return "🎁 Реферал Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."
+        return "🎁 Реферал"
     if normalize_text(CONFIRM_TEXT) in t_out:
-        return "✅ Погодився Дякую! 🙌 Передаю вас на етап навчання"
+        return "✅ Погодився"
 
     if last_msg_from_me is False:
         if "?" in (last_in_text or ""):
@@ -503,7 +503,6 @@ async def update_google_sheet(
         template_out = ""
         last_msg_from_me: Optional[bool] = None
         has_referral_template = False
-        has_confirm_status = False
         saw_incoming_no_question = False
         consecutive_out = 0
         counting_consecutive_out = True
@@ -531,9 +530,6 @@ async def update_google_sheet(
             if m.out and not has_referral_template:
                 if normalize_text(REFERRAL_TEXT) in normalize_text(m.message):
                     has_referral_template = True
-            if m.out and not has_confirm_status:
-                if normalize_text(TRAINING_QUESTION_TEXT) in normalize_text(m.message) and saw_incoming_no_question:
-                    has_confirm_status = True
             if last_in and last_out and template_out and not counting_consecutive_out:
                 break
 
@@ -546,9 +542,7 @@ async def update_google_sheet(
             continue
 
         if has_referral_template:
-            status = "🎁 Реферал Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."
-        elif has_confirm_status:
-            status = "✅ Погодився Дякую! 🙌 Передаю вас на етап навчання"
+            status = "🎁 Реферал"
         else:
             status = classify_status(
                 template_out,
