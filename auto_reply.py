@@ -20,6 +20,8 @@ from tg_to_sheets import (
     normalize_text,
     is_script_template,
     classify_status,
+    acquire_lock,
+    release_lock,
     CONTACT_TEXT,
     INTEREST_TEXT,
     DATING_TEXT,
@@ -50,6 +52,9 @@ TIMEZONE = os.environ.get("TIMEZONE", "Europe/Kyiv")
 LEADS_GROUP_TITLE = os.environ.get("LEADS_GROUP_TITLE", "DATING AGENCY | Referral")
 VIDEO_GROUP_LINK = os.environ.get("VIDEO_GROUP_LINK")
 VIDEO_GROUP_TITLE = os.environ.get("VIDEO_GROUP_TITLE", "Промо відео")
+AUTO_REPLY_LOCK = os.environ.get("AUTO_REPLY_LOCK", "/opt/tg_leads/.auto_reply.lock")
+AUTO_REPLY_LOCK_TTL = int(os.environ.get("AUTO_REPLY_LOCK_TTL", "300"))
+REPLY_DEBOUNCE_SEC = float(os.environ.get("REPLY_DEBOUNCE_SEC", "3"))
 
 HEADERS = ["date", "name", "chat_link_app", "username", "status", "last_in", "last_out", "peer_id"]
 
@@ -93,18 +98,18 @@ TEMPLATE_TO_STEP = {
 
 STEP_STATUS = {
     STEP_CONTACT: "👋 Привітання",
-    STEP_INTEREST: "🏢 Знайомство з компанією",
-    STEP_DATING: "🎥 Більше інформації",
-    STEP_DUTIES: "🎥 Більше інформації",
+    STEP_INTEREST: None,
+    STEP_DATING: None,
+    STEP_DUTIES: None,
     STEP_CLARIFY: "🏢 Знайомство з компанією",
-    STEP_SHIFTS: "🕒 Графік",
+    STEP_SHIFTS: None,
     STEP_SHIFT_QUESTION: "🕒 Графік",
-    STEP_FORMAT: "🎥 Більше інформації",
+    STEP_FORMAT: None,
     STEP_FORMAT_QUESTION: "🎥 Більше інформації",
     STEP_VIDEO_FOLLOWUP: "🎥 Відео",
-    STEP_TRAINING: "🎓 Навчання",
+    STEP_TRAINING: None,
     STEP_TRAINING_QUESTION: "🎓 Навчання",
-    STEP_FORM: "📝 Анкета",
+    STEP_FORM: None,
 }
 
 
@@ -280,6 +285,8 @@ async def main():
     tz = ZoneInfo(TIMEZONE)
     sheet = SheetWriter()
     client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
+    processing_peers = set()
+    last_reply_at = {}
     stop_event = asyncio.Event()
 
     def handle_stop():
@@ -291,6 +298,10 @@ async def main():
             loop.add_signal_handler(sig, handle_stop)
         except NotImplementedError:
             pass
+
+    if not acquire_lock(AUTO_REPLY_LOCK, ttl_sec=AUTO_REPLY_LOCK_TTL):
+        print("⛔ Автовідповідач вже запущено (lock)")
+        return
 
     await client.start()
 
@@ -355,77 +366,105 @@ async def main():
         sender = await event.get_sender()
         if not isinstance(sender, User) or sender.bot:
             return
-
-        text = event.raw_text or ""
-        name = getattr(sender, "first_name", "") or "Unknown"
-        username = getattr(sender, "username", "") or ""
-        chat_link = build_chat_link_app(sender, sender.id)
-        sheet.upsert(
-            tz=tz,
-            peer_id=sender.id,
-            name=name,
-            username=username,
-            chat_link=chat_link,
-            last_in=text[:200],
-        )
-
-        if message_has_question(text):
+        peer_id = sender.id
+        if peer_id in processing_peers:
             return
-
-        last_step = await get_last_outgoing_step(client, sender)
-        if last_step == STEP_CONTACT:
-            await send_and_update(client, sheet, tz, sender, INTEREST_TEXT, STEP_STATUS[STEP_INTEREST])
-            await send_and_update(client, sheet, tz, sender, DATING_TEXT, STEP_STATUS[STEP_DATING], delay_after=5)
-            await send_and_update(client, sheet, tz, sender, DUTIES_TEXT, STEP_STATUS[STEP_DUTIES], delay_after=5)
-            await send_and_update(client, sheet, tz, sender, CLARIFY_TEXT, STEP_STATUS[STEP_CLARIFY])
+        now_ts = time.time()
+        last_ts = last_reply_at.get(peer_id)
+        if last_ts and now_ts - last_ts < REPLY_DEBOUNCE_SEC:
             return
+        processing_peers.add(peer_id)
 
-        if last_step == STEP_CLARIFY:
-            await send_and_update(client, sheet, tz, sender, SHIFTS_TEXT, STEP_STATUS[STEP_SHIFTS], delay_after=5)
-            await send_and_update(
-                client, sheet, tz, sender, SHIFT_QUESTION_TEXT, STEP_STATUS[STEP_SHIFT_QUESTION]
-            )
-            return
-
-        if last_step == STEP_SHIFT_QUESTION:
-            await send_and_update(client, sheet, tz, sender, FORMAT_TEXT, STEP_STATUS[STEP_FORMAT], delay_after=5)
-            await send_and_update(
-                client, sheet, tz, sender, FORMAT_QUESTION_TEXT, STEP_STATUS[STEP_FORMAT_QUESTION]
-            )
-            return
-
-        if last_step == STEP_FORMAT_QUESTION:
-            if wants_video(text) and video_message:
-                await client.forward_messages(sender, video_message, from_peer=video_group, as_copy=True)
-                await send_and_update(
-                    client, sheet, tz, sender, VIDEO_FOLLOWUP_TEXT, STEP_STATUS[STEP_VIDEO_FOLLOWUP]
-                )
-                return
-
-            await send_and_update(client, sheet, tz, sender, TRAINING_TEXT, STEP_STATUS[STEP_TRAINING], delay_after=5)
-            await send_and_update(
-                client, sheet, tz, sender, TRAINING_QUESTION_TEXT, STEP_STATUS[STEP_TRAINING_QUESTION]
-            )
-            return
-
-        if last_step == STEP_VIDEO_FOLLOWUP:
-            await send_and_update(client, sheet, tz, sender, TRAINING_TEXT, STEP_STATUS[STEP_TRAINING], delay_after=5)
-            await send_and_update(
-                client, sheet, tz, sender, TRAINING_QUESTION_TEXT, STEP_STATUS[STEP_TRAINING_QUESTION]
-            )
-            return
-
-        if last_step == STEP_TRAINING_QUESTION:
+        try:
+            text = event.raw_text or ""
+            name = getattr(sender, "first_name", "") or "Unknown"
+            username = getattr(sender, "username", "") or ""
+            chat_link = build_chat_link_app(sender, sender.id)
             sheet.upsert(
                 tz=tz,
                 peer_id=sender.id,
                 name=name,
                 username=username,
                 chat_link=chat_link,
-                status=CONFIRM_STATUS,
+                last_in=text[:200],
             )
-            await send_and_update(client, sheet, tz, sender, FORM_TEXT, STEP_STATUS[STEP_FORM])
-            return
+
+            if message_has_question(text):
+                return
+
+            last_step = await get_last_outgoing_step(client, sender)
+            if last_step == STEP_CONTACT:
+                await send_and_update(client, sheet, tz, sender, INTEREST_TEXT, STEP_STATUS[STEP_INTEREST])
+                await send_and_update(client, sheet, tz, sender, DATING_TEXT, STEP_STATUS[STEP_DATING], delay_after=5)
+                await send_and_update(client, sheet, tz, sender, DUTIES_TEXT, STEP_STATUS[STEP_DUTIES], delay_after=5)
+                await send_and_update(client, sheet, tz, sender, CLARIFY_TEXT, STEP_STATUS[STEP_CLARIFY])
+                last_reply_at[peer_id] = time.time()
+                return
+
+            if last_step == STEP_CLARIFY:
+                await send_and_update(client, sheet, tz, sender, SHIFTS_TEXT, STEP_STATUS[STEP_SHIFTS], delay_after=5)
+                await send_and_update(
+                    client, sheet, tz, sender, SHIFT_QUESTION_TEXT, STEP_STATUS[STEP_SHIFT_QUESTION]
+                )
+                last_reply_at[peer_id] = time.time()
+                return
+
+            if last_step == STEP_SHIFT_QUESTION:
+                await send_and_update(client, sheet, tz, sender, FORMAT_TEXT, STEP_STATUS[STEP_FORMAT], delay_after=5)
+                await send_and_update(
+                    client, sheet, tz, sender, FORMAT_QUESTION_TEXT, STEP_STATUS[STEP_FORMAT_QUESTION]
+                )
+                last_reply_at[peer_id] = time.time()
+                return
+
+            if last_step == STEP_FORMAT_QUESTION:
+                if wants_video(text) and video_message:
+                    try:
+                        if video_message.media:
+                            await client.send_file(
+                                sender,
+                                video_message.media,
+                                caption=video_message.message or "",
+                            )
+                        elif video_message.message:
+                            await client.send_message(sender, video_message.message)
+                    except Exception:
+                        print("⚠️ Не вдалося надіслати відео")
+                    await send_and_update(
+                        client, sheet, tz, sender, VIDEO_FOLLOWUP_TEXT, STEP_STATUS[STEP_VIDEO_FOLLOWUP]
+                    )
+                    last_reply_at[peer_id] = time.time()
+                    return
+
+                await send_and_update(client, sheet, tz, sender, TRAINING_TEXT, STEP_STATUS[STEP_TRAINING], delay_after=5)
+                await send_and_update(
+                    client, sheet, tz, sender, TRAINING_QUESTION_TEXT, STEP_STATUS[STEP_TRAINING_QUESTION]
+                )
+                last_reply_at[peer_id] = time.time()
+                return
+
+            if last_step == STEP_VIDEO_FOLLOWUP:
+                await send_and_update(client, sheet, tz, sender, TRAINING_TEXT, STEP_STATUS[STEP_TRAINING], delay_after=5)
+                await send_and_update(
+                    client, sheet, tz, sender, TRAINING_QUESTION_TEXT, STEP_STATUS[STEP_TRAINING_QUESTION]
+                )
+                last_reply_at[peer_id] = time.time()
+                return
+
+            if last_step == STEP_TRAINING_QUESTION:
+                sheet.upsert(
+                    tz=tz,
+                    peer_id=sender.id,
+                    name=name,
+                    username=username,
+                    chat_link=chat_link,
+                    status=CONFIRM_STATUS,
+                )
+                await send_and_update(client, sheet, tz, sender, FORM_TEXT, STEP_STATUS[STEP_FORM])
+                last_reply_at[peer_id] = time.time()
+                return
+        finally:
+            processing_peers.discard(peer_id)
 
     print("🤖 Автовідповідач запущено")
     try:
@@ -433,6 +472,7 @@ async def main():
             await asyncio.sleep(0.5)
     finally:
         await client.disconnect()
+        release_lock(AUTO_REPLY_LOCK)
 
 
 if __name__ == "__main__":

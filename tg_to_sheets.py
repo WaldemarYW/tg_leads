@@ -128,9 +128,9 @@ def classify_status(
 ) -> str:
     t_out = normalize_text(template_out)
     if normalize_text(CONFIRM_TEXT) in t_out:
-        return "✅ Погодився Дякую! 🙌 Передаю вас на етап навчання"
+        return "✅ Погодився"
     if normalize_text(REFERRAL_TEXT) in t_out:
-        return "🎁 Реферал Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."
+        return "🎁 Реферал"
     if last_msg_from_me is False:
         return "📨 Останнє повідомлення від кандидата"
     if consecutive_out >= 3:
@@ -138,32 +138,18 @@ def classify_status(
 
     if normalize_text(CONTACT_TEXT) in t_out:
         return "👋 Привітання"
-    if normalize_text(INTEREST_TEXT) in t_out:
-        return "🏢 Знайомство з компанією"
-    if normalize_text(DATING_TEXT) in t_out:
-        return "🎥 Більше інформації"
-    if normalize_text(DUTIES_TEXT) in t_out:
-        return "🎥 Більше інформації"
     if normalize_text(CLARIFY_TEXT) in t_out:
         return "🏢 Знайомство з компанією"
-    if normalize_text(SHIFTS_TEXT) in t_out:
-        return "🕒 Графік"
     if normalize_text(SHIFT_QUESTION_TEXT) in t_out:
         return "🕒 Графік"
-    if normalize_text(FORMAT_TEXT) in t_out:
-        return "🎥 Більше інформації"
     if normalize_text(FORMAT_QUESTION_TEXT) in t_out:
         return "🎥 Більше інформації"
     if normalize_text(VIDEO_FOLLOWUP_TEXT) in t_out:
         return "🎥 Відео"
-    if normalize_text(TRAINING_TEXT) in t_out:
-        return "🎓 Навчання"
     if normalize_text(TRAINING_QUESTION_TEXT) in t_out:
         return "🎓 Навчання"
-    if normalize_text(FORM_TEXT) in t_out:
-        return "📝 Анкета"
 
-    return "💬 У діалозі"
+    return ""
 
 
 def is_script_template(message_text: str) -> bool:
@@ -451,9 +437,9 @@ async def update_google_sheet(
             continue
 
         if has_referral_template:
-            status = "🎁 Реферал Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."
+            status = "🎁 Реферал"
         elif has_confirm_status:
-            status = "✅ Погодився Дякую! 🙌 Передаю вас на етап навчання"
+            status = "✅ Погодився"
         else:
             status = classify_status(template_out, last_msg_from_me, consecutive_out)
 
