@@ -95,6 +95,8 @@ FORM_TEXT = (
     "та внутрішньої перевірки компанії.\n"
     "Інформація не передається третім особам."
 )
+CONFIRM_TEXT = "Дякую! 🙌\nПередаю вас на етап навчання"
+REFERRAL_TEXT = "Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."
 
 SCRIPT_TEMPLATES = [
     CONTACT_TEXT,
@@ -110,6 +112,8 @@ SCRIPT_TEMPLATES = [
     TRAINING_TEXT,
     TRAINING_QUESTION_TEXT,
     FORM_TEXT,
+    CONFIRM_TEXT,
+    REFERRAL_TEXT,
 ]
 
 
@@ -122,30 +126,34 @@ def classify_status(
     last_msg_from_me: Optional[bool],
     consecutive_out: int
 ) -> str:
+    t_out = normalize_text(template_out)
+    if normalize_text(CONFIRM_TEXT) in t_out:
+        return "✅ Погодився Дякую! 🙌 Передаю вас на етап навчання"
+    if normalize_text(REFERRAL_TEXT) in t_out:
+        return "🎁 Реферал Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."
     if last_msg_from_me is False:
         return "📨 Останнє повідомлення від кандидата"
     if consecutive_out >= 3:
         return "🔁 3+ повідомлення від нас без відповіді"
 
-    t_out = normalize_text(template_out)
     if normalize_text(CONTACT_TEXT) in t_out:
         return "👋 Привітання"
     if normalize_text(INTEREST_TEXT) in t_out:
-        return "🙌 Зацікавленість"
+        return "🏢 Знайомство з компанією"
     if normalize_text(DATING_TEXT) in t_out:
-        return "💬 Що таке дейтинг"
+        return "🎥 Більше інформації"
     if normalize_text(DUTIES_TEXT) in t_out:
-        return "🧾 Обов'язки"
+        return "🎥 Більше інформації"
     if normalize_text(CLARIFY_TEXT) in t_out:
-        return "🧾 Обов'язки"
+        return "🏢 Знайомство з компанією"
     if normalize_text(SHIFTS_TEXT) in t_out:
-        return "🕒 Зміни"
+        return "🕒 Графік"
     if normalize_text(SHIFT_QUESTION_TEXT) in t_out:
-        return "🕒 Зміни"
+        return "🕒 Графік"
     if normalize_text(FORMAT_TEXT) in t_out:
-        return "🎥 Формат ознайомлення"
+        return "🎥 Більше інформації"
     if normalize_text(FORMAT_QUESTION_TEXT) in t_out:
-        return "🎥 Формат ознайомлення"
+        return "🎥 Більше інформації"
     if normalize_text(VIDEO_FOLLOWUP_TEXT) in t_out:
         return "🎥 Відео"
     if normalize_text(TRAINING_TEXT) in t_out:
@@ -394,6 +402,9 @@ async def update_google_sheet(
         last_out = ""
         template_out = ""
         last_msg_from_me: Optional[bool] = None
+        has_referral_template = False
+        has_confirm_status = False
+        saw_incoming_no_question = False
         consecutive_out = 0
         counting_consecutive_out = True
         async for m in client.iter_messages(entity, limit=40):
@@ -407,12 +418,22 @@ async def update_google_sheet(
                 else:
                     counting_consecutive_out = False
 
+            if not m.out and not saw_incoming_no_question:
+                if "?" not in m.message:
+                    saw_incoming_no_question = True
+
             if m.out and not last_out:
                 last_out = m.message
             if not m.out and not last_in:
                 last_in = m.message
             if m.out and not template_out and is_script_template(m.message):
                 template_out = m.message
+            if m.out and not has_referral_template:
+                if normalize_text(REFERRAL_TEXT) in normalize_text(m.message):
+                    has_referral_template = True
+            if m.out and not has_confirm_status:
+                if normalize_text(TRAINING_QUESTION_TEXT) in normalize_text(m.message) and saw_incoming_no_question:
+                    has_confirm_status = True
             if last_in and last_out and template_out and not counting_consecutive_out:
                 break
 
@@ -429,7 +450,12 @@ async def update_google_sheet(
         if not last_in and not last_out:
             continue
 
-        status = classify_status(template_out, last_msg_from_me, consecutive_out)
+        if has_referral_template:
+            status = "🎁 Реферал Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."
+        elif has_confirm_status:
+            status = "✅ Погодився Дякую! 🙌 Передаю вас на етап навчання"
+        else:
+            status = classify_status(template_out, last_msg_from_me, consecutive_out)
 
         rows.append([
             str(msg_date),

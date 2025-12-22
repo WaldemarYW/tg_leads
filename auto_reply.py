@@ -33,6 +33,8 @@ from tg_to_sheets import (
     TRAINING_TEXT,
     TRAINING_QUESTION_TEXT,
     FORM_TEXT,
+    CONFIRM_TEXT,
+    REFERRAL_TEXT,
 )
 
 load_dotenv("/opt/tg_leads/.env")
@@ -46,7 +48,8 @@ GOOGLE_CREDS = os.environ["GOOGLE_CREDS"]
 TIMEZONE = os.environ.get("TIMEZONE", "Europe/Kyiv")
 
 LEADS_GROUP_TITLE = os.environ.get("LEADS_GROUP_TITLE", "DATING AGENCY | Referral")
-VIDEO_GROUP_LINK = os.environ.get("VIDEO_GROUP_LINK", "https://t.me/+XhlGwrVopxwxOTgy")
+VIDEO_GROUP_LINK = os.environ.get("VIDEO_GROUP_LINK")
+VIDEO_GROUP_TITLE = os.environ.get("VIDEO_GROUP_TITLE", "Промо відео")
 
 HEADERS = ["date", "name", "chat_link_app", "username", "status", "last_in", "last_out", "peer_id"]
 
@@ -54,6 +57,9 @@ USERNAME_RE = re.compile(r"(?:@|t\.me/)([A-Za-z0-9_]{5,})")
 PHONE_RE = re.compile(r"\+?\d[\d\s\-\(\)]{9,}\d")
 
 VIDEO_WORDS = ("відео", "видео")
+CONFIRM_STATUS = "✅ Погодився Дякую! 🙌 Передаю вас на етап навчання"
+REFERRAL_STATUS = "🎁 Реферал Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."
+IMMUTABLE_STATUSES = {CONFIRM_STATUS, REFERRAL_STATUS}
 
 STEP_CONTACT = "contact"
 STEP_INTEREST = "interest"
@@ -87,14 +93,14 @@ TEMPLATE_TO_STEP = {
 
 STEP_STATUS = {
     STEP_CONTACT: "👋 Привітання",
-    STEP_INTEREST: "🙌 Зацікавленість",
-    STEP_DATING: "💬 Що таке дейтинг",
-    STEP_DUTIES: "🧾 Обов'язки",
-    STEP_CLARIFY: "🧾 Обов'язки",
-    STEP_SHIFTS: "🕒 Зміни",
-    STEP_SHIFT_QUESTION: "🕒 Зміни",
-    STEP_FORMAT: "🎥 Формат ознайомлення",
-    STEP_FORMAT_QUESTION: "🎥 Формат ознайомлення",
+    STEP_INTEREST: "🏢 Знайомство з компанією",
+    STEP_DATING: "🎥 Більше інформації",
+    STEP_DUTIES: "🎥 Більше інформації",
+    STEP_CLARIFY: "🏢 Знайомство з компанією",
+    STEP_SHIFTS: "🕒 Графік",
+    STEP_SHIFT_QUESTION: "🕒 Графік",
+    STEP_FORMAT: "🎥 Більше інформації",
+    STEP_FORMAT_QUESTION: "🎥 Більше інформації",
     STEP_VIDEO_FOLLOWUP: "🎥 Відео",
     STEP_TRAINING: "🎓 Навчання",
     STEP_TRAINING_QUESTION: "🎓 Навчання",
@@ -168,11 +174,15 @@ class SheetWriter:
         ws = self.get_ws(tz)
         row_idx, existing = self._find_row(ws, peer_id)
         existing = existing or [""] * len(HEADERS)
+        existing_status = existing[4] if len(existing) > 4 else ""
 
         def take(value: Optional[str], idx: int) -> str:
             if value is not None:
                 return value
             return existing[idx] if idx < len(existing) else ""
+
+        if existing_status in IMMUTABLE_STATUSES:
+            status = existing_status
 
         row = [
             str(datetime.now(tz).date()),
@@ -186,7 +196,7 @@ class SheetWriter:
         ]
 
         if row_idx:
-            ws.update(f"A{row_idx}:H{row_idx}", [row])
+            ws.update(f"A{row_idx}:H{row_idx}", [row], value_input_option="USER_ENTERED")
         else:
             ws.append_row(row, value_input_option="USER_ENTERED")
 
@@ -241,7 +251,7 @@ async def send_and_update(
     tz: ZoneInfo,
     entity: User,
     text: str,
-    status: str,
+    status: Optional[str],
     delay_after: Optional[float] = None,
 ):
     await client.send_message(entity, text)
@@ -290,12 +300,23 @@ async def main():
         await client.disconnect()
         return
 
-    video_group = await client.get_entity(VIDEO_GROUP_LINK)
-    video_message = None
-    async for m in client.iter_messages(video_group, limit=50):
-        if m.video or (m.media and getattr(m.media, "document", None)):
-            video_message = m
-            break
+    video_group = None
+    if VIDEO_GROUP_LINK:
+        try:
+            video_group = await client.get_entity(VIDEO_GROUP_LINK)
+        except Exception:
+            video_group = None
+    if not video_group and VIDEO_GROUP_TITLE:
+        video_group = await find_group_by_title(client, VIDEO_GROUP_TITLE)
+    if not video_group:
+        print("⚠️ Не знайшов групу з відео")
+        video_message = None
+    else:
+        video_message = None
+        async for m in client.iter_messages(video_group, limit=50):
+            if m.video or (m.media and getattr(m.media, "document", None)):
+                video_message = m
+                break
     if not video_message:
         print("⚠️ Не знайшов відео у групі для пересилання")
 
@@ -395,6 +416,14 @@ async def main():
             return
 
         if last_step == STEP_TRAINING_QUESTION:
+            sheet.upsert(
+                tz=tz,
+                peer_id=sender.id,
+                name=name,
+                username=username,
+                chat_link=chat_link,
+                status=CONFIRM_STATUS,
+            )
             await send_and_update(client, sheet, tz, sender, FORM_TEXT, STEP_STATUS[STEP_FORM])
             return
 
