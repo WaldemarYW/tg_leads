@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import json
 import asyncio
 import signal
 from datetime import datetime, date
@@ -57,6 +58,7 @@ AUTO_REPLY_LOCK = os.environ.get("AUTO_REPLY_LOCK", "/opt/tg_leads/.auto_reply.l
 AUTO_REPLY_LOCK_TTL = int(os.environ.get("AUTO_REPLY_LOCK_TTL", "300"))
 REPLY_DEBOUNCE_SEC = float(os.environ.get("REPLY_DEBOUNCE_SEC", "3"))
 SESSION_LOCK = os.environ.get("TELETHON_SESSION_LOCK", f"{SESSION_FILE}.lock")
+STATUS_PATH = os.environ.get("AUTO_REPLY_STATUS_PATH", "/opt/tg_leads/.auto_reply.status")
 
 HEADERS = ["date", "name", "chat_link_app", "username", "status", "last_in", "last_out", "peer_id"]
 
@@ -265,6 +267,21 @@ async def send_and_update(
     name = getattr(entity, "first_name", "") or "Unknown"
     username = getattr(entity, "username", "") or ""
     chat_link = build_chat_link_app(entity, entity.id)
+    try:
+        with open(STATUS_PATH, "w") as f:
+            json.dump(
+                {
+                    "last_sent_at": datetime.now(tz).isoformat(timespec="seconds"),
+                    "peer_id": entity.id,
+                    "username": username or "",
+                    "name": name or "",
+                    "text_preview": text[:200],
+                },
+                f,
+                ensure_ascii=True,
+            )
+    except Exception:
+        pass
     sheet.upsert(
         tz=tz,
         peer_id=entity.id,

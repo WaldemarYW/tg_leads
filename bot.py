@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 import sys
+import json
 import subprocess
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -33,6 +34,7 @@ AUTO_REPLY_PROCESS: Optional[subprocess.Popen] = None
 
 AUTO_REPLY_PATH = os.environ.get("AUTO_REPLY_PATH", "auto_reply.py")
 AUTO_REPLY_CMD = os.environ.get("AUTO_REPLY_CMD")
+AUTO_REPLY_STATUS_PATH = os.environ.get("AUTO_REPLY_STATUS_PATH", "/opt/tg_leads/.auto_reply.status")
 
 
 def kb_main():
@@ -42,6 +44,7 @@ def kb_main():
     kb.add(types.InlineKeyboardButton("🚫 Виключити з таблиці", callback_data="exclude_user"))
     kb.add(types.InlineKeyboardButton("▶️ Старт авто", callback_data="auto_start"))
     kb.add(types.InlineKeyboardButton("⏹ Стоп авто", callback_data="auto_stop"))
+    kb.add(types.InlineKeyboardButton("📊 Статус авто", callback_data="auto_status"))
     return kb
 
 
@@ -80,6 +83,29 @@ def stop_auto_reply() -> Tuple[bool, str]:
         return False, "❌ Не вдалося зупинити автовідповідач"
 
 
+def read_auto_status() -> str:
+    running = auto_reply_running()
+    if not os.path.exists(AUTO_REPLY_STATUS_PATH):
+        return "📊 Автовідповідач: " + ("працює" if running else "зупинено") + "\nДані про останню відправку відсутні"
+    try:
+        with open(AUTO_REPLY_STATUS_PATH, "r") as f:
+            data = json.load(f)
+    except Exception:
+        return "📊 Автовідповідач: " + ("працює" if running else "зупинено") + "\nНе вдалося прочитати статус"
+
+    last_at = data.get("last_sent_at", "—")
+    peer_id = data.get("peer_id", "—")
+    username = data.get("username", "")
+    name = data.get("name", "")
+    who = (f"@{username}" if username else "") or name or str(peer_id)
+    preview = data.get("text_preview", "")
+    return (
+        "📊 Автовідповідач: "
+        + ("працює" if running else "зупинено")
+        + f"\nОстання відправка: {last_at}\nКому: {who}\nPeer ID: {peer_id}\nТекст: {preview}"
+    )
+
+
 @dp.message_handler(commands=["start"])
 async def cmd_start(message: types.Message):
     await message.answer("Готово 👇", reply_markup=kb_main())
@@ -92,6 +118,10 @@ async def cb_update(call: types.CallbackQuery):
         return
 
     await call.answer("⏳ Оновлюю…")
+
+    was_running = auto_reply_running()
+    if was_running:
+        stop_auto_reply()
 
     try:
         tz = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Kyiv"))
@@ -109,6 +139,8 @@ async def cb_update(call: types.CallbackQuery):
     except Exception:
         await call.message.reply("❌ Помилка оновлення")
     finally:
+        if was_running:
+            start_auto_reply()
         release_lock(LOCK_PATH)
 
 
@@ -181,6 +213,13 @@ async def cb_auto_stop(call: types.CallbackQuery):
     await call.message.reply(msg)
 
 
+@dp.callback_query_handler(lambda c: c.data == "auto_status")
+async def cb_auto_status(call: types.CallbackQuery):
+    msg = read_auto_status()
+    await call.answer()
+    await call.message.reply(msg)
+
+
 @dp.message_handler(lambda m: m.from_user.id in WAITING_FOR_EXCLUDE)
 async def handle_exclude_input(message: types.Message):
     peer_id, username = extract_exclusion_target(message)
@@ -215,6 +254,9 @@ async def handle_date_input(message: types.Message):
         return
 
     await message.reply(f"⏳ Формую лист \"{sheet_title}\"…")
+    was_running = auto_reply_running()
+    if was_running:
+        stop_auto_reply()
     try:
         n, msg = await update_google_sheet(
             target_date=target_date,
@@ -228,6 +270,8 @@ async def handle_date_input(message: types.Message):
     except Exception:
         await message.answer("❌ Помилка оновлення за датою")
     finally:
+        if was_running:
+            start_auto_reply()
         release_lock(LOCK_PATH)
 
 
@@ -243,6 +287,9 @@ if __name__ == "__main__":
 
             if not acquire_lock(LOCK_PATH, ttl_sec=300):
                 continue
+            was_running = auto_reply_running()
+            if was_running:
+                stop_auto_reply()
             try:
                 today = datetime.now(tz).date()
                 sheet_title = today.strftime("%d.%m.%y")
@@ -252,6 +299,8 @@ if __name__ == "__main__":
                     replace_existing=True
                 )
             finally:
+                if was_running:
+                    start_auto_reply()
                 release_lock(LOCK_PATH)
 
     async def on_startup(_):
