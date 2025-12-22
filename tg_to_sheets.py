@@ -264,14 +264,16 @@ def load_status_rules(sh) -> List[Tuple[str, str]]:
 
 
 def load_stop_words(sh) -> Tuple[str, ...]:
-    try:
-        ws = sh.worksheet(STOP_WORDS_WORKSHEET)
-    except WorksheetNotFound:
-        return STOP_WORDS_DEFAULT
-
+    ws = get_or_create_worksheet(sh, STOP_WORDS_WORKSHEET, rows=1000, cols=1)
     values = ws.col_values(1)
     words = [normalize_text(v) for v in values if normalize_text(v)]
-    return tuple(words) if words else STOP_WORDS_DEFAULT
+    if words:
+        return tuple(words)
+
+    rows = [[w] for w in STOP_WORDS_DEFAULT]
+    if rows:
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
+    return STOP_WORDS_DEFAULT
 
 
 def load_exclusions(sh, worksheet_name: str) -> Tuple[Set[int], Set[str]]:

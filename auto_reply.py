@@ -314,10 +314,15 @@ def load_stop_words_from_sheet() -> Tuple[str, ...]:
     try:
         gc = sheets_client(GOOGLE_CREDS)
         sh = gc.open(SHEET_NAME)
-        ws = sh.worksheet(STOP_WORDS_WORKSHEET)
+        ws = get_or_create_worksheet(sh, STOP_WORDS_WORKSHEET, rows=1000, cols=1)
         values = ws.col_values(1)
         words = [normalize_text(v) for v in values if normalize_text(v)]
-        return tuple(words) if words else STOP_WORDS
+        if words:
+            return tuple(words)
+        rows = [[w] for w in STOP_WORDS]
+        if rows:
+            ws.append_rows(rows, value_input_option="USER_ENTERED")
+        return STOP_WORDS
     except Exception:
         return STOP_WORDS
 
