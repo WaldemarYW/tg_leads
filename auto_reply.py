@@ -55,6 +55,7 @@ VIDEO_GROUP_TITLE = os.environ.get("VIDEO_GROUP_TITLE", "Промо відео")
 AUTO_REPLY_LOCK = os.environ.get("AUTO_REPLY_LOCK", "/opt/tg_leads/.auto_reply.lock")
 AUTO_REPLY_LOCK_TTL = int(os.environ.get("AUTO_REPLY_LOCK_TTL", "300"))
 REPLY_DEBOUNCE_SEC = float(os.environ.get("REPLY_DEBOUNCE_SEC", "3"))
+SESSION_LOCK = os.environ.get("TELETHON_SESSION_LOCK", "/opt/tg_leads/.telethon.session.lock")
 
 HEADERS = ["date", "name", "chat_link_app", "username", "status", "last_in", "last_out", "peer_id"]
 
@@ -303,6 +304,11 @@ async def main():
         print("⛔ Автовідповідач вже запущено (lock)")
         return
 
+    if not acquire_lock(SESSION_LOCK, ttl_sec=AUTO_REPLY_LOCK_TTL):
+        print("⛔ Телеграм-сесія зайнята (інший процес працює)")
+        release_lock(AUTO_REPLY_LOCK)
+        return
+
     await client.start()
 
     leads_group = await find_group_by_title(client, LEADS_GROUP_TITLE)
@@ -472,6 +478,7 @@ async def main():
             await asyncio.sleep(0.5)
     finally:
         await client.disconnect()
+        release_lock(SESSION_LOCK)
         release_lock(AUTO_REPLY_LOCK)
 
 

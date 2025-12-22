@@ -324,6 +324,7 @@ async def update_google_sheet(
     api_id = int(os.environ["API_ID"])
     api_hash = os.environ["API_HASH"]
     session_file = os.environ["SESSION_FILE"]
+    session_lock = os.environ.get("TELETHON_SESSION_LOCK", "/opt/tg_leads/.telethon.session.lock")
 
     tz = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Kyiv"))
     env_only_today = os.environ.get("ONLY_TODAY", "true").lower() == "true"
@@ -349,11 +350,15 @@ async def update_google_sheet(
         sh, os.environ.get("EXCLUDED_WORKSHEET", "Excluded")
     )
 
+    if not acquire_lock(session_lock, ttl_sec=300):
+        return 0, "❌ Сесія зайнята (інший процес працює)"
+
     client = TelegramClient(session_file, api_id, api_hash)
     await client.connect()
 
     if not await client.is_user_authorized():
         await client.disconnect()
+        release_lock(session_lock)
         return 0, "❌ Сессия не авторизована"
 
     rows = []
@@ -458,6 +463,7 @@ async def update_google_sheet(
         ws.append_rows(rows, value_input_option="USER_ENTERED")
 
     await client.disconnect()
+    release_lock(session_lock)
     return len(rows), "OK"
 
 
