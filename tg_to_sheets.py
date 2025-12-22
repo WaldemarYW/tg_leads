@@ -429,14 +429,6 @@ async def update_google_sheet(
                 break
 
         if not template_out:
-            add_exclusion_entry(
-                peer_id=peer_id,
-                username=norm_uname or None,
-                added_by="auto",
-                source="auto",
-                name=name,
-                chat_link_app=chat_link
-            )
             continue
         if not last_in and not last_out:
             continue
