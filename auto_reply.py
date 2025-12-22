@@ -1,6 +1,7 @@
 import os
 import re
 import asyncio
+import signal
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple
@@ -269,6 +270,17 @@ async def main():
     tz = ZoneInfo(TIMEZONE)
     sheet = SheetWriter()
     client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
+    stop_event = asyncio.Event()
+
+    def handle_stop():
+        stop_event.set()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, handle_stop)
+        except NotImplementedError:
+            pass
 
     await client.start()
 
@@ -387,7 +399,11 @@ async def main():
             return
 
     print("🤖 Автовідповідач запущено")
-    await client.run_until_disconnected()
+    try:
+        while not stop_event.is_set():
+            await asyncio.sleep(0.5)
+    finally:
+        await client.disconnect()
 
 
 if __name__ == "__main__":
