@@ -1,6 +1,8 @@
 import os
 import re
 import asyncio
+import sys
+import subprocess
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Set, Optional, Tuple
@@ -27,6 +29,10 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 WAITING_FOR_DATE: Set[int] = set()
 WAITING_FOR_EXCLUDE: Set[int] = set()
+AUTO_REPLY_PROCESS: Optional[subprocess.Popen] = None
+
+AUTO_REPLY_PATH = os.environ.get("AUTO_REPLY_PATH", "auto_reply.py")
+AUTO_REPLY_CMD = os.environ.get("AUTO_REPLY_CMD")
 
 
 def kb_main():
@@ -34,7 +40,44 @@ def kb_main():
     kb.add(types.InlineKeyboardButton("📄 Оновити таблицю", callback_data="update"))
     kb.add(types.InlineKeyboardButton("📅 Історія за датою", callback_data="update_by_date"))
     kb.add(types.InlineKeyboardButton("🚫 Виключити з таблиці", callback_data="exclude_user"))
+    kb.add(types.InlineKeyboardButton("▶️ Старт авто", callback_data="auto_start"))
+    kb.add(types.InlineKeyboardButton("⏹ Стоп авто", callback_data="auto_stop"))
     return kb
+
+
+def auto_reply_running() -> bool:
+    return AUTO_REPLY_PROCESS is not None and AUTO_REPLY_PROCESS.poll() is None
+
+
+def start_auto_reply() -> Tuple[bool, str]:
+    global AUTO_REPLY_PROCESS
+    if auto_reply_running():
+        return False, "Автовідповідач вже запущено"
+
+    if AUTO_REPLY_CMD:
+        cmd = AUTO_REPLY_CMD.split()
+    else:
+        cmd = [sys.executable, AUTO_REPLY_PATH]
+    try:
+        AUTO_REPLY_PROCESS = subprocess.Popen(cmd)
+        return True, "✅ Автовідповідач запущено"
+    except Exception:
+        AUTO_REPLY_PROCESS = None
+        return False, "❌ Не вдалося запустити автовідповідач"
+
+
+def stop_auto_reply() -> Tuple[bool, str]:
+    global AUTO_REPLY_PROCESS
+    if not auto_reply_running():
+        AUTO_REPLY_PROCESS = None
+        return False, "Автовідповідач не запущено"
+    try:
+        AUTO_REPLY_PROCESS.terminate()
+        AUTO_REPLY_PROCESS.wait(timeout=5)
+        AUTO_REPLY_PROCESS = None
+        return True, "⏹ Автовідповідач зупинено"
+    except Exception:
+        return False, "❌ Не вдалося зупинити автовідповідач"
 
 
 @dp.message_handler(commands=["start"])
@@ -119,6 +162,20 @@ async def cb_exclude_user(call: types.CallbackQuery):
     await call.message.reply(
         "Надішліть username, user id, посилання t.me, tg://user?id або переслане повідомлення від користувача"
     )
+
+
+@dp.callback_query_handler(lambda c: c.data == "auto_start")
+async def cb_auto_start(call: types.CallbackQuery):
+    ok, msg = start_auto_reply()
+    await call.answer()
+    await call.message.reply(msg)
+
+
+@dp.callback_query_handler(lambda c: c.data == "auto_stop")
+async def cb_auto_stop(call: types.CallbackQuery):
+    ok, msg = stop_auto_reply()
+    await call.answer()
+    await call.message.reply(msg)
 
 
 @dp.message_handler(lambda m: m.from_user.id in WAITING_FOR_EXCLUDE)
