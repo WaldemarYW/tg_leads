@@ -66,6 +66,25 @@ USERNAME_RE = re.compile(r"(?:@|t\.me/)([A-Za-z0-9_]{5,})")
 PHONE_RE = re.compile(r"\+?\d[\d\s\-\(\)]{9,}\d")
 
 VIDEO_WORDS = ("відео", "видео")
+STOP_WORDS = (
+    "жаль",
+    "нажаль",
+    "сожалению",
+    "ні",
+    "нет",
+    "вибачте",
+    "извините",
+    "шкода",
+)
+
+STOP_WORDS_WORKSHEET = os.environ.get("STOP_WORDS_WORKSHEET", "StopWords")
+STOP_WORDS_CACHE_PATH = os.environ.get("STOP_WORDS_CACHE_PATH", "/opt/tg_leads/.auto_reply.stop_words.json")
+STOP_WORDS_CACHE_TTL_HOURS = int(os.environ.get("STOP_WORDS_CACHE_TTL_HOURS", "48"))
+STOP_STATE_PATH = os.environ.get("AUTO_REPLY_STOP_STATE_PATH", "/opt/tg_leads/.auto_reply.stop_state.json")
+STOP_STATE_TTL_HOURS = int(os.environ.get("AUTO_REPLY_STOP_TTL_HOURS", "48"))
+STATUS_RULES_WORKSHEET = os.environ.get("STATUS_RULES_WORKSHEET", "StatusRules")
+STATUS_RULES_CACHE_PATH = os.environ.get("STATUS_RULES_CACHE_PATH", "/opt/tg_leads/.auto_reply.status_rules.json")
+STATUS_RULES_CACHE_TTL_HOURS = int(os.environ.get("STATUS_RULES_CACHE_TTL_HOURS", "48"))
 CONFIRM_STATUS = "✅ Погодився Дякую! 🙌 Передаю вас на етап навчання"
 REFERRAL_STATUS = "🎁 Реферал Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."
 IMMUTABLE_STATUSES = {CONFIRM_STATUS, REFERRAL_STATUS}
@@ -100,21 +119,7 @@ TEMPLATE_TO_STEP = {
     normalize_text(FORM_TEXT): STEP_FORM,
 }
 
-STEP_STATUS = {
-    STEP_CONTACT: "👋 Привітання",
-    STEP_INTEREST: None,
-    STEP_DATING: None,
-    STEP_DUTIES: None,
-    STEP_CLARIFY: "🏢 Знайомство з компанією",
-    STEP_SHIFTS: None,
-    STEP_SHIFT_QUESTION: "🕒 Графік",
-    STEP_FORMAT: None,
-    STEP_FORMAT_QUESTION: "🎥 Більше інформації",
-    STEP_VIDEO_FOLLOWUP: "🎥 Відео",
-    STEP_TRAINING: None,
-    STEP_TRAINING_QUESTION: "🎓 Навчання",
-    STEP_FORM: None,
-}
+STEP_STATUS = {}
 
 
 def extract_contact(text: str) -> Tuple[Optional[str], Optional[str]]:
@@ -300,12 +305,192 @@ def wants_video(text: str) -> bool:
     return any(word in t for word in VIDEO_WORDS)
 
 
+def has_stop_words(text: str, stop_words: Tuple[str, ...]) -> bool:
+    t = normalize_text(text)
+    return any(word in t for word in stop_words)
+
+
+def load_stop_words_from_sheet() -> Tuple[str, ...]:
+    try:
+        gc = sheets_client(GOOGLE_CREDS)
+        sh = gc.open(SHEET_NAME)
+        ws = sh.worksheet(STOP_WORDS_WORKSHEET)
+        values = ws.col_values(1)
+        words = [normalize_text(v) for v in values if normalize_text(v)]
+        return tuple(words) if words else STOP_WORDS
+    except Exception:
+        return STOP_WORDS
+
+
+def get_stop_words_cached() -> Tuple[str, ...]:
+    now_ts = time.time()
+    ttl_sec = STOP_WORDS_CACHE_TTL_HOURS * 3600
+    if os.path.exists(STOP_WORDS_CACHE_PATH):
+        try:
+            with open(STOP_WORDS_CACHE_PATH, "r") as f:
+                data = json.load(f)
+            fetched_at = float(data.get("fetched_at", 0))
+            words = data.get("words", [])
+            if now_ts - fetched_at < ttl_sec and words:
+                return tuple(words)
+        except Exception:
+            pass
+
+    words = load_stop_words_from_sheet()
+    try:
+        with open(STOP_WORDS_CACHE_PATH, "w") as f:
+            json.dump({"fetched_at": now_ts, "words": list(words)}, f, ensure_ascii=True)
+    except Exception:
+        pass
+    return words
+
+
+class StopState:
+    def __init__(self, path: str, ttl_hours: int):
+        self.path = path
+        self.ttl_sec = ttl_hours * 3600
+        self.data = {}
+        self._load()
+
+    def _load(self):
+        if not os.path.exists(self.path):
+            return
+        try:
+            with open(self.path, "r") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                self.data = raw
+        except Exception:
+            self.data = {}
+
+    def _save(self):
+        try:
+            with open(self.path, "w") as f:
+                json.dump(self.data, f, ensure_ascii=True)
+        except Exception:
+            pass
+
+    def _cleanup(self):
+        now_ts = time.time()
+        expired = [k for k, v in self.data.items() if now_ts - float(v) > self.ttl_sec]
+        for k in expired:
+            self.data.pop(k, None)
+        if expired:
+            self._save()
+
+    def is_stopped(self, peer_id: int) -> bool:
+        self._cleanup()
+        return str(peer_id) in self.data
+
+    def stop_at(self, peer_id: int) -> Optional[float]:
+        self._cleanup()
+        value = self.data.get(str(peer_id))
+        return float(value) if value is not None else None
+
+    def set_stop(self, peer_id: int):
+        self.data[str(peer_id)] = time.time()
+        self._save()
+
+    def clear_stop(self, peer_id: int):
+        if str(peer_id) in self.data:
+            self.data.pop(str(peer_id), None)
+            self._save()
+
+
+async def last_outgoing_is_non_template(client: TelegramClient, entity: User) -> bool:
+    async for m in client.iter_messages(entity, limit=20):
+        if not m.message or not m.out:
+            continue
+        return not is_script_template(m.message)
+    return False
+
+
+async def get_last_outgoing_message(client: TelegramClient, entity: User):
+    async for m in client.iter_messages(entity, limit=20):
+        if not m.message or not m.out:
+            continue
+        return m
+    return None
+
+
+def load_status_rules_from_sheet() -> Tuple[Tuple[str, str], ...]:
+    try:
+        gc = sheets_client(GOOGLE_CREDS)
+        sh = gc.open(SHEET_NAME)
+        ws = get_or_create_worksheet(sh, STATUS_RULES_WORKSHEET, rows=1000, cols=2)
+        ensure_headers(ws, ["template", "status"], strict=False)
+        values = ws.get_all_values()
+        if len(values) <= 1:
+            rows = [
+                [CONTACT_TEXT, "👋 Привітання"],
+                [CLARIFY_TEXT, "🏢 Знайомство з компанією"],
+                [SHIFT_QUESTION_TEXT, "🕒 Графік"],
+                [FORMAT_QUESTION_TEXT, "🎥 Більше інформації"],
+                [VIDEO_FOLLOWUP_TEXT, "🎥 Відео"],
+                [TRAINING_QUESTION_TEXT, "🎓 Навчання"],
+                [CONFIRM_TEXT, "✅ Погодився Дякую! 🙌 Передаю вас на етап навчання"],
+                [REFERRAL_TEXT, "🎁 Реферал Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."],
+            ]
+            ws.append_rows(rows, value_input_option="USER_ENTERED")
+            return tuple((r[0], r[1]) for r in rows)
+
+        rules = []
+        for row in values[1:]:
+            if len(row) < 2:
+                continue
+            template = row[0].strip()
+            status = row[1].strip()
+            if template and status:
+                rules.append((template, status))
+        return tuple(rules) if rules else tuple()
+    except Exception:
+        return tuple()
+
+
+def get_status_rules_cached() -> Tuple[Tuple[str, str], ...]:
+    now_ts = time.time()
+    ttl_sec = STATUS_RULES_CACHE_TTL_HOURS * 3600
+    if os.path.exists(STATUS_RULES_CACHE_PATH):
+        try:
+            with open(STATUS_RULES_CACHE_PATH, "r") as f:
+                data = json.load(f)
+            fetched_at = float(data.get("fetched_at", 0))
+            rules = data.get("rules", [])
+            if now_ts - fetched_at < ttl_sec and rules:
+                return tuple((r[0], r[1]) for r in rules if len(r) >= 2)
+        except Exception:
+            pass
+
+    rules = load_status_rules_from_sheet()
+    if rules:
+        try:
+            with open(STATUS_RULES_CACHE_PATH, "w") as f:
+                json.dump(
+                    {"fetched_at": now_ts, "rules": [list(r) for r in rules]},
+                    f,
+                    ensure_ascii=True,
+                )
+        except Exception:
+            pass
+    return rules
+
+
+def status_for_text(text: str, rules: Tuple[Tuple[str, str], ...]) -> Optional[str]:
+    t = normalize_text(text)
+    for template, status in rules:
+        if normalize_text(template) in t:
+            return status
+    return None
+
+
 async def main():
     tz = ZoneInfo(TIMEZONE)
     sheet = SheetWriter()
     client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
     processing_peers = set()
     last_reply_at = {}
+    stop_state = StopState(STOP_STATE_PATH, STOP_STATE_TTL_HOURS)
+    status_rules = get_status_rules_cached()
     stop_event = asyncio.Event()
 
     def handle_stop():
@@ -379,7 +564,7 @@ async def main():
             tz,
             entity,
             CONTACT_TEXT,
-            STEP_STATUS[STEP_CONTACT],
+            status_for_text(CONTACT_TEXT, status_rules),
         )
         print(f"✅ Надіслано перше повідомлення: {entity.id}")
 
@@ -414,29 +599,77 @@ async def main():
             )
 
             if message_has_question(text):
+                sheet.upsert(
+                    tz=tz,
+                    peer_id=peer_id,
+                    name=name,
+                    username=username,
+                    chat_link=chat_link,
+                    status="знак питання",
+                )
+                return
+
+            stop_words = get_stop_words_cached()
+            if has_stop_words(text, stop_words):
+                stop_state.set_stop(peer_id)
+                sheet.upsert(
+                    tz=tz,
+                    peer_id=peer_id,
+                    name=name,
+                    username=username,
+                    chat_link=chat_link,
+                    status="стоп слово",
+                )
+                return
+
+            if stop_state.is_stopped(peer_id):
+                last_out = await get_last_outgoing_message(client, sender)
+                stop_at = stop_state.stop_at(peer_id)
+                if last_out and last_out.date and stop_at:
+                    if last_out.date.timestamp() > stop_at and is_script_template(last_out.message):
+                        stop_state.clear_stop(peer_id)
+                    else:
+                        return
+                else:
+                    return
+
+            if await last_outgoing_is_non_template(client, sender):
+                stop_state.set_stop(peer_id)
+                sheet.upsert(
+                    tz=tz,
+                    peer_id=peer_id,
+                    name=name,
+                    username=username,
+                    chat_link=chat_link,
+                    status="користувач",
+                )
                 return
 
             last_step = await get_last_outgoing_step(client, sender)
+            if not last_step:
+                return
+
+            await asyncio.sleep(10)
             if last_step == STEP_CONTACT:
-                await send_and_update(client, sheet, tz, sender, INTEREST_TEXT, STEP_STATUS[STEP_INTEREST])
-                await send_and_update(client, sheet, tz, sender, DATING_TEXT, STEP_STATUS[STEP_DATING], delay_after=5)
-                await send_and_update(client, sheet, tz, sender, DUTIES_TEXT, STEP_STATUS[STEP_DUTIES], delay_after=5)
-                await send_and_update(client, sheet, tz, sender, CLARIFY_TEXT, STEP_STATUS[STEP_CLARIFY])
+                await send_and_update(client, sheet, tz, sender, INTEREST_TEXT, status_for_text(INTEREST_TEXT, status_rules))
+                await send_and_update(client, sheet, tz, sender, DATING_TEXT, status_for_text(DATING_TEXT, status_rules), delay_after=5)
+                await send_and_update(client, sheet, tz, sender, DUTIES_TEXT, status_for_text(DUTIES_TEXT, status_rules), delay_after=5)
+                await send_and_update(client, sheet, tz, sender, CLARIFY_TEXT, status_for_text(CLARIFY_TEXT, status_rules))
                 last_reply_at[peer_id] = time.time()
                 return
 
             if last_step == STEP_CLARIFY:
-                await send_and_update(client, sheet, tz, sender, SHIFTS_TEXT, STEP_STATUS[STEP_SHIFTS], delay_after=5)
+                await send_and_update(client, sheet, tz, sender, SHIFTS_TEXT, status_for_text(SHIFTS_TEXT, status_rules), delay_after=5)
                 await send_and_update(
-                    client, sheet, tz, sender, SHIFT_QUESTION_TEXT, STEP_STATUS[STEP_SHIFT_QUESTION]
+                    client, sheet, tz, sender, SHIFT_QUESTION_TEXT, status_for_text(SHIFT_QUESTION_TEXT, status_rules)
                 )
                 last_reply_at[peer_id] = time.time()
                 return
 
             if last_step == STEP_SHIFT_QUESTION:
-                await send_and_update(client, sheet, tz, sender, FORMAT_TEXT, STEP_STATUS[STEP_FORMAT], delay_after=5)
+                await send_and_update(client, sheet, tz, sender, FORMAT_TEXT, status_for_text(FORMAT_TEXT, status_rules), delay_after=5)
                 await send_and_update(
-                    client, sheet, tz, sender, FORMAT_QUESTION_TEXT, STEP_STATUS[STEP_FORMAT_QUESTION]
+                    client, sheet, tz, sender, FORMAT_QUESTION_TEXT, status_for_text(FORMAT_QUESTION_TEXT, status_rules)
                 )
                 last_reply_at[peer_id] = time.time()
                 return
@@ -455,22 +688,22 @@ async def main():
                     except Exception:
                         print("⚠️ Не вдалося надіслати відео")
                     await send_and_update(
-                        client, sheet, tz, sender, VIDEO_FOLLOWUP_TEXT, STEP_STATUS[STEP_VIDEO_FOLLOWUP]
+                        client, sheet, tz, sender, VIDEO_FOLLOWUP_TEXT, status_for_text(VIDEO_FOLLOWUP_TEXT, status_rules)
                     )
                     last_reply_at[peer_id] = time.time()
                     return
 
-                await send_and_update(client, sheet, tz, sender, TRAINING_TEXT, STEP_STATUS[STEP_TRAINING], delay_after=5)
+                await send_and_update(client, sheet, tz, sender, TRAINING_TEXT, status_for_text(TRAINING_TEXT, status_rules), delay_after=5)
                 await send_and_update(
-                    client, sheet, tz, sender, TRAINING_QUESTION_TEXT, STEP_STATUS[STEP_TRAINING_QUESTION]
+                    client, sheet, tz, sender, TRAINING_QUESTION_TEXT, status_for_text(TRAINING_QUESTION_TEXT, status_rules)
                 )
                 last_reply_at[peer_id] = time.time()
                 return
 
             if last_step == STEP_VIDEO_FOLLOWUP:
-                await send_and_update(client, sheet, tz, sender, TRAINING_TEXT, STEP_STATUS[STEP_TRAINING], delay_after=5)
+                await send_and_update(client, sheet, tz, sender, TRAINING_TEXT, status_for_text(TRAINING_TEXT, status_rules), delay_after=5)
                 await send_and_update(
-                    client, sheet, tz, sender, TRAINING_QUESTION_TEXT, STEP_STATUS[STEP_TRAINING_QUESTION]
+                    client, sheet, tz, sender, TRAINING_QUESTION_TEXT, status_for_text(TRAINING_QUESTION_TEXT, status_rules)
                 )
                 last_reply_at[peer_id] = time.time()
                 return
@@ -484,7 +717,7 @@ async def main():
                     chat_link=chat_link,
                     status=CONFIRM_STATUS,
                 )
-                await send_and_update(client, sheet, tz, sender, FORM_TEXT, STEP_STATUS[STEP_FORM])
+                await send_and_update(client, sheet, tz, sender, FORM_TEXT, status_for_text(FORM_TEXT, status_rules))
                 last_reply_at[peer_id] = time.time()
                 return
         finally:

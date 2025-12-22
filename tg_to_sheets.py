@@ -98,6 +98,32 @@ FORM_TEXT = (
 CONFIRM_TEXT = "Дякую! 🙌\nПередаю вас на етап навчання"
 REFERRAL_TEXT = "Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."
 
+STATUS_RULES_WORKSHEET = os.environ.get("STATUS_RULES_WORKSHEET", "StatusRules")
+STATUS_RULES_HEADERS = ["template", "status"]
+
+DEFAULT_STATUS_RULES = [
+    (CONTACT_TEXT, "👋 Привітання"),
+    (CLARIFY_TEXT, "🏢 Знайомство з компанією"),
+    (SHIFT_QUESTION_TEXT, "🕒 Графік"),
+    (FORMAT_QUESTION_TEXT, "🎥 Більше інформації"),
+    (VIDEO_FOLLOWUP_TEXT, "🎥 Відео"),
+    (TRAINING_QUESTION_TEXT, "🎓 Навчання"),
+    (CONFIRM_TEXT, "✅ Погодився Дякую! 🙌 Передаю вас на етап навчання"),
+    (REFERRAL_TEXT, "🎁 Реферал Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."),
+]
+
+STOP_WORDS_DEFAULT = (
+    "жаль",
+    "нажаль",
+    "сожалению",
+    "ні",
+    "нет",
+    "вибачте",
+    "извините",
+    "шкода",
+)
+STOP_WORDS_WORKSHEET = os.environ.get("STOP_WORDS_WORKSHEET", "StopWords")
+
 SCRIPT_TEMPLATES = [
     CONTACT_TEXT,
     INTEREST_TEXT,
@@ -124,30 +150,31 @@ def normalize_text(s: Optional[str]) -> str:
 def classify_status(
     template_out: str,
     last_msg_from_me: Optional[bool],
-    consecutive_out: int
+    consecutive_out: int,
+    status_rules: List[Tuple[str, str]],
+    stop_words: Tuple[str, ...],
+    last_in_text: str
 ) -> str:
     t_out = normalize_text(template_out)
-    if normalize_text(CONFIRM_TEXT) in t_out:
-        return "✅ Погодився"
     if normalize_text(REFERRAL_TEXT) in t_out:
-        return "🎁 Реферал"
+        return "🎁 Реферал Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."
+    if normalize_text(CONFIRM_TEXT) in t_out:
+        return "✅ Погодився Дякую! 🙌 Передаю вас на етап навчання"
+
     if last_msg_from_me is False:
-        return "📨 Останнє повідомлення від кандидата"
+        if "?" in (last_in_text or ""):
+            return "знак питання"
+        t_in = normalize_text(last_in_text)
+        if t_in and any(w in t_in for w in stop_words):
+            return "стоп слово"
+        return "користувач"
+
     if consecutive_out >= 3:
         return "🔁 3+ повідомлення від нас без відповіді"
 
-    if normalize_text(CONTACT_TEXT) in t_out:
-        return "👋 Привітання"
-    if normalize_text(CLARIFY_TEXT) in t_out:
-        return "🏢 Знайомство з компанією"
-    if normalize_text(SHIFT_QUESTION_TEXT) in t_out:
-        return "🕒 Графік"
-    if normalize_text(FORMAT_QUESTION_TEXT) in t_out:
-        return "🎥 Більше інформації"
-    if normalize_text(VIDEO_FOLLOWUP_TEXT) in t_out:
-        return "🎥 Відео"
-    if normalize_text(TRAINING_QUESTION_TEXT) in t_out:
-        return "🎓 Навчання"
+    for template, status in status_rules:
+        if normalize_text(template) in t_out:
+            return status
 
     return ""
 
@@ -213,6 +240,38 @@ def get_or_create_worksheet(sh, title: str, rows: int, cols: int):
 
 def normalize_username(username: Optional[str]) -> str:
     return (username or "").strip().lstrip("@").lower()
+
+
+def load_status_rules(sh) -> List[Tuple[str, str]]:
+    ws = get_or_create_worksheet(sh, STATUS_RULES_WORKSHEET, rows=1000, cols=len(STATUS_RULES_HEADERS))
+    ensure_headers(ws, STATUS_RULES_HEADERS, strict=False)
+    values = ws.get_all_values()
+    if len(values) <= 1:
+        rows = [[t, s] for t, s in DEFAULT_STATUS_RULES]
+        if rows:
+            ws.append_rows(rows, value_input_option="USER_ENTERED")
+        return DEFAULT_STATUS_RULES[:]
+
+    rules = []
+    for row in values[1:]:
+        if len(row) < 2:
+            continue
+        template = row[0].strip()
+        status = row[1].strip()
+        if template and status:
+            rules.append((template, status))
+    return rules or DEFAULT_STATUS_RULES[:]
+
+
+def load_stop_words(sh) -> Tuple[str, ...]:
+    try:
+        ws = sh.worksheet(STOP_WORDS_WORKSHEET)
+    except WorksheetNotFound:
+        return STOP_WORDS_DEFAULT
+
+    values = ws.col_values(1)
+    words = [normalize_text(v) for v in values if normalize_text(v)]
+    return tuple(words) if words else STOP_WORDS_DEFAULT
 
 
 def load_exclusions(sh, worksheet_name: str) -> Tuple[Set[int], Set[str]]:
@@ -394,6 +453,8 @@ async def update_google_sheet(
     excluded_ids, excluded_usernames = load_exclusions(
         sh, os.environ.get("EXCLUDED_WORKSHEET", "Excluded")
     )
+    status_rules = load_status_rules(sh)
+    stop_words = load_stop_words(sh)
 
     if not acquire_lock(session_lock, ttl_sec=300):
         return 0, "❌ Сесія зайнята (інший процес працює)"
@@ -483,11 +544,18 @@ async def update_google_sheet(
             continue
 
         if has_referral_template:
-            status = "🎁 Реферал"
+            status = "🎁 Реферал Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."
         elif has_confirm_status:
-            status = "✅ Погодився"
+            status = "✅ Погодився Дякую! 🙌 Передаю вас на етап навчання"
         else:
-            status = classify_status(template_out, last_msg_from_me, consecutive_out)
+            status = classify_status(
+                template_out,
+                last_msg_from_me,
+                consecutive_out,
+                status_rules,
+                stop_words,
+                last_in,
+            )
 
         rows.append([
             str(msg_date),
