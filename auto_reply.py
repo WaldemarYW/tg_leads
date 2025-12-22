@@ -24,6 +24,7 @@ from tg_to_sheets import (
     classify_status,
     acquire_lock,
     release_lock,
+    load_exclusions,
     CONTACT_TEXT,
     INTEREST_TEXT,
     DATING_TEXT,
@@ -85,6 +86,9 @@ STOP_STATE_TTL_HOURS = int(os.environ.get("AUTO_REPLY_STOP_TTL_HOURS", "48"))
 STATUS_RULES_WORKSHEET = os.environ.get("STATUS_RULES_WORKSHEET", "StatusRules")
 STATUS_RULES_CACHE_PATH = os.environ.get("STATUS_RULES_CACHE_PATH", "/opt/tg_leads/.auto_reply.status_rules.json")
 STATUS_RULES_CACHE_TTL_HOURS = int(os.environ.get("STATUS_RULES_CACHE_TTL_HOURS", "48"))
+EXCLUDED_WORKSHEET = os.environ.get("EXCLUDED_WORKSHEET", "Excluded")
+EXCLUSIONS_CACHE_PATH = os.environ.get("EXCLUSIONS_CACHE_PATH", "/opt/tg_leads/.auto_reply.exclusions.json")
+EXCLUSIONS_CACHE_TTL_HOURS = int(os.environ.get("EXCLUSIONS_CACHE_TTL_HOURS", "6"))
 CONFIRM_STATUS = "✅ Погодився"
 REFERRAL_STATUS = "🎁 Реферал"
 IMMUTABLE_STATUSES = {CONFIRM_STATUS, REFERRAL_STATUS}
@@ -488,6 +492,45 @@ def status_for_text(text: str, rules: Tuple[Tuple[str, str], ...]) -> Optional[s
     return None
 
 
+def get_exclusions_cached() -> Tuple[set, set]:
+    now_ts = time.time()
+    ttl_sec = EXCLUSIONS_CACHE_TTL_HOURS * 3600
+    if os.path.exists(EXCLUSIONS_CACHE_PATH):
+        try:
+            with open(EXCLUSIONS_CACHE_PATH, "r") as f:
+                data = json.load(f)
+            fetched_at = float(data.get("fetched_at", 0))
+            peer_ids = set(data.get("peer_ids", []))
+            usernames = set(data.get("usernames", []))
+            if now_ts - fetched_at < ttl_sec:
+                return peer_ids, usernames
+        except Exception:
+            pass
+
+    try:
+        gc = sheets_client(GOOGLE_CREDS)
+        sh = gc.open(SHEET_NAME)
+        peer_ids, usernames = load_exclusions(sh, EXCLUDED_WORKSHEET)
+    except Exception:
+        peer_ids, usernames = set(), set()
+
+    try:
+        with open(EXCLUSIONS_CACHE_PATH, "w") as f:
+            json.dump(
+                {
+                    "fetched_at": now_ts,
+                    "peer_ids": list(peer_ids),
+                    "usernames": list(usernames),
+                },
+                f,
+                ensure_ascii=True,
+            )
+    except Exception:
+        pass
+
+    return peer_ids, usernames
+
+
 async def main():
     tz = ZoneInfo(TIMEZONE)
     sheet = SheetWriter()
@@ -558,6 +601,11 @@ async def main():
             return
         if getattr(entity, "bot", False):
             return
+        excluded_ids, excluded_usernames = get_exclusions_cached()
+        norm_uname = normalize_username(getattr(entity, "username", "") or "")
+        if entity.id in excluded_ids or (norm_uname and norm_uname in excluded_usernames):
+            print(f"⏭️ Пропускаю виключеного користувача: {entity.id}")
+            return
 
         if await has_outgoing_template(client, entity):
             print(f"ℹ️ Вже контактували: {entity.id}")
@@ -581,6 +629,10 @@ async def main():
         if not isinstance(sender, User) or sender.bot:
             return
         peer_id = sender.id
+        excluded_ids, excluded_usernames = get_exclusions_cached()
+        norm_uname = normalize_username(getattr(sender, "username", "") or "")
+        if peer_id in excluded_ids or (norm_uname and norm_uname in excluded_usernames):
+            return
         if peer_id in processing_peers:
             return
         now_ts = time.time()
