@@ -324,7 +324,7 @@ async def update_google_sheet(
     api_id = int(os.environ["API_ID"])
     api_hash = os.environ["API_HASH"]
     session_file = os.environ["SESSION_FILE"]
-    session_lock = os.environ.get("TELETHON_SESSION_LOCK", "/opt/tg_leads/.telethon.session.lock")
+    session_lock = os.environ.get("TELETHON_SESSION_LOCK", f"{session_file}.lock")
 
     tz = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Kyiv"))
     env_only_today = os.environ.get("ONLY_TODAY", "true").lower() == "true"

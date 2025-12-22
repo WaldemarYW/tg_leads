@@ -97,12 +97,15 @@ async def cb_update(call: types.CallbackQuery):
         tz = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Kyiv"))
         today = datetime.now(tz).date()
         sheet_title = today.strftime("%d.%m.%y")
-        n, _ = await update_google_sheet(
+        n, msg = await update_google_sheet(
             target_date=today,
             worksheet_override=sheet_title,
             replace_existing=True
         )
-        await call.message.reply(f"✅ Таблицю оновлено\nЛист: {sheet_title}\nДодано: {n}")
+        if msg != "OK":
+            await call.message.reply(msg)
+        else:
+            await call.message.reply(f"✅ Таблицю оновлено\nЛист: {sheet_title}\nДодано: {n}")
     except Exception:
         await call.message.reply("❌ Помилка оновлення")
     finally:
@@ -213,12 +216,15 @@ async def handle_date_input(message: types.Message):
 
     await message.reply(f"⏳ Формую лист \"{sheet_title}\"…")
     try:
-        n, _ = await update_google_sheet(
+        n, msg = await update_google_sheet(
             target_date=target_date,
             worksheet_override=sheet_title,
             replace_existing=True
         )
-        await message.answer(f"✅ Лист \"{sheet_title}\" оновлено\nДодано: {n}")
+        if msg != "OK":
+            await message.answer(msg)
+        else:
+            await message.answer(f"✅ Лист \"{sheet_title}\" оновлено\nДодано: {n}")
     except Exception:
         await message.answer("❌ Помилка оновлення за датою")
     finally:

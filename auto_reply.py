@@ -44,7 +44,7 @@ load_dotenv("/opt/tg_leads/.env")
 
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
-SESSION_FILE = os.environ["SESSION_FILE"]
+SESSION_FILE = os.environ.get("AUTO_REPLY_SESSION_FILE", os.environ["SESSION_FILE"])
 
 SHEET_NAME = os.environ["SHEET_NAME"]
 GOOGLE_CREDS = os.environ["GOOGLE_CREDS"]
@@ -56,7 +56,7 @@ VIDEO_GROUP_TITLE = os.environ.get("VIDEO_GROUP_TITLE", "Промо відео")
 AUTO_REPLY_LOCK = os.environ.get("AUTO_REPLY_LOCK", "/opt/tg_leads/.auto_reply.lock")
 AUTO_REPLY_LOCK_TTL = int(os.environ.get("AUTO_REPLY_LOCK_TTL", "300"))
 REPLY_DEBOUNCE_SEC = float(os.environ.get("REPLY_DEBOUNCE_SEC", "3"))
-SESSION_LOCK = os.environ.get("TELETHON_SESSION_LOCK", "/opt/tg_leads/.telethon.session.lock")
+SESSION_LOCK = os.environ.get("TELETHON_SESSION_LOCK", f"{SESSION_FILE}.lock")
 
 HEADERS = ["date", "name", "chat_link_app", "username", "status", "last_in", "last_out", "peer_id"]
 
