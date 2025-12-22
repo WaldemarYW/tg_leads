@@ -676,6 +676,7 @@ async def main():
 
             if last_step == STEP_FORMAT_QUESTION:
                 if wants_video(text) and video_message:
+                    await asyncio.sleep(30)
                     try:
                         if video_message.media:
                             await client.send_file(
