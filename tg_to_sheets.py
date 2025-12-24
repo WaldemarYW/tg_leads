@@ -144,7 +144,10 @@ SCRIPT_TEMPLATES = [
 
 
 def normalize_text(s: Optional[str]) -> str:
-    return (s or "").strip().lower()
+    text = (s or "").strip().lower()
+    if not text:
+        return ""
+    return " ".join(text.split())
 
 
 def classify_status(
