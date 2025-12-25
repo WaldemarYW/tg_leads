@@ -1,6 +1,5 @@
 import os
 import time
-import re
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple, List, Set
@@ -113,18 +112,6 @@ DEFAULT_STATUS_RULES = [
     (REFERRAL_TEXT, "🎁 Реферал Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."),
 ]
 
-STOP_WORDS_DEFAULT = (
-    "жаль",
-    "нажаль",
-    "сожалению",
-    "ні",
-    "нет",
-    "вибачте",
-    "извините",
-    "шкода",
-)
-STOP_WORDS_WORKSHEET = os.environ.get("STOP_WORDS_WORKSHEET", "StopWords")
-
 SCRIPT_TEMPLATES = [
     CONTACT_TEXT,
     INTEREST_TEXT,
@@ -151,29 +138,11 @@ def normalize_text(s: Optional[str]) -> str:
     return " ".join(text.split())
 
 
-def contains_stop_word(text: str, stop_words: Tuple[str, ...]) -> bool:
-    normalized = normalize_text(text)
-    if not normalized:
-        return False
-    words = set(re.findall(r"\w+", normalized, flags=re.UNICODE))
-    for w in stop_words:
-        w_norm = normalize_text(w)
-        if not w_norm:
-            continue
-        if " " in w_norm:
-            if w_norm in normalized:
-                return True
-        elif w_norm in words:
-            return True
-    return False
-
-
 def classify_status(
     template_out: str,
     last_msg_from_me: Optional[bool],
     consecutive_out: int,
     status_rules: List[Tuple[str, str]],
-    stop_words: Tuple[str, ...],
     last_in_text: str
 ) -> str:
     t_out = normalize_text(template_out)
@@ -185,9 +154,6 @@ def classify_status(
     if last_msg_from_me is False:
         if "?" in (last_in_text or ""):
             return "знак питання"
-        t_in = normalize_text(last_in_text)
-        if t_in and contains_stop_word(t_in, stop_words):
-            return "стоп слово"
         return "користувач"
 
     if consecutive_out >= 3:
@@ -283,18 +249,6 @@ def load_status_rules(sh) -> List[Tuple[str, str]]:
             rules.append((template, status))
     return rules or DEFAULT_STATUS_RULES[:]
 
-
-def load_stop_words(sh) -> Tuple[str, ...]:
-    ws = get_or_create_worksheet(sh, STOP_WORDS_WORKSHEET, rows=1000, cols=1)
-    values = ws.col_values(1)
-    words = [normalize_text(v) for v in values if normalize_text(v)]
-    if words:
-        return tuple(words)
-
-    rows = [[w] for w in STOP_WORDS_DEFAULT]
-    if rows:
-        ws.append_rows(rows, value_input_option="USER_ENTERED")
-    return STOP_WORDS_DEFAULT
 
 
 def load_exclusions(sh, worksheet_name: str) -> Tuple[Set[int], Set[str]]:
@@ -477,7 +431,6 @@ async def update_google_sheet(
         sh, os.environ.get("EXCLUDED_WORKSHEET", "Excluded")
     )
     status_rules = load_status_rules(sh)
-    stop_words = load_stop_words(sh)
 
     if not acquire_lock(session_lock, ttl_sec=300):
         return 0, "❌ Сесія зайнята (інший процес працює)"
@@ -570,7 +523,6 @@ async def update_google_sheet(
                 last_msg_from_me,
                 consecutive_out,
                 status_rules,
-                stop_words,
                 last_in,
             )
 

@@ -4,9 +4,11 @@ import time
 import json
 import asyncio
 import signal
-from datetime import datetime, date
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple
+import urllib.request
+import urllib.error
 
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
@@ -67,22 +69,10 @@ USERNAME_RE = re.compile(r"(?:@|t\.me/)([A-Za-z0-9_]{5,})")
 PHONE_RE = re.compile(r"\+?\d[\d\s\-\(\)]{9,}\d")
 
 VIDEO_WORDS = ("відео", "видео")
-STOP_WORDS = (
-    "жаль",
-    "нажаль",
-    "сожалению",
-    "ні",
-    "нет",
-    "вибачте",
-    "извините",
-    "шкода",
-)
-
-STOP_WORDS_WORKSHEET = os.environ.get("STOP_WORDS_WORKSHEET", "StopWords")
-STOP_WORDS_CACHE_PATH = os.environ.get("STOP_WORDS_CACHE_PATH", "/opt/tg_leads/.auto_reply.stop_words.json")
-STOP_WORDS_CACHE_TTL_HOURS = int(os.environ.get("STOP_WORDS_CACHE_TTL_HOURS", "48"))
-STOP_STATE_PATH = os.environ.get("AUTO_REPLY_STOP_STATE_PATH", "/opt/tg_leads/.auto_reply.stop_state.json")
-STOP_STATE_TTL_HOURS = int(os.environ.get("AUTO_REPLY_STOP_TTL_HOURS", "48"))
+DIALOG_AI_URL = os.environ.get("DIALOG_AI_URL", "http://127.0.0.1:3000/dialog_suggest")
+DIALOG_AI_TIMEOUT_SEC = float(os.environ.get("DIALOG_AI_TIMEOUT_SEC", "20"))
+STEP_STATE_PATH = os.environ.get("AUTO_REPLY_STEP_STATE_PATH", "/opt/tg_leads/.auto_reply.step_state.json")
+QUESTION_WAIT_SEC = int(os.environ.get("AUTO_REPLY_QUESTION_WAIT_SEC", "300"))
 STATUS_RULES_WORKSHEET = os.environ.get("STATUS_RULES_WORKSHEET", "StatusRules")
 STATUS_RULES_CACHE_PATH = os.environ.get("STATUS_RULES_CACHE_PATH", "/opt/tg_leads/.auto_reply.status_rules.json")
 STATUS_RULES_CACHE_TTL_HOURS = int(os.environ.get("STATUS_RULES_CACHE_TTL_HOURS", "48"))
@@ -122,9 +112,6 @@ TEMPLATE_TO_STEP = {
     normalize_text(TRAINING_QUESTION_TEXT): STEP_TRAINING_QUESTION,
     normalize_text(FORM_TEXT): STEP_FORM,
 }
-
-STEP_STATUS = {}
-
 
 def extract_contact(text: str) -> Tuple[Optional[str], Optional[str]]:
     if not text:
@@ -254,7 +241,19 @@ async def get_last_outgoing_step(client: TelegramClient, entity: User) -> Option
     return None
 
 
-async def has_outgoing_template(client: TelegramClient, entity: User) -> bool:
+async def get_last_step(client: TelegramClient, entity: User, step_state: "StepState") -> Optional[str]:
+    cached = step_state.get(entity.id)
+    if cached:
+        return cached
+    step = await get_last_outgoing_step(client, entity)
+    if step:
+        step_state.set(entity.id, step)
+    return step
+
+
+async def has_outgoing_template(client: TelegramClient, entity: User, step_state: "StepState") -> bool:
+    if step_state.get(entity.id):
+        return True
     async for m in client.iter_messages(entity, limit=30):
         if not m.message or not m.out:
             continue
@@ -271,8 +270,18 @@ async def send_and_update(
     text: str,
     status: Optional[str],
     delay_after: Optional[float] = None,
+    use_ai: bool = True,
+    draft: Optional[str] = None,
+    step_state: Optional["StepState"] = None,
+    step_name: Optional[str] = None,
 ):
-    await client.send_message(entity, text)
+    message_text = text
+    if use_ai:
+        history = await build_ai_history(client, entity, limit=10)
+        ai_text = await dialog_suggest(history, draft or text)
+        if ai_text:
+            message_text = ai_text
+    await client.send_message(entity, message_text)
     name = getattr(entity, "first_name", "") or "Unknown"
     username = getattr(entity, "username", "") or ""
     chat_link = build_chat_link_app(entity, entity.id)
@@ -284,13 +293,15 @@ async def send_and_update(
                     "peer_id": entity.id,
                     "username": username or "",
                     "name": name or "",
-                    "text_preview": text[:200],
+                    "text_preview": message_text[:200],
                 },
                 f,
                 ensure_ascii=True,
             )
     except Exception:
         pass
+    if step_state and step_name:
+        step_state.set(entity.id, step_name)
     sheet.upsert(
         tz=tz,
         peer_id=entity.id,
@@ -298,7 +309,7 @@ async def send_and_update(
         username=username,
         chat_link=chat_link,
         status=status,
-        last_out=text[:200],
+        last_out=message_text[:200],
     )
     if delay_after:
         await asyncio.sleep(delay_after)
@@ -309,55 +320,56 @@ def wants_video(text: str) -> bool:
     return any(word in t for word in VIDEO_WORDS)
 
 
-def has_stop_words(text: str, stop_words: Tuple[str, ...]) -> bool:
-    t = normalize_text(text)
-    return any(word in t for word in stop_words)
+def _post_json(url: str, payload: dict, timeout_sec: float) -> dict:
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        raw = resp.read().decode("utf-8")
+    return json.loads(raw) if raw else {}
 
 
-def load_stop_words_from_sheet() -> Tuple[str, ...]:
+async def dialog_suggest(history: list, draft: str) -> Optional[str]:
+    if not DIALOG_AI_URL:
+        return None
+    payload = {"history": history, "draft": draft}
     try:
-        gc = sheets_client(GOOGLE_CREDS)
-        sh = gc.open(SHEET_NAME)
-        ws = get_or_create_worksheet(sh, STOP_WORDS_WORKSHEET, rows=1000, cols=1)
-        values = ws.col_values(1)
-        words = [normalize_text(v) for v in values if normalize_text(v)]
-        if words:
-            return tuple(words)
-        rows = [[w] for w in STOP_WORDS]
-        if rows:
-            ws.append_rows(rows, value_input_option="USER_ENTERED")
-        return STOP_WORDS
-    except Exception:
-        return STOP_WORDS
+        data = await asyncio.to_thread(_post_json, DIALOG_AI_URL, payload, DIALOG_AI_TIMEOUT_SEC)
+    except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError) as err:
+        print(f"⚠️ AI error: {err}")
+        return None
+    if not data or not data.get("ok"):
+        return None
+    text = data.get("text")
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    suggestions = data.get("suggestions") or []
+    if suggestions:
+        return str(suggestions[0]).strip()
+    return None
 
 
-def get_stop_words_cached() -> Tuple[str, ...]:
-    now_ts = time.time()
-    ttl_sec = STOP_WORDS_CACHE_TTL_HOURS * 3600
-    if os.path.exists(STOP_WORDS_CACHE_PATH):
-        try:
-            with open(STOP_WORDS_CACHE_PATH, "r") as f:
-                data = json.load(f)
-            fetched_at = float(data.get("fetched_at", 0))
-            words = data.get("words", [])
-            if now_ts - fetched_at < ttl_sec and words:
-                return tuple(words)
-        except Exception:
-            pass
-
-    words = load_stop_words_from_sheet()
-    try:
-        with open(STOP_WORDS_CACHE_PATH, "w") as f:
-            json.dump({"fetched_at": now_ts, "words": list(words)}, f, ensure_ascii=True)
-    except Exception:
-        pass
-    return words
+async def build_ai_history(client: TelegramClient, entity: User, limit: int = 10) -> list:
+    items = []
+    async for m in client.iter_messages(entity, limit=limit):
+        if not m.message:
+            continue
+        items.append(
+            {
+                "sender": "me" if m.out else "candidate",
+                "text": m.message,
+            }
+        )
+    return list(reversed(items))
 
 
-class StopState:
-    def __init__(self, path: str, ttl_hours: int):
+class StepState:
+    def __init__(self, path: str):
         self.path = path
-        self.ttl_sec = ttl_hours * 3600
         self.data = {}
         self._load()
 
@@ -379,47 +391,12 @@ class StopState:
         except Exception:
             pass
 
-    def _cleanup(self):
-        now_ts = time.time()
-        expired = [k for k, v in self.data.items() if now_ts - float(v) > self.ttl_sec]
-        for k in expired:
-            self.data.pop(k, None)
-        if expired:
-            self._save()
+    def get(self, peer_id: int) -> Optional[str]:
+        return self.data.get(str(peer_id))
 
-    def is_stopped(self, peer_id: int) -> bool:
-        self._cleanup()
-        return str(peer_id) in self.data
-
-    def stop_at(self, peer_id: int) -> Optional[float]:
-        self._cleanup()
-        value = self.data.get(str(peer_id))
-        return float(value) if value is not None else None
-
-    def set_stop(self, peer_id: int):
-        self.data[str(peer_id)] = time.time()
+    def set(self, peer_id: int, step: str):
+        self.data[str(peer_id)] = step
         self._save()
-
-    def clear_stop(self, peer_id: int):
-        if str(peer_id) in self.data:
-            self.data.pop(str(peer_id), None)
-            self._save()
-
-
-async def last_outgoing_is_non_template(client: TelegramClient, entity: User) -> bool:
-    async for m in client.iter_messages(entity, limit=20):
-        if not m.message or not m.out:
-            continue
-        return not is_script_template(m.message)
-    return False
-
-
-async def get_last_outgoing_message(client: TelegramClient, entity: User):
-    async for m in client.iter_messages(entity, limit=20):
-        if not m.message or not m.out:
-            continue
-        return m
-    return None
 
 
 def load_status_rules_from_sheet() -> Tuple[Tuple[str, str], ...]:
@@ -537,7 +514,9 @@ async def main():
     client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
     processing_peers = set()
     last_reply_at = {}
-    stop_state = StopState(STOP_STATE_PATH, STOP_STATE_TTL_HOURS)
+    last_incoming_at = {}
+    pending_followups = {}
+    step_state = StepState(STEP_STATE_PATH)
     status_rules = get_status_rules_cached()
     stop_event = asyncio.Event()
 
@@ -588,6 +567,276 @@ async def main():
     if not video_message:
         print("⚠️ Не знайшов відео у групі для пересилання")
 
+    async def send_ai_response(
+        entity: User,
+        status: Optional[str] = None,
+    ):
+        history = await build_ai_history(client, entity, limit=10)
+        ai_text = await dialog_suggest(history, "")
+        if not ai_text:
+            return
+        await send_and_update(
+            client,
+            sheet,
+            tz,
+            entity,
+            ai_text,
+            status,
+            use_ai=False,
+            step_state=step_state,
+        )
+
+    async def continue_flow(entity: User, last_step: str, text: str):
+        if last_step == STEP_CONTACT:
+            await send_and_update(
+                client,
+                sheet,
+                tz,
+                entity,
+                INTEREST_TEXT,
+                status_for_text(INTEREST_TEXT, status_rules),
+                use_ai=True,
+                draft=INTEREST_TEXT,
+                step_state=step_state,
+                step_name=STEP_INTEREST,
+            )
+            await send_and_update(
+                client,
+                sheet,
+                tz,
+                entity,
+                DATING_TEXT,
+                status_for_text(DATING_TEXT, status_rules),
+                delay_after=5,
+                use_ai=True,
+                draft=DATING_TEXT,
+                step_state=step_state,
+                step_name=STEP_DATING,
+            )
+            await send_and_update(
+                client,
+                sheet,
+                tz,
+                entity,
+                DUTIES_TEXT,
+                status_for_text(DUTIES_TEXT, status_rules),
+                delay_after=5,
+                use_ai=True,
+                draft=DUTIES_TEXT,
+                step_state=step_state,
+                step_name=STEP_DUTIES,
+            )
+            await send_and_update(
+                client,
+                sheet,
+                tz,
+                entity,
+                CLARIFY_TEXT,
+                status_for_text(CLARIFY_TEXT, status_rules),
+                use_ai=True,
+                draft=CLARIFY_TEXT,
+                step_state=step_state,
+                step_name=STEP_CLARIFY,
+            )
+            schedule_question_wait(entity, STEP_CLARIFY)
+            last_reply_at[entity.id] = time.time()
+            return
+
+        if last_step == STEP_CLARIFY:
+            await send_and_update(
+                client,
+                sheet,
+                tz,
+                entity,
+                SHIFTS_TEXT,
+                status_for_text(SHIFTS_TEXT, status_rules),
+                delay_after=5,
+                use_ai=True,
+                draft=SHIFTS_TEXT,
+                step_state=step_state,
+                step_name=STEP_SHIFTS,
+            )
+            await send_and_update(
+                client,
+                sheet,
+                tz,
+                entity,
+                SHIFT_QUESTION_TEXT,
+                status_for_text(SHIFT_QUESTION_TEXT, status_rules),
+                use_ai=True,
+                draft=SHIFT_QUESTION_TEXT,
+                step_state=step_state,
+                step_name=STEP_SHIFT_QUESTION,
+            )
+            schedule_question_wait(entity, STEP_SHIFT_QUESTION)
+            last_reply_at[entity.id] = time.time()
+            return
+
+        if last_step == STEP_SHIFT_QUESTION:
+            await send_and_update(
+                client,
+                sheet,
+                tz,
+                entity,
+                FORMAT_TEXT,
+                status_for_text(FORMAT_TEXT, status_rules),
+                delay_after=5,
+                use_ai=True,
+                draft=FORMAT_TEXT,
+                step_state=step_state,
+                step_name=STEP_FORMAT,
+            )
+            await send_and_update(
+                client,
+                sheet,
+                tz,
+                entity,
+                FORMAT_QUESTION_TEXT,
+                status_for_text(FORMAT_QUESTION_TEXT, status_rules),
+                use_ai=True,
+                draft=FORMAT_QUESTION_TEXT,
+                step_state=step_state,
+                step_name=STEP_FORMAT_QUESTION,
+            )
+            schedule_question_wait(entity, STEP_FORMAT_QUESTION)
+            last_reply_at[entity.id] = time.time()
+            return
+
+        if last_step == STEP_FORMAT_QUESTION:
+            if wants_video(text) and video_message:
+                await asyncio.sleep(30)
+                try:
+                    if video_message.media:
+                        await client.send_file(
+                            entity,
+                            video_message.media,
+                            caption=video_message.message or "",
+                        )
+                    elif video_message.message:
+                        await client.send_message(entity, video_message.message)
+                except Exception:
+                    print("⚠️ Не вдалося надіслати відео")
+                await send_and_update(
+                    client,
+                    sheet,
+                    tz,
+                    entity,
+                    VIDEO_FOLLOWUP_TEXT,
+                    status_for_text(VIDEO_FOLLOWUP_TEXT, status_rules),
+                    use_ai=True,
+                    draft=VIDEO_FOLLOWUP_TEXT,
+                    step_state=step_state,
+                    step_name=STEP_VIDEO_FOLLOWUP,
+                )
+                last_reply_at[entity.id] = time.time()
+                return
+
+            await send_and_update(
+                client,
+                sheet,
+                tz,
+                entity,
+                TRAINING_TEXT,
+                status_for_text(TRAINING_TEXT, status_rules),
+                delay_after=5,
+                use_ai=True,
+                draft=TRAINING_TEXT,
+                step_state=step_state,
+                step_name=STEP_TRAINING,
+            )
+            await send_and_update(
+                client,
+                sheet,
+                tz,
+                entity,
+                TRAINING_QUESTION_TEXT,
+                status_for_text(TRAINING_QUESTION_TEXT, status_rules),
+                use_ai=True,
+                draft=TRAINING_QUESTION_TEXT,
+                step_state=step_state,
+                step_name=STEP_TRAINING_QUESTION,
+            )
+            schedule_question_wait(entity, STEP_TRAINING_QUESTION)
+            last_reply_at[entity.id] = time.time()
+            return
+
+        if last_step == STEP_VIDEO_FOLLOWUP:
+            await send_and_update(
+                client,
+                sheet,
+                tz,
+                entity,
+                TRAINING_TEXT,
+                status_for_text(TRAINING_TEXT, status_rules),
+                delay_after=5,
+                use_ai=True,
+                draft=TRAINING_TEXT,
+                step_state=step_state,
+                step_name=STEP_TRAINING,
+            )
+            await send_and_update(
+                client,
+                sheet,
+                tz,
+                entity,
+                TRAINING_QUESTION_TEXT,
+                status_for_text(TRAINING_QUESTION_TEXT, status_rules),
+                use_ai=True,
+                draft=TRAINING_QUESTION_TEXT,
+                step_state=step_state,
+                step_name=STEP_TRAINING_QUESTION,
+            )
+            schedule_question_wait(entity, STEP_TRAINING_QUESTION)
+            last_reply_at[entity.id] = time.time()
+            return
+
+        if last_step == STEP_TRAINING_QUESTION:
+            await send_and_update(
+                client,
+                sheet,
+                tz,
+                entity,
+                FORM_TEXT,
+                status_for_text(FORM_TEXT, status_rules),
+                use_ai=True,
+                draft=FORM_TEXT,
+                step_state=step_state,
+                step_name=STEP_FORM,
+            )
+            last_reply_at[entity.id] = time.time()
+            return
+
+    def schedule_question_wait(entity: User, step_name: str):
+        peer_id = entity.id
+        sent_at = time.time()
+
+        async def _task():
+            try:
+                await asyncio.sleep(QUESTION_WAIT_SEC)
+                if last_incoming_at.get(peer_id, 0) >= sent_at:
+                    return
+                if step_state.get(peer_id) != step_name:
+                    return
+                await continue_flow(entity, step_name, "")
+            finally:
+                pending_followups.pop(peer_id, None)
+
+        pending_task = pending_followups.pop(peer_id, None)
+        if pending_task:
+            pending_task.cancel()
+        pending_followups[peer_id] = asyncio.create_task(_task())
+
+    async def schedule_continue_after_question(entity: User, peer_id: int, last_step: str, ts: float):
+        try:
+            await asyncio.sleep(QUESTION_WAIT_SEC)
+            if last_incoming_at.get(peer_id) != ts:
+                return
+            if step_state.get(peer_id) != last_step:
+                return
+            await continue_flow(entity, last_step, "")
+        finally:
+            pending_followups.pop(peer_id, None)
+
     @client.on(events.NewMessage(chats=leads_group))
     async def on_lead_message(event):
         text = event.raw_text or ""
@@ -607,7 +856,7 @@ async def main():
             print(f"⏭️ Пропускаю виключеного користувача: {entity.id}")
             return
 
-        if await has_outgoing_template(client, entity):
+        if await has_outgoing_template(client, entity, step_state):
             print(f"ℹ️ Вже контактували: {entity.id}")
             return
 
@@ -618,6 +867,10 @@ async def main():
             entity,
             CONTACT_TEXT,
             status_for_text(CONTACT_TEXT, status_rules),
+            use_ai=True,
+            draft=CONTACT_TEXT,
+            step_state=step_state,
+            step_name=STEP_CONTACT,
         )
         print(f"✅ Надіслано перше повідомлення: {entity.id}")
 
@@ -639,10 +892,14 @@ async def main():
         last_ts = last_reply_at.get(peer_id)
         if last_ts and now_ts - last_ts < REPLY_DEBOUNCE_SEC:
             return
+        pending_task = pending_followups.pop(peer_id, None)
+        if pending_task:
+            pending_task.cancel()
         processing_peers.add(peer_id)
 
         try:
             text = event.raw_text or ""
+            last_incoming_at[peer_id] = time.time()
             name = getattr(sender, "first_name", "") or "Unknown"
             username = getattr(sender, "username", "") or ""
             chat_link = build_chat_link_app(sender, sender.id)
@@ -655,121 +912,20 @@ async def main():
                 last_in=text[:200],
             )
 
+            last_step = await get_last_step(client, sender, step_state)
             if message_has_question(text):
-                sheet.upsert(
-                    tz=tz,
-                    peer_id=peer_id,
-                    name=name,
-                    username=username,
-                    chat_link=chat_link,
-                    status="знак питання",
-                )
+                await send_ai_response(sender, status="знак питання")
+                if last_step:
+                    ts = last_incoming_at.get(peer_id, time.time())
+                    pending_followups[peer_id] = asyncio.create_task(
+                        schedule_continue_after_question(sender, peer_id, last_step, ts)
+                    )
                 return
 
-            stop_words = get_stop_words_cached()
-            if has_stop_words(text, stop_words):
-                stop_state.set_stop(peer_id)
-                sheet.upsert(
-                    tz=tz,
-                    peer_id=peer_id,
-                    name=name,
-                    username=username,
-                    chat_link=chat_link,
-                    status="стоп слово",
-                )
-                return
-
-            if stop_state.is_stopped(peer_id):
-                last_out = await get_last_outgoing_message(client, sender)
-                stop_at = stop_state.stop_at(peer_id)
-                if last_out and last_out.date and stop_at:
-                    if last_out.date.timestamp() > stop_at and is_script_template(last_out.message):
-                        stop_state.clear_stop(peer_id)
-                    else:
-                        return
-                else:
-                    return
-
-            if await last_outgoing_is_non_template(client, sender):
-                stop_state.set_stop(peer_id)
-                sheet.upsert(
-                    tz=tz,
-                    peer_id=peer_id,
-                    name=name,
-                    username=username,
-                    chat_link=chat_link,
-                    status="користувач",
-                )
-                return
-
-            last_step = await get_last_outgoing_step(client, sender)
             if not last_step:
                 return
 
-            await asyncio.sleep(10)
-            if last_step == STEP_CONTACT:
-                await send_and_update(client, sheet, tz, sender, INTEREST_TEXT, status_for_text(INTEREST_TEXT, status_rules))
-                await send_and_update(client, sheet, tz, sender, DATING_TEXT, status_for_text(DATING_TEXT, status_rules), delay_after=5)
-                await send_and_update(client, sheet, tz, sender, DUTIES_TEXT, status_for_text(DUTIES_TEXT, status_rules), delay_after=5)
-                await send_and_update(client, sheet, tz, sender, CLARIFY_TEXT, status_for_text(CLARIFY_TEXT, status_rules))
-                last_reply_at[peer_id] = time.time()
-                return
-
-            if last_step == STEP_CLARIFY:
-                await send_and_update(client, sheet, tz, sender, SHIFTS_TEXT, status_for_text(SHIFTS_TEXT, status_rules), delay_after=5)
-                await send_and_update(
-                    client, sheet, tz, sender, SHIFT_QUESTION_TEXT, status_for_text(SHIFT_QUESTION_TEXT, status_rules)
-                )
-                last_reply_at[peer_id] = time.time()
-                return
-
-            if last_step == STEP_SHIFT_QUESTION:
-                await send_and_update(client, sheet, tz, sender, FORMAT_TEXT, status_for_text(FORMAT_TEXT, status_rules), delay_after=5)
-                await send_and_update(
-                    client, sheet, tz, sender, FORMAT_QUESTION_TEXT, status_for_text(FORMAT_QUESTION_TEXT, status_rules)
-                )
-                last_reply_at[peer_id] = time.time()
-                return
-
-            if last_step == STEP_FORMAT_QUESTION:
-                if wants_video(text) and video_message:
-                    await asyncio.sleep(30)
-                    try:
-                        if video_message.media:
-                            await client.send_file(
-                                sender,
-                                video_message.media,
-                                caption=video_message.message or "",
-                            )
-                        elif video_message.message:
-                            await client.send_message(sender, video_message.message)
-                    except Exception:
-                        print("⚠️ Не вдалося надіслати відео")
-                    await send_and_update(
-                        client, sheet, tz, sender, VIDEO_FOLLOWUP_TEXT, status_for_text(VIDEO_FOLLOWUP_TEXT, status_rules)
-                    )
-                    last_reply_at[peer_id] = time.time()
-                    return
-
-                await send_and_update(client, sheet, tz, sender, TRAINING_TEXT, status_for_text(TRAINING_TEXT, status_rules), delay_after=5)
-                await send_and_update(
-                    client, sheet, tz, sender, TRAINING_QUESTION_TEXT, status_for_text(TRAINING_QUESTION_TEXT, status_rules)
-                )
-                last_reply_at[peer_id] = time.time()
-                return
-
-            if last_step == STEP_VIDEO_FOLLOWUP:
-                await send_and_update(client, sheet, tz, sender, TRAINING_TEXT, status_for_text(TRAINING_TEXT, status_rules), delay_after=5)
-                await send_and_update(
-                    client, sheet, tz, sender, TRAINING_QUESTION_TEXT, status_for_text(TRAINING_QUESTION_TEXT, status_rules)
-                )
-                last_reply_at[peer_id] = time.time()
-                return
-
-            if last_step == STEP_TRAINING_QUESTION:
-                await send_and_update(client, sheet, tz, sender, FORM_TEXT, status_for_text(FORM_TEXT, status_rules))
-                last_reply_at[peer_id] = time.time()
-                return
+            await continue_flow(sender, last_step, text)
         finally:
             processing_peers.discard(peer_id)
 
