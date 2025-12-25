@@ -1,5 +1,6 @@
 import os
 import time
+import re
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple, List, Set
@@ -150,6 +151,23 @@ def normalize_text(s: Optional[str]) -> str:
     return " ".join(text.split())
 
 
+def contains_stop_word(text: str, stop_words: Tuple[str, ...]) -> bool:
+    normalized = normalize_text(text)
+    if not normalized:
+        return False
+    words = set(re.findall(r"\w+", normalized, flags=re.UNICODE))
+    for w in stop_words:
+        w_norm = normalize_text(w)
+        if not w_norm:
+            continue
+        if " " in w_norm:
+            if w_norm in normalized:
+                return True
+        elif w_norm in words:
+            return True
+    return False
+
+
 def classify_status(
     template_out: str,
     last_msg_from_me: Optional[bool],
@@ -168,7 +186,7 @@ def classify_status(
         if "?" in (last_in_text or ""):
             return "знак питання"
         t_in = normalize_text(last_in_text)
-        if t_in and any(w in t_in for w in stop_words):
+        if t_in and contains_stop_word(t_in, stop_words):
             return "стоп слово"
         return "користувач"
 
