@@ -72,16 +72,21 @@ VIDEO_WORDS = ("відео", "видео")
 DIALOG_AI_URL = os.environ.get("DIALOG_AI_URL", "http://127.0.0.1:3000/dialog_suggest")
 DIALOG_AI_TIMEOUT_SEC = float(os.environ.get("DIALOG_AI_TIMEOUT_SEC", "20"))
 STEP_STATE_PATH = os.environ.get("AUTO_REPLY_STEP_STATE_PATH", "/opt/tg_leads/.auto_reply.step_state.json")
-QUESTION_WAIT_SEC = int(os.environ.get("AUTO_REPLY_QUESTION_WAIT_SEC", "300"))
 STATUS_RULES_WORKSHEET = os.environ.get("STATUS_RULES_WORKSHEET", "StatusRules")
 STATUS_RULES_CACHE_PATH = os.environ.get("STATUS_RULES_CACHE_PATH", "/opt/tg_leads/.auto_reply.status_rules.json")
 STATUS_RULES_CACHE_TTL_HOURS = int(os.environ.get("STATUS_RULES_CACHE_TTL_HOURS", "48"))
 EXCLUDED_WORKSHEET = os.environ.get("EXCLUDED_WORKSHEET", "Excluded")
 EXCLUSIONS_CACHE_PATH = os.environ.get("EXCLUSIONS_CACHE_PATH", "/opt/tg_leads/.auto_reply.exclusions.json")
 EXCLUSIONS_CACHE_TTL_HOURS = int(os.environ.get("EXCLUSIONS_CACHE_TTL_HOURS", "6"))
+PAUSE_WORKSHEET = os.environ.get("PAUSE_WORKSHEET", "Paused")
+PAUSE_CACHE_TTL_SEC = int(os.environ.get("PAUSE_CACHE_TTL_SEC", "120"))
+GROUP_LEADS_WORKSHEET = os.environ.get("GROUP_LEADS_WORKSHEET", "GroupLeads")
+CONTINUE_DELAY_SEC = float(os.environ.get("AUTO_REPLY_CONTINUE_DELAY_SEC", "20"))
 CONFIRM_STATUS = "✅ Погодився"
 REFERRAL_STATUS = "🎁 Реферал"
 IMMUTABLE_STATUSES = {CONFIRM_STATUS, REFERRAL_STATUS}
+STOP_COMMANDS = {"стоп1", "stop1"}
+START_COMMANDS = {"старт1", "start1"}
 
 STEP_CONTACT = "contact"
 STEP_INTEREST = "interest"
@@ -113,6 +118,51 @@ TEMPLATE_TO_STEP = {
     normalize_text(FORM_TEXT): STEP_FORM,
 }
 
+PAUSE_HEADERS = [
+    "peer_id",
+    "username",
+    "name",
+    "chat_link_app",
+    "status",
+    "updated_at",
+    "updated_by",
+]
+
+GROUP_LEADS_HEADERS = [
+    "received_at",
+    "status",
+    "full_name",
+    "age",
+    "phone",
+    "tg",
+    "pc",
+    "source_id",
+    "source_name",
+    "raw_text",
+]
+
+GROUP_KEY_MAP = {
+    "піб": "full_name",
+    "фио": "full_name",
+    "імя": "full_name",
+    "ім'я": "full_name",
+    "имя": "full_name",
+    "вік": "age",
+    "возраст": "age",
+    "номер телефону": "phone",
+    "номер телефона": "phone",
+    "телефон": "phone",
+    "phone": "phone",
+    "тг": "tg",
+    "tg": "tg",
+    "telegram": "tg",
+    "чи є пк": "pc",
+    "є пк": "pc",
+    "pc": "pc",
+    "id": "source_id",
+    "name": "source_name",
+}
+
 def extract_contact(text: str) -> Tuple[Optional[str], Optional[str]]:
     if not text:
         return None, None
@@ -132,6 +182,41 @@ def extract_contact(text: str) -> Tuple[Optional[str], Optional[str]]:
 
 def message_has_question(text: str) -> bool:
     return "?" in (text or "")
+
+
+def normalize_key(text: str) -> str:
+    cleaned = normalize_text(text)
+    return re.sub(r"[^\w\s]", "", cleaned, flags=re.IGNORECASE)
+
+
+def normalize_phone(text: str) -> str:
+    return re.sub(r"[^\d+]", "", text or "")
+
+
+def parse_group_message(text: str) -> dict:
+    data = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        match = re.match(r"^[🔹•\-\*]\s*(.+?)\s*:\s*(.+)$", line)
+        if not match:
+            match = re.match(r"^(ID|Name)\s*:\s*(.+)$", line, flags=re.IGNORECASE)
+        if not match:
+            continue
+        key_raw, value = match.group(1), match.group(2)
+        key_norm = normalize_key(key_raw)
+        field = GROUP_KEY_MAP.get(key_norm)
+        if field:
+            data[field] = value.strip()
+
+    username, phone = extract_contact(text or "")
+    if username and not data.get("tg"):
+        data["tg"] = f"@{username}"
+    if phone and not data.get("phone"):
+        data["phone"] = phone
+    data["raw_text"] = (text or "").strip()
+    return data
 
 
 class SheetWriter:
@@ -204,6 +289,185 @@ class SheetWriter:
             ws.update(f"A{row_idx}:H{row_idx}", [row], value_input_option="USER_ENTERED")
         else:
             ws.append_row(row, value_input_option="USER_ENTERED")
+
+
+class PauseStore:
+    def __init__(self):
+        self.gc = sheets_client(GOOGLE_CREDS)
+        self.sh = self.gc.open(SHEET_NAME)
+        self.ws = get_or_create_worksheet(self.sh, PAUSE_WORKSHEET, rows=1000, cols=len(PAUSE_HEADERS))
+        ensure_headers(self.ws, PAUSE_HEADERS, strict=False)
+        self.cache = {}
+        self.username_cache = {}
+        self.loaded_at = 0.0
+
+    def _load_cache(self):
+        try:
+            values = self.ws.get_all_values()
+        except Exception:
+            values = []
+        self.cache = {}
+        self.username_cache = {}
+        self.loaded_at = time.time()
+        if not values:
+            return
+        headers = [h.strip().lower() for h in values[0]]
+
+        def get_col(name: str) -> Optional[int]:
+            try:
+                return headers.index(name)
+            except ValueError:
+                return None
+
+        peer_idx = get_col("peer_id")
+        user_idx = get_col("username")
+        status_idx = get_col("status")
+        for row in values[1:]:
+            status = row[status_idx].strip() if status_idx is not None and status_idx < len(row) else ""
+            if peer_idx is not None and peer_idx < len(row):
+                raw = row[peer_idx].strip()
+                if raw.isdigit():
+                    self.cache[int(raw)] = status
+            if user_idx is not None and user_idx < len(row):
+                uname = normalize_username(row[user_idx])
+                if uname:
+                    self.username_cache[uname] = status
+
+    def get_status(self, peer_id: int, username: Optional[str]) -> Optional[str]:
+        now = time.time()
+        if not self.loaded_at or now - self.loaded_at > PAUSE_CACHE_TTL_SEC:
+            self._load_cache()
+        status = self.cache.get(peer_id)
+        if not status and username:
+            status = self.username_cache.get(normalize_username(username))
+        if status:
+            return status
+        self._load_cache()
+        status = self.cache.get(peer_id)
+        if not status and username:
+            status = self.username_cache.get(normalize_username(username))
+        return status or None
+
+    def set_status(
+        self,
+        peer_id: int,
+        username: Optional[str],
+        name: Optional[str],
+        chat_link: Optional[str],
+        status: str,
+        updated_by: str = "manual",
+    ):
+        try:
+            values = self.ws.get_all_values()
+        except Exception:
+            values = []
+        headers = [h.strip().lower() for h in values[0]] if values else []
+
+        def get_col(name: str) -> Optional[int]:
+            try:
+                return headers.index(name)
+            except ValueError:
+                return None
+
+        row_idx = None
+        peer_idx = get_col("peer_id")
+        user_idx = get_col("username")
+        if values and (peer_idx is not None or user_idx is not None):
+            for idx, row in enumerate(values[1:], start=2):
+                if peer_idx is not None and peer_idx < len(row):
+                    if row[peer_idx].strip() == str(peer_id):
+                        row_idx = idx
+                        break
+                if row_idx is None and user_idx is not None and user_idx < len(row):
+                    if normalize_username(row[user_idx]) == normalize_username(username):
+                        row_idx = idx
+                        break
+
+        updated_at = datetime.now(ZoneInfo(TIMEZONE)).isoformat(timespec="seconds")
+        row = [
+            str(peer_id),
+            ("@" + normalize_username(username)) if username else "",
+            name or "",
+            chat_link or "",
+            status,
+            updated_at,
+            updated_by,
+        ]
+        if row_idx:
+            self.ws.update(f"A{row_idx}:G{row_idx}", [row], value_input_option="USER_ENTERED")
+        else:
+            self.ws.append_row(row, value_input_option="USER_ENTERED")
+        self.cache[peer_id] = status
+        if username:
+            self.username_cache[normalize_username(username)] = status
+        self.loaded_at = time.time()
+
+
+class GroupLeadsSheet:
+    def __init__(self):
+        self.gc = sheets_client(GOOGLE_CREDS)
+        self.sh = self.gc.open(SHEET_NAME)
+        self.ws = get_or_create_worksheet(self.sh, GROUP_LEADS_WORKSHEET, rows=1000, cols=len(GROUP_LEADS_HEADERS))
+        ensure_headers(self.ws, GROUP_LEADS_HEADERS, strict=False)
+
+    def _find_row(self, values, tg_norm: str, phone_norm: str):
+        if not values:
+            return None, None
+        headers = [h.strip().lower() for h in values[0]]
+        data = values[1:]
+
+        def get_col(name: str) -> Optional[int]:
+            try:
+                return headers.index(name)
+            except ValueError:
+                return None
+
+        tg_idx = get_col("tg")
+        phone_idx = get_col("phone")
+        for idx, row in enumerate(data, start=2):
+            if tg_idx is not None and tg_idx < len(row) and tg_norm:
+                if normalize_username(row[tg_idx]) == tg_norm:
+                    return idx, row
+            if phone_idx is not None and phone_idx < len(row) and phone_norm:
+                if normalize_phone(row[phone_idx]) == phone_norm:
+                    return idx, row
+        return None, None
+
+    def upsert(self, tz: ZoneInfo, data: dict, status: Optional[str]):
+        received_at = datetime.now(tz).isoformat(timespec="seconds")
+        tg_value = data.get("tg", "") or ""
+        phone_value = data.get("phone", "") or ""
+        tg_norm = normalize_username(tg_value)
+        phone_norm = normalize_phone(phone_value)
+        try:
+            values = self.ws.get_all_values()
+        except Exception:
+            values = []
+        row_idx, existing = self._find_row(values, tg_norm, phone_norm)
+        existing = existing or [""] * len(GROUP_LEADS_HEADERS)
+
+        def take(key: str, idx: int) -> str:
+            value = data.get(key)
+            if value is not None and value != "":
+                return value
+            return existing[idx] if idx < len(existing) else ""
+
+        row = [
+            received_at,
+            status or take("status", 1),
+            take("full_name", 2),
+            take("age", 3),
+            take("phone", 4),
+            take("tg", 5),
+            take("pc", 6),
+            take("source_id", 7),
+            take("source_name", 8),
+            take("raw_text", 9),
+        ]
+        if row_idx:
+            self.ws.update(f"A{row_idx}:J{row_idx}", [row], value_input_option="USER_ENTERED")
+        else:
+            self.ws.append_row(row, value_input_option="USER_ENTERED")
 
 
 async def find_group_by_title(client: TelegramClient, title: str):
@@ -511,14 +775,33 @@ def get_exclusions_cached() -> Tuple[set, set]:
 async def main():
     tz = ZoneInfo(TIMEZONE)
     sheet = SheetWriter()
+    pause_store = PauseStore()
+    group_leads_sheet = GroupLeadsSheet()
     client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
     processing_peers = set()
+    paused_peers = set()
     last_reply_at = {}
     last_incoming_at = {}
-    pending_followups = {}
     step_state = StepState(STEP_STATE_PATH)
     status_rules = get_status_rules_cached()
     stop_event = asyncio.Event()
+
+    def is_paused(entity: User) -> bool:
+        peer_id = entity.id
+        if peer_id in paused_peers:
+            return True
+        username = getattr(entity, "username", "") or ""
+        status = pause_store.get_status(peer_id, username)
+        if status == "PAUSED":
+            paused_peers.add(peer_id)
+            return True
+        if status == "ACTIVE":
+            paused_peers.discard(peer_id)
+            return False
+        name = getattr(entity, "first_name", "") or "Unknown"
+        chat_link = build_chat_link_app(entity, entity.id)
+        pause_store.set_status(entity.id, username, name, chat_link, "ACTIVE", updated_by="auto")
+        return False
 
     def handle_stop():
         stop_event.set()
@@ -571,6 +854,8 @@ async def main():
         entity: User,
         status: Optional[str] = None,
     ):
+        if is_paused(entity):
+            return
         history = await build_ai_history(client, entity, limit=10)
         ai_text = await dialog_suggest(history, "")
         if not ai_text:
@@ -587,6 +872,8 @@ async def main():
         )
 
     async def continue_flow(entity: User, last_step: str, text: str):
+        if is_paused(entity):
+            return
         if last_step == STEP_CONTACT:
             await send_and_update(
                 client,
@@ -638,7 +925,6 @@ async def main():
                 step_state=step_state,
                 step_name=STEP_CLARIFY,
             )
-            schedule_question_wait(entity, STEP_CLARIFY)
             last_reply_at[entity.id] = time.time()
             return
 
@@ -668,7 +954,6 @@ async def main():
                 step_state=step_state,
                 step_name=STEP_SHIFT_QUESTION,
             )
-            schedule_question_wait(entity, STEP_SHIFT_QUESTION)
             last_reply_at[entity.id] = time.time()
             return
 
@@ -698,7 +983,6 @@ async def main():
                 step_state=step_state,
                 step_name=STEP_FORMAT_QUESTION,
             )
-            schedule_question_wait(entity, STEP_FORMAT_QUESTION)
             last_reply_at[entity.id] = time.time()
             return
 
@@ -756,7 +1040,6 @@ async def main():
                 step_state=step_state,
                 step_name=STEP_TRAINING_QUESTION,
             )
-            schedule_question_wait(entity, STEP_TRAINING_QUESTION)
             last_reply_at[entity.id] = time.time()
             return
 
@@ -786,7 +1069,6 @@ async def main():
                 step_state=step_state,
                 step_name=STEP_TRAINING_QUESTION,
             )
-            schedule_question_wait(entity, STEP_TRAINING_QUESTION)
             last_reply_at[entity.id] = time.time()
             return
 
@@ -806,40 +1088,49 @@ async def main():
             last_reply_at[entity.id] = time.time()
             return
 
-    def schedule_question_wait(entity: User, step_name: str):
-        peer_id = entity.id
-        sent_at = time.time()
-
-        async def _task():
-            try:
-                await asyncio.sleep(QUESTION_WAIT_SEC)
-                if last_incoming_at.get(peer_id, 0) >= sent_at:
-                    return
-                if step_state.get(peer_id) != step_name:
-                    return
-                await continue_flow(entity, step_name, "")
-            finally:
-                pending_followups.pop(peer_id, None)
-
-        pending_task = pending_followups.pop(peer_id, None)
-        if pending_task:
-            pending_task.cancel()
-        pending_followups[peer_id] = asyncio.create_task(_task())
-
-    async def schedule_continue_after_question(entity: User, peer_id: int, last_step: str, ts: float):
+    @client.on(events.NewMessage(outgoing=True))
+    async def on_outgoing_message(event):
+        if not event.is_private:
+            return
+        text = (event.raw_text or "").strip().lower()
+        if not text:
+            return
+        if text not in STOP_COMMANDS and text not in START_COMMANDS:
+            return
+        peer_id = event.chat_id
+        if not peer_id:
+            return
+        if text in STOP_COMMANDS:
+            paused_peers.add(peer_id)
+        else:
+            paused_peers.discard(peer_id)
         try:
-            await asyncio.sleep(QUESTION_WAIT_SEC)
-            if last_incoming_at.get(peer_id) != ts:
-                return
-            if step_state.get(peer_id) != last_step:
-                return
-            await continue_flow(entity, last_step, "")
-        finally:
-            pending_followups.pop(peer_id, None)
+            entity = await event.get_chat()
+        except Exception:
+            entity = None
+        if isinstance(entity, User):
+            name = getattr(entity, "first_name", "") or "Unknown"
+            username = getattr(entity, "username", "") or ""
+            chat_link = build_chat_link_app(entity, entity.id)
+            status = "PAUSED" if text in STOP_COMMANDS else "ACTIVE"
+            pause_store.set_status(entity.id, username, name, chat_link, status, updated_by="manual")
+        else:
+            status = "PAUSED" if text in STOP_COMMANDS else "ACTIVE"
+            pause_store.set_status(peer_id, None, None, None, status, updated_by="manual")
+        try:
+            await event.delete()
+        except Exception:
+            pass
 
     @client.on(events.NewMessage(chats=leads_group))
     async def on_lead_message(event):
         text = event.raw_text or ""
+        try:
+            group_data = parse_group_message(text)
+            group_status = status_for_text(CONTACT_TEXT, status_rules)
+            group_leads_sheet.upsert(tz, group_data, group_status)
+        except Exception:
+            pass
         username, phone = extract_contact(text)
         if not username and not phone:
             return
@@ -854,6 +1145,9 @@ async def main():
         norm_uname = normalize_username(getattr(entity, "username", "") or "")
         if entity.id in excluded_ids or (norm_uname and norm_uname in excluded_usernames):
             print(f"⏭️ Пропускаю виключеного користувача: {entity.id}")
+            return
+        if is_paused(entity):
+            print(f"⏭️ Призупинено для користувача: {entity.id}")
             return
 
         if await has_outgoing_template(client, entity, step_state):
@@ -886,15 +1180,14 @@ async def main():
         norm_uname = normalize_username(getattr(sender, "username", "") or "")
         if peer_id in excluded_ids or (norm_uname and norm_uname in excluded_usernames):
             return
+        if is_paused(sender):
+            return
         if peer_id in processing_peers:
             return
         now_ts = time.time()
         last_ts = last_reply_at.get(peer_id)
         if last_ts and now_ts - last_ts < REPLY_DEBOUNCE_SEC:
             return
-        pending_task = pending_followups.pop(peer_id, None)
-        if pending_task:
-            pending_task.cancel()
         processing_peers.add(peer_id)
 
         try:
@@ -915,16 +1208,15 @@ async def main():
             last_step = await get_last_step(client, sender, step_state)
             if message_has_question(text):
                 await send_ai_response(sender, status="знак питання")
-                if last_step:
-                    ts = last_incoming_at.get(peer_id, time.time())
-                    pending_followups[peer_id] = asyncio.create_task(
-                        schedule_continue_after_question(sender, peer_id, last_step, ts)
-                    )
                 return
 
             if not last_step:
                 return
 
+            if CONTINUE_DELAY_SEC > 0:
+                await asyncio.sleep(CONTINUE_DELAY_SEC)
+                if is_paused(sender):
+                    return
             await continue_flow(sender, last_step, text)
         finally:
             processing_peers.discard(peer_id)
