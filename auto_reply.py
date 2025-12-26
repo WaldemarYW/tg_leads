@@ -63,7 +63,17 @@ REPLY_DEBOUNCE_SEC = float(os.environ.get("REPLY_DEBOUNCE_SEC", "3"))
 SESSION_LOCK = os.environ.get("TELETHON_SESSION_LOCK", f"{SESSION_FILE}.lock")
 STATUS_PATH = os.environ.get("AUTO_REPLY_STATUS_PATH", "/opt/tg_leads/.auto_reply.status")
 
-HEADERS = ["date", "name", "chat_link_app", "username", "status", "last_in", "last_out", "peer_id"]
+HEADERS = [
+    "date",
+    "name",
+    "chat_link_app",
+    "username",
+    "status",
+    "auto_reply",
+    "last_in",
+    "last_out",
+    "peer_id",
+]
 
 USERNAME_RE = re.compile(r"(?:@|t\.me/)([A-Za-z0-9_]{5,})")
 PHONE_RE = re.compile(r"\+?\d[\d\s\-\(\)]{9,}\d")
@@ -280,6 +290,16 @@ class SheetWriter:
                 return idx, row
         return None, None
 
+    def _get_headers(self, ws):
+        return [h.strip().lower() for h in ws.row_values(1)]
+
+    def _col_letter(self, col_idx: int) -> str:
+        result = []
+        while col_idx > 0:
+            col_idx, rem = divmod(col_idx - 1, 26)
+            result.append(chr(ord("A") + rem))
+        return "".join(reversed(result))
+
     def upsert(
         self,
         tz: ZoneInfo,
@@ -288,37 +308,80 @@ class SheetWriter:
         username: str,
         chat_link: str,
         status: Optional[str] = None,
+        auto_reply_enabled: Optional[bool] = None,
         last_in: Optional[str] = None,
         last_out: Optional[str] = None,
     ):
         ws = self.get_ws(tz)
+        headers = self._get_headers(ws)
         row_idx, existing = self._find_row(ws, peer_id)
-        existing = existing or [""] * len(HEADERS)
-        existing_status = existing[4] if len(existing) > 4 else ""
+        existing = existing or [""] * len(headers)
+        if len(existing) < len(headers):
+            existing = existing + [""] * (len(headers) - len(existing))
 
-        def take(value: Optional[str], idx: int) -> str:
-            if value is not None:
-                return value
-            return existing[idx] if idx < len(existing) else ""
+        def col_idx(name: str) -> Optional[int]:
+            try:
+                return headers.index(name)
+            except ValueError:
+                return None
 
+        def set_value(name: str, value: Optional[str]):
+            if value is None:
+                return
+            idx = col_idx(name)
+            if idx is None:
+                return
+            existing[idx] = value
+
+        status_idx = col_idx("status")
+        existing_status = (
+            existing[status_idx] if status_idx is not None and status_idx < len(existing) else ""
+        )
         if existing_status in IMMUTABLE_STATUSES:
             status = existing_status
 
-        row = [
-            str(datetime.now(tz).date()),
-            name,
-            chat_link,
-            ("@" + username) if username else "",
-            take(status, 4),
-            take(last_in, 5),
-            take(last_out, 6),
-            str(peer_id),
-        ]
+        set_value("date", str(datetime.now(tz).date()))
+        set_value("name", name)
+        set_value("chat_link_app", chat_link)
+        set_value("username", ("@" + username) if username else "")
+        if status is not None:
+            set_value("status", status)
+        if auto_reply_enabled is not None:
+            set_value("auto_reply", "ON" if auto_reply_enabled else "OFF")
+        if last_in is not None:
+            set_value("last_in", last_in)
+        if last_out is not None:
+            set_value("last_out", last_out)
+        set_value("peer_id", str(peer_id))
 
         if row_idx:
-            ws.update(f"A{row_idx}:H{row_idx}", [row], value_input_option="USER_ENTERED")
+            end_col = self._col_letter(len(headers))
+            ws.update(f"A{row_idx}:{end_col}{row_idx}", [existing], value_input_option="USER_ENTERED")
         else:
-            ws.append_row(row, value_input_option="USER_ENTERED")
+            ws.append_row(existing, value_input_option="USER_ENTERED")
+
+    def load_enabled_peers(self, tz: ZoneInfo) -> set:
+        ws = self.get_ws(tz)
+        values = ws.get_all_values()
+        if not values:
+            return set()
+        headers = [h.strip().lower() for h in values[0]]
+        try:
+            peer_idx = headers.index("peer_id")
+            auto_idx = headers.index("auto_reply")
+        except ValueError:
+            return set()
+        enabled = set()
+        for row in values[1:]:
+            if peer_idx >= len(row) or auto_idx >= len(row):
+                continue
+            peer_raw = row[peer_idx].strip()
+            auto_raw = row[auto_idx].strip().lower()
+            if not peer_raw.isdigit():
+                continue
+            if auto_raw in {"on", "1", "yes", "true", "enabled"}:
+                enabled.add(int(peer_raw))
+        return enabled
 
 
 class PauseStore:
@@ -568,6 +631,7 @@ async def send_and_update(
     draft: Optional[str] = None,
     step_state: Optional["StepState"] = None,
     step_name: Optional[str] = None,
+    auto_reply_enabled: Optional[bool] = None,
 ):
     message_text = text
     if use_ai:
@@ -603,6 +667,7 @@ async def send_and_update(
         username=username,
         chat_link=chat_link,
         status=status,
+        auto_reply_enabled=auto_reply_enabled,
         last_out=message_text[:200],
     )
     if delay_after:
@@ -811,11 +876,16 @@ async def main():
     client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
     processing_peers = set()
     paused_peers = set()
+    enabled_peers = set()
     last_reply_at = {}
     last_incoming_at = {}
     step_state = StepState(STEP_STATE_PATH)
     status_rules = get_status_rules_cached()
     stop_event = asyncio.Event()
+    try:
+        enabled_peers = sheet.load_enabled_peers(tz)
+    except Exception:
+        enabled_peers = set()
 
     def is_paused(entity: User) -> bool:
         peer_id = entity.id
@@ -1183,8 +1253,10 @@ async def main():
             return
         if text in STOP_COMMANDS:
             paused_peers.add(peer_id)
+            enabled_peers.discard(peer_id)
         else:
             paused_peers.discard(peer_id)
+            enabled_peers.add(peer_id)
         try:
             entity = await event.get_chat()
         except Exception:
@@ -1195,6 +1267,14 @@ async def main():
             chat_link = build_chat_link_app(entity, entity.id)
             status = "PAUSED" if text in STOP_COMMANDS else "ACTIVE"
             pause_store.set_status(entity.id, username, name, chat_link, status, updated_by="manual")
+            sheet.upsert(
+                tz=tz,
+                peer_id=entity.id,
+                name=name,
+                username=username,
+                chat_link=chat_link,
+                auto_reply_enabled=(text in START_COMMANDS),
+            )
         else:
             status = "PAUSED" if text in STOP_COMMANDS else "ACTIVE"
             pause_store.set_status(peer_id, None, None, None, status, updated_by="manual")
@@ -1235,6 +1315,7 @@ async def main():
             print(f"ℹ️ Вже контактували: {entity.id}")
             return
 
+        enabled_peers.add(entity.id)
         await send_and_update(
             client,
             sheet,
@@ -1246,6 +1327,7 @@ async def main():
             draft=CONTACT_TEXT,
             step_state=step_state,
             step_name=STEP_CONTACT,
+            auto_reply_enabled=True,
         )
         print(f"✅ Надіслано перше повідомлення: {entity.id}")
 
@@ -1262,6 +1344,8 @@ async def main():
         if peer_id in excluded_ids or (norm_uname and norm_uname in excluded_usernames):
             return
         if is_paused(sender):
+            return
+        if peer_id not in enabled_peers:
             return
         if peer_id in processing_peers:
             return
