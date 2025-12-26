@@ -184,6 +184,36 @@ def message_has_question(text: str) -> bool:
     return "?" in (text or "")
 
 
+def should_send_question(sent_text: str, question_text: str) -> bool:
+    if not sent_text:
+        return True
+    return normalize_text(question_text) not in normalize_text(sent_text)
+
+
+def mark_step_without_send(
+    sheet: "SheetWriter",
+    tz: ZoneInfo,
+    entity: User,
+    status: Optional[str],
+    step_state: Optional["StepState"],
+    step_name: Optional[str],
+):
+    if step_state and step_name:
+        step_state.set(entity.id, step_name)
+    name = getattr(entity, "first_name", "") or "Unknown"
+    username = getattr(entity, "username", "") or ""
+    chat_link = build_chat_link_app(entity, entity.id)
+    sheet.upsert(
+        tz=tz,
+        peer_id=entity.id,
+        name=name,
+        username=username,
+        chat_link=chat_link,
+        status=status,
+        last_out=None,
+    )
+
+
 def normalize_key(text: str) -> str:
     cleaned = normalize_text(text)
     return re.sub(r"[^\w\s]", "", cleaned, flags=re.IGNORECASE)
@@ -577,6 +607,7 @@ async def send_and_update(
     )
     if delay_after:
         await asyncio.sleep(delay_after)
+    return message_text
 
 
 def wants_video(text: str) -> bool:
@@ -900,7 +931,7 @@ async def main():
                 step_state=step_state,
                 step_name=STEP_DATING,
             )
-            await send_and_update(
+            duties_text = await send_and_update(
                 client,
                 sheet,
                 tz,
@@ -908,28 +939,38 @@ async def main():
                 DUTIES_TEXT,
                 status_for_text(DUTIES_TEXT, status_rules),
                 delay_after=5,
-                use_ai=True,
+                use_ai=False,
                 draft=DUTIES_TEXT,
                 step_state=step_state,
                 step_name=STEP_DUTIES,
             )
-            await send_and_update(
-                client,
-                sheet,
-                tz,
-                entity,
-                CLARIFY_TEXT,
-                status_for_text(CLARIFY_TEXT, status_rules),
-                use_ai=True,
-                draft=CLARIFY_TEXT,
-                step_state=step_state,
-                step_name=STEP_CLARIFY,
-            )
+            if should_send_question(duties_text, CLARIFY_TEXT):
+                await send_and_update(
+                    client,
+                    sheet,
+                    tz,
+                    entity,
+                    CLARIFY_TEXT,
+                    status_for_text(CLARIFY_TEXT, status_rules),
+                    use_ai=True,
+                    draft=CLARIFY_TEXT,
+                    step_state=step_state,
+                    step_name=STEP_CLARIFY,
+                )
+            else:
+                mark_step_without_send(
+                    sheet,
+                    tz,
+                    entity,
+                    status_for_text(CLARIFY_TEXT, status_rules),
+                    step_state,
+                    STEP_CLARIFY,
+                )
             last_reply_at[entity.id] = time.time()
             return
 
         if last_step == STEP_CLARIFY:
-            await send_and_update(
+            shifts_text = await send_and_update(
                 client,
                 sheet,
                 tz,
@@ -937,28 +978,38 @@ async def main():
                 SHIFTS_TEXT,
                 status_for_text(SHIFTS_TEXT, status_rules),
                 delay_after=5,
-                use_ai=True,
+                use_ai=False,
                 draft=SHIFTS_TEXT,
                 step_state=step_state,
                 step_name=STEP_SHIFTS,
             )
-            await send_and_update(
-                client,
-                sheet,
-                tz,
-                entity,
-                SHIFT_QUESTION_TEXT,
-                status_for_text(SHIFT_QUESTION_TEXT, status_rules),
-                use_ai=True,
-                draft=SHIFT_QUESTION_TEXT,
-                step_state=step_state,
-                step_name=STEP_SHIFT_QUESTION,
-            )
+            if should_send_question(shifts_text, SHIFT_QUESTION_TEXT):
+                await send_and_update(
+                    client,
+                    sheet,
+                    tz,
+                    entity,
+                    SHIFT_QUESTION_TEXT,
+                    status_for_text(SHIFT_QUESTION_TEXT, status_rules),
+                    use_ai=True,
+                    draft=SHIFT_QUESTION_TEXT,
+                    step_state=step_state,
+                    step_name=STEP_SHIFT_QUESTION,
+                )
+            else:
+                mark_step_without_send(
+                    sheet,
+                    tz,
+                    entity,
+                    status_for_text(SHIFT_QUESTION_TEXT, status_rules),
+                    step_state,
+                    STEP_SHIFT_QUESTION,
+                )
             last_reply_at[entity.id] = time.time()
             return
 
         if last_step == STEP_SHIFT_QUESTION:
-            await send_and_update(
+            format_text = await send_and_update(
                 client,
                 sheet,
                 tz,
@@ -966,23 +1017,33 @@ async def main():
                 FORMAT_TEXT,
                 status_for_text(FORMAT_TEXT, status_rules),
                 delay_after=5,
-                use_ai=True,
+                use_ai=False,
                 draft=FORMAT_TEXT,
                 step_state=step_state,
                 step_name=STEP_FORMAT,
             )
-            await send_and_update(
-                client,
-                sheet,
-                tz,
-                entity,
-                FORMAT_QUESTION_TEXT,
-                status_for_text(FORMAT_QUESTION_TEXT, status_rules),
-                use_ai=True,
-                draft=FORMAT_QUESTION_TEXT,
-                step_state=step_state,
-                step_name=STEP_FORMAT_QUESTION,
-            )
+            if should_send_question(format_text, FORMAT_QUESTION_TEXT):
+                await send_and_update(
+                    client,
+                    sheet,
+                    tz,
+                    entity,
+                    FORMAT_QUESTION_TEXT,
+                    status_for_text(FORMAT_QUESTION_TEXT, status_rules),
+                    use_ai=True,
+                    draft=FORMAT_QUESTION_TEXT,
+                    step_state=step_state,
+                    step_name=STEP_FORMAT_QUESTION,
+                )
+            else:
+                mark_step_without_send(
+                    sheet,
+                    tz,
+                    entity,
+                    status_for_text(FORMAT_QUESTION_TEXT, status_rules),
+                    step_state,
+                    STEP_FORMAT_QUESTION,
+                )
             last_reply_at[entity.id] = time.time()
             return
 
@@ -1015,7 +1076,7 @@ async def main():
                 last_reply_at[entity.id] = time.time()
                 return
 
-            await send_and_update(
+            training_text = await send_and_update(
                 client,
                 sheet,
                 tz,
@@ -1023,28 +1084,38 @@ async def main():
                 TRAINING_TEXT,
                 status_for_text(TRAINING_TEXT, status_rules),
                 delay_after=5,
-                use_ai=True,
+                use_ai=False,
                 draft=TRAINING_TEXT,
                 step_state=step_state,
                 step_name=STEP_TRAINING,
             )
-            await send_and_update(
-                client,
-                sheet,
-                tz,
-                entity,
-                TRAINING_QUESTION_TEXT,
-                status_for_text(TRAINING_QUESTION_TEXT, status_rules),
-                use_ai=True,
-                draft=TRAINING_QUESTION_TEXT,
-                step_state=step_state,
-                step_name=STEP_TRAINING_QUESTION,
-            )
+            if should_send_question(training_text, TRAINING_QUESTION_TEXT):
+                await send_and_update(
+                    client,
+                    sheet,
+                    tz,
+                    entity,
+                    TRAINING_QUESTION_TEXT,
+                    status_for_text(TRAINING_QUESTION_TEXT, status_rules),
+                    use_ai=True,
+                    draft=TRAINING_QUESTION_TEXT,
+                    step_state=step_state,
+                    step_name=STEP_TRAINING_QUESTION,
+                )
+            else:
+                mark_step_without_send(
+                    sheet,
+                    tz,
+                    entity,
+                    status_for_text(TRAINING_QUESTION_TEXT, status_rules),
+                    step_state,
+                    STEP_TRAINING_QUESTION,
+                )
             last_reply_at[entity.id] = time.time()
             return
 
         if last_step == STEP_VIDEO_FOLLOWUP:
-            await send_and_update(
+            training_text = await send_and_update(
                 client,
                 sheet,
                 tz,
@@ -1052,23 +1123,33 @@ async def main():
                 TRAINING_TEXT,
                 status_for_text(TRAINING_TEXT, status_rules),
                 delay_after=5,
-                use_ai=True,
+                use_ai=False,
                 draft=TRAINING_TEXT,
                 step_state=step_state,
                 step_name=STEP_TRAINING,
             )
-            await send_and_update(
-                client,
-                sheet,
-                tz,
-                entity,
-                TRAINING_QUESTION_TEXT,
-                status_for_text(TRAINING_QUESTION_TEXT, status_rules),
-                use_ai=True,
-                draft=TRAINING_QUESTION_TEXT,
-                step_state=step_state,
-                step_name=STEP_TRAINING_QUESTION,
-            )
+            if should_send_question(training_text, TRAINING_QUESTION_TEXT):
+                await send_and_update(
+                    client,
+                    sheet,
+                    tz,
+                    entity,
+                    TRAINING_QUESTION_TEXT,
+                    status_for_text(TRAINING_QUESTION_TEXT, status_rules),
+                    use_ai=True,
+                    draft=TRAINING_QUESTION_TEXT,
+                    step_state=step_state,
+                    step_name=STEP_TRAINING_QUESTION,
+                )
+            else:
+                mark_step_without_send(
+                    sheet,
+                    tz,
+                    entity,
+                    status_for_text(TRAINING_QUESTION_TEXT, status_rules),
+                    step_state,
+                    STEP_TRAINING_QUESTION,
+                )
             last_reply_at[entity.id] = time.time()
             return
 
