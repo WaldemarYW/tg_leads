@@ -57,6 +57,8 @@ TIMEZONE = os.environ.get("TIMEZONE", "Europe/Kyiv")
 LEADS_GROUP_TITLE = os.environ.get("LEADS_GROUP_TITLE", "DATING AGENCY | Referral")
 VIDEO_GROUP_LINK = os.environ.get("VIDEO_GROUP_LINK")
 VIDEO_GROUP_TITLE = os.environ.get("VIDEO_GROUP_TITLE", "Промо відео")
+VIDEO_MESSAGE_LINK = os.environ.get("VIDEO_MESSAGE_LINK")
+VIDEO_CACHE_PATH = os.environ.get("VIDEO_CACHE_PATH", "/opt/tg_leads/.video_cache.json")
 AUTO_REPLY_LOCK = os.environ.get("AUTO_REPLY_LOCK", "/opt/tg_leads/.auto_reply.lock")
 AUTO_REPLY_LOCK_TTL = int(os.environ.get("AUTO_REPLY_LOCK_TTL", "300"))
 REPLY_DEBOUNCE_SEC = float(os.environ.get("REPLY_DEBOUNCE_SEC", "3"))
@@ -77,6 +79,7 @@ HEADERS = [
 
 USERNAME_RE = re.compile(r"(?:@|t\.me/)([A-Za-z0-9_]{5,})")
 PHONE_RE = re.compile(r"\+?\d[\d\s\-\(\)]{9,}\d")
+MESSAGE_LINK_RE = re.compile(r"https?://t\.me/(c/)?([A-Za-z0-9_]+)/(\d+)")
 
 VIDEO_WORDS = ("відео", "видео")
 DIALOG_AI_URL = os.environ.get("DIALOG_AI_URL", "http://127.0.0.1:3000/dialog_suggest")
@@ -680,6 +683,37 @@ def wants_video(text: str) -> bool:
     return any(word in t for word in VIDEO_WORDS)
 
 
+def parse_message_link(link: str) -> Optional[Tuple[object, int]]:
+    if not link:
+        return None
+    match = MESSAGE_LINK_RE.search(link.strip())
+    if not match:
+        return None
+    is_private = bool(match.group(1))
+    chat_id = match.group(2)
+    message_id = int(match.group(3))
+    if is_private:
+        peer_id = int(f"-100{chat_id}")
+        return peer_id, message_id
+    return chat_id, message_id
+
+
+async def load_message_from_link(client: TelegramClient, link: str) -> Optional["Message"]:
+    parsed = parse_message_link(link)
+    if not parsed:
+        return None
+    peer, message_id = parsed
+    try:
+        entity = await client.get_entity(peer)
+        msg = await client.get_messages(entity, ids=message_id)
+    except Exception:
+        return None
+    if msg:
+        save_video_cache(VIDEO_CACHE_PATH, entity.id, msg.id)
+        return msg
+    return None
+
+
 def _post_json(url: str, payload: dict, timeout_sec: float) -> dict:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
@@ -691,6 +725,50 @@ def _post_json(url: str, payload: dict, timeout_sec: float) -> dict:
     with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
         raw = resp.read().decode("utf-8")
     return json.loads(raw) if raw else {}
+
+
+def load_video_cache(path: str) -> Optional[Tuple[int, int]]:
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    peer_id = data.get("peer_id")
+    message_id = data.get("message_id")
+    if isinstance(peer_id, int) and isinstance(message_id, int):
+        return peer_id, message_id
+    return None
+
+
+def save_video_cache(path: str, peer_id: int, message_id: int):
+    if not path:
+        return
+    try:
+        with open(path, "w") as f:
+            json.dump(
+                {"peer_id": int(peer_id), "message_id": int(message_id)},
+                f,
+                ensure_ascii=True,
+            )
+    except Exception:
+        pass
+
+
+async def load_cached_video_message(client: TelegramClient) -> Optional["Message"]:
+    cached = load_video_cache(VIDEO_CACHE_PATH)
+    if not cached:
+        return None
+    peer_id, message_id = cached
+    try:
+        entity = await client.get_entity(peer_id)
+        msg = await client.get_messages(entity, ids=message_id)
+    except Exception:
+        return None
+    if msg and (msg.video or (msg.media and getattr(msg.media, "document", None))):
+        return msg
+    return None
 
 
 async def dialog_suggest(history: list, draft: str) -> Optional[str]:
@@ -932,6 +1010,20 @@ async def main():
         return
 
     video_group = None
+    video_message = None
+    video_from_link = False
+    video_from_cache = False
+    if VIDEO_MESSAGE_LINK:
+        video_message = await load_message_from_link(client, VIDEO_MESSAGE_LINK)
+        if video_message:
+            video_from_link = True
+            print("✅ Використовую відео з посилання")
+    if not video_message:
+        video_message = await load_cached_video_message(client)
+        if video_message:
+            video_from_cache = True
+    if video_from_cache:
+        print("✅ Використовую кеш відео")
     if VIDEO_GROUP_LINK:
         try:
             video_group = await client.get_entity(VIDEO_GROUP_LINK)
@@ -939,14 +1031,14 @@ async def main():
             video_group = None
     if not video_group and VIDEO_GROUP_TITLE:
         video_group = await find_group_by_title(client, VIDEO_GROUP_TITLE)
-    if not video_group:
+    if not video_message and not video_group:
         print("⚠️ Не знайшов групу з відео")
-        video_message = None
-    else:
-        video_message = None
+    if not video_message and video_group:
         async for m in client.iter_messages(video_group, limit=50):
             if m.video or (m.media and getattr(m.media, "document", None)):
                 video_message = m
+                save_video_cache(VIDEO_CACHE_PATH, video_group.id, m.id)
+                print("✅ Знайшов відео та зберіг у кеш")
                 break
     if not video_message:
         print("⚠️ Не знайшов відео у групі для пересилання")
@@ -1121,7 +1213,9 @@ async def main():
             if wants_video(text) and video_message:
                 await asyncio.sleep(30)
                 try:
-                    if video_message.media:
+                    if VIDEO_MESSAGE_LINK:
+                        await client.forward_messages(entity, video_message)
+                    elif video_message.media:
                         await client.send_file(
                             entity,
                             video_message.media,
@@ -1251,6 +1345,17 @@ async def main():
         peer_id = event.chat_id
         if not peer_id:
             return
+        def _log_delete_result(task: asyncio.Task):
+            try:
+                task.result()
+            except Exception as err:
+                print(f"⚠️ Не вдалося видалити команду: {err}")
+
+        try:
+            task = asyncio.create_task(event.delete())
+            task.add_done_callback(_log_delete_result)
+        except Exception as err:
+            print(f"⚠️ Не вдалося запустити видалення: {err}")
         if text in STOP_COMMANDS:
             paused_peers.add(peer_id)
             enabled_peers.discard(peer_id)
@@ -1278,11 +1383,6 @@ async def main():
         else:
             status = "PAUSED" if text in STOP_COMMANDS else "ACTIVE"
             pause_store.set_status(peer_id, None, None, None, status, updated_by="manual")
-        try:
-            await event.delete()
-        except Exception:
-            pass
-
     @client.on(events.NewMessage(chats=leads_group))
     async def on_lead_message(event):
         text = event.raw_text or ""
