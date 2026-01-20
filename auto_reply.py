@@ -4,7 +4,7 @@ import time
 import json
 import asyncio
 import signal
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple
 from collections import deque
@@ -69,6 +69,10 @@ QUESTION_RESPONSE_DELAY_SEC = float(os.environ.get("QUESTION_RESPONSE_DELAY_SEC"
 SENT_MESSAGE_CACHE_LIMIT = int(os.environ.get("SENT_MESSAGE_CACHE_LIMIT", "200"))
 SESSION_LOCK = os.environ.get("TELETHON_SESSION_LOCK", f"{SESSION_FILE}.lock")
 STATUS_PATH = os.environ.get("AUTO_REPLY_STATUS_PATH", "/opt/tg_leads/.auto_reply.status")
+FOLLOWUP_STATE_PATH = os.environ.get("AUTO_REPLY_FOLLOWUP_STATE_PATH", "/opt/tg_leads/.auto_reply.followup_state.json")
+FOLLOWUP_CHECK_SEC = int(os.environ.get("AUTO_REPLY_FOLLOWUP_CHECK_SEC", "60"))
+FOLLOWUP_WINDOW_START_HOUR = int(os.environ.get("FOLLOWUP_WINDOW_START_HOUR", "9"))
+FOLLOWUP_WINDOW_END_HOUR = int(os.environ.get("FOLLOWUP_WINDOW_END_HOUR", "18"))
 
 HEADERS = [
     "date",
@@ -80,6 +84,9 @@ HEADERS = [
     "last_in",
     "last_out",
     "peer_id",
+    "followup_stage",
+    "followup_next_at",
+    "followup_last_sent_at",
 ]
 
 USERNAME_RE = re.compile(r"(?:@|t\.me/)([A-Za-z0-9_]{5,})")
@@ -109,6 +116,25 @@ STOP_COMMANDS = {"стоп1", "stop1"}
 START_COMMANDS = {"старт1", "start1"}
 AUTO_STOP_STATUS = "❌ Відмова"
 STOP_REPLY_TEXT = "Розумію, дякую за відповідь. Якщо обставини зміняться, дайте знати."
+
+FOLLOWUP_TEMPLATES = [
+    (
+        30 * 60,
+        "Хотів уточнити, чи встигли ви ознайомитися з інформацією?\n"
+        "Якщо з’явилися запитання — я на зв’язку і з радістю відповім.",
+    ),
+    (
+        24 * 60 * 60,
+        "Доброго дня 🙂\n"
+        "Нагадую про себе, щоб не загубити контакт.\n"
+        "Підкажіть, будь ласка, чи актуально для вас продовжити спілкування щодо вакансії?",
+    ),
+    (
+        3 * 24 * 60 * 60,
+        "Добрий день!\n"
+        "Нагадую щодо вакансії оператора чату. Якщо тема вже не актуальна — напишіть, будь ласка, щоб я не турбував.",
+    ),
+]
 TEST_USER_ID = "156414561"
 TEST_START_COMMANDS = {"старт8", "start8"}
 
@@ -347,6 +373,99 @@ def normalize_phone(text: str) -> str:
     return re.sub(r"[^\d+]", "", text or "")
 
 
+def within_followup_window(dt: datetime) -> bool:
+    return FOLLOWUP_WINDOW_START_HOUR <= dt.hour < FOLLOWUP_WINDOW_END_HOUR
+
+
+def adjust_to_followup_window(dt: datetime) -> datetime:
+    if within_followup_window(dt):
+        return dt
+    if dt.hour < FOLLOWUP_WINDOW_START_HOUR:
+        return dt.replace(
+            hour=FOLLOWUP_WINDOW_START_HOUR,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+    next_day = (dt + timedelta(days=1)).replace(
+        hour=FOLLOWUP_WINDOW_START_HOUR,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    return next_day
+
+
+class FollowupState:
+    def __init__(self, path: str):
+        self.path = path
+        self.data = {}
+        self._load()
+
+    def _load(self):
+        if not os.path.exists(self.path):
+            return
+        try:
+            with open(self.path, "r") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                self.data = raw
+        except Exception:
+            self.data = {}
+
+    def _save(self):
+        try:
+            with open(self.path, "w") as f:
+                json.dump(self.data, f, ensure_ascii=True)
+        except Exception:
+            pass
+
+    def get(self, peer_id: int) -> dict:
+        return self.data.get(str(peer_id), {})
+
+    def clear(self, peer_id: int):
+        key = str(peer_id)
+        if key in self.data:
+            del self.data[key]
+            self._save()
+
+    def schedule_from_now(self, peer_id: int, tz: ZoneInfo):
+        if not FOLLOWUP_TEMPLATES:
+            return
+        if str(peer_id) == TEST_USER_ID:
+            return
+        delay_sec, _ = FOLLOWUP_TEMPLATES[0]
+        target = datetime.now(tz) + timedelta(seconds=delay_sec)
+        target = adjust_to_followup_window(target)
+        self.data[str(peer_id)] = {
+            "stage": 0,
+            "next_at": target.timestamp(),
+            "last_sent_at": None,
+        }
+        self._save()
+
+    def mark_sent_and_advance(self, peer_id: int, tz: ZoneInfo):
+        key = str(peer_id)
+        state = self.data.get(key)
+        if not state:
+            return None, None
+        stage = int(state.get("stage", 0))
+        now = datetime.now(tz)
+        state["last_sent_at"] = now.timestamp()
+        next_stage = stage + 1
+        if next_stage >= len(FOLLOWUP_TEMPLATES):
+            del self.data[key]
+            self._save()
+            return None, None
+        delay_sec, _ = FOLLOWUP_TEMPLATES[next_stage]
+        target = adjust_to_followup_window(now + timedelta(seconds=delay_sec))
+        state["stage"] = next_stage
+        state["next_at"] = target.timestamp()
+        self.data[key] = state
+        self._save()
+        return next_stage, target
+
+
 def parse_group_message(text: str) -> dict:
     data = {}
     for line in (text or "").splitlines():
@@ -425,6 +544,9 @@ class SheetWriter:
         auto_reply_enabled: Optional[bool] = None,
         last_in: Optional[str] = None,
         last_out: Optional[str] = None,
+        followup_stage: Optional[str] = None,
+        followup_next_at: Optional[str] = None,
+        followup_last_sent_at: Optional[str] = None,
     ):
         ws = self.get_ws(tz)
         headers = self._get_headers(ws)
@@ -466,6 +588,12 @@ class SheetWriter:
             set_value("last_in", last_in)
         if last_out is not None:
             set_value("last_out", last_out)
+        if followup_stage is not None:
+            set_value("followup_stage", followup_stage)
+        if followup_next_at is not None:
+            set_value("followup_next_at", followup_next_at)
+        if followup_last_sent_at is not None:
+            set_value("followup_last_sent_at", followup_last_sent_at)
         set_value("peer_id", str(peer_id))
 
         if row_idx:
@@ -744,10 +872,12 @@ async def send_and_update(
     delay_before: Optional[float] = None,
     use_ai: bool = True,
     no_questions: bool = False,
+    schedule_followup: bool = True,
     draft: Optional[str] = None,
     step_state: Optional["StepState"] = None,
     step_name: Optional[str] = None,
     auto_reply_enabled: Optional[bool] = None,
+    followup_state: Optional["FollowupState"] = None,
 ):
     message_text = text
     if use_ai:
@@ -793,6 +923,23 @@ async def send_and_update(
         auto_reply_enabled=auto_reply_enabled,
         last_out=message_text[:200],
     )
+    if schedule_followup and followup_state and status != AUTO_STOP_STATUS:
+        followup_state.schedule_from_now(entity.id, tz)
+        state = followup_state.get(entity.id)
+        next_at = state.get("next_at")
+        stage = state.get("stage")
+        if next_at is not None and stage is not None:
+            next_dt = datetime.fromtimestamp(float(next_at), tz)
+            sheet.upsert(
+                tz=tz,
+                peer_id=entity.id,
+                name=name,
+                username=username,
+                chat_link=chat_link,
+                followup_stage=str(stage + 1),
+                followup_next_at=next_dt.isoformat(timespec="seconds"),
+                followup_last_sent_at=None,
+            )
     if delay_after:
         await asyncio.sleep(delay_after)
     return message_text
@@ -1084,6 +1231,7 @@ async def main():
     last_reply_at = {}
     last_incoming_at = {}
     step_state = StepState(STEP_STATE_PATH)
+    followup_state = FollowupState(FOLLOWUP_STATE_PATH)
     status_rules = get_status_rules_cached()
     stop_event = asyncio.Event()
     try:
@@ -1190,6 +1338,7 @@ async def main():
             use_ai=False,
             delay_before=QUESTION_RESPONSE_DELAY_SEC,
             step_state=step_state,
+            followup_state=followup_state,
         )
 
     async def continue_flow(entity: User, last_step: str, text: str):
@@ -1208,6 +1357,7 @@ async def main():
                 draft=INTEREST_TEXT,
                 step_state=step_state,
                 step_name=STEP_INTEREST,
+                followup_state=followup_state,
             )
             await send_and_update(
                 client,
@@ -1221,6 +1371,7 @@ async def main():
                 draft=DATING_TEXT,
                 step_state=step_state,
                 step_name=STEP_DATING,
+                followup_state=followup_state,
             )
             duties_text = await send_and_update(
                 client,
@@ -1234,6 +1385,7 @@ async def main():
                 draft=DUTIES_TEXT,
                 step_state=step_state,
                 step_name=STEP_DUTIES,
+                followup_state=followup_state,
             )
             if should_send_question(duties_text, CLARIFY_TEXT):
                 await send_and_update(
@@ -1248,6 +1400,7 @@ async def main():
                     delay_before=QUESTION_GAP_SEC,
                     step_state=step_state,
                     step_name=STEP_CLARIFY,
+                    followup_state=followup_state,
                 )
             else:
                 mark_step_without_send(
@@ -1274,6 +1427,7 @@ async def main():
                 draft=SHIFTS_TEXT,
                 step_state=step_state,
                 step_name=STEP_SHIFTS,
+                followup_state=followup_state,
             )
             if should_send_question(shifts_text, SHIFT_QUESTION_TEXT):
                 await send_and_update(
@@ -1288,6 +1442,7 @@ async def main():
                     delay_before=QUESTION_GAP_SEC,
                     step_state=step_state,
                     step_name=STEP_SHIFT_QUESTION,
+                    followup_state=followup_state,
                 )
             else:
                 mark_step_without_send(
@@ -1314,6 +1469,7 @@ async def main():
                 draft=FORMAT_TEXT,
                 step_state=step_state,
                 step_name=STEP_FORMAT,
+                followup_state=followup_state,
             )
             if should_send_question(format_text, FORMAT_QUESTION_TEXT):
                 await send_and_update(
@@ -1328,6 +1484,7 @@ async def main():
                     delay_before=QUESTION_GAP_SEC,
                     step_state=step_state,
                     step_name=STEP_FORMAT_QUESTION,
+                    followup_state=followup_state,
                 )
             else:
                 mark_step_without_send(
@@ -1379,6 +1536,7 @@ async def main():
                     draft=VIDEO_FOLLOWUP_TEXT,
                     step_state=step_state,
                     step_name=STEP_VIDEO_FOLLOWUP,
+                    followup_state=followup_state,
                 )
                 last_reply_at[entity.id] = time.time()
                 return
@@ -1395,6 +1553,7 @@ async def main():
                 draft=TRAINING_TEXT,
                 step_state=step_state,
                 step_name=STEP_TRAINING,
+                followup_state=followup_state,
             )
             if should_send_question(training_text, TRAINING_QUESTION_TEXT):
                 await send_and_update(
@@ -1409,6 +1568,7 @@ async def main():
                     delay_before=QUESTION_GAP_SEC,
                     step_state=step_state,
                     step_name=STEP_TRAINING_QUESTION,
+                    followup_state=followup_state,
                 )
             else:
                 mark_step_without_send(
@@ -1435,6 +1595,7 @@ async def main():
                 draft=TRAINING_TEXT,
                 step_state=step_state,
                 step_name=STEP_TRAINING,
+                followup_state=followup_state,
             )
             if should_send_question(training_text, TRAINING_QUESTION_TEXT):
                 await send_and_update(
@@ -1449,6 +1610,7 @@ async def main():
                     delay_before=QUESTION_GAP_SEC,
                     step_state=step_state,
                     step_name=STEP_TRAINING_QUESTION,
+                    followup_state=followup_state,
                 )
             else:
                 mark_step_without_send(
@@ -1474,6 +1636,7 @@ async def main():
                 draft=FORM_TEXT,
                 step_state=step_state,
                 step_name=STEP_FORM,
+                followup_state=followup_state,
             )
             last_reply_at[entity.id] = time.time()
             return
@@ -1576,6 +1739,7 @@ async def main():
             step_state=step_state,
             step_name=STEP_CONTACT,
             auto_reply_enabled=True,
+            followup_state=followup_state,
         )
         print(f"✅ Надіслано перше повідомлення: {entity.id}")
 
@@ -1656,6 +1820,17 @@ async def main():
                 chat_link=chat_link,
                 last_in=text[:200],
             )
+            followup_state.clear(peer_id)
+            sheet.upsert(
+                tz=tz,
+                peer_id=sender.id,
+                name=name,
+                username=username,
+                chat_link=chat_link,
+                followup_stage="",
+                followup_next_at="",
+                followup_last_sent_at="",
+            )
 
             history = await build_ai_history(client, sender, limit=10)
             if await should_auto_pause(history, text):
@@ -1670,6 +1845,8 @@ async def main():
                     draft=STOP_REPLY_TEXT,
                     auto_reply_enabled=False,
                     step_state=step_state,
+                    followup_state=followup_state,
+                    schedule_followup=False,
                 )
                 paused_peers.add(peer_id)
                 enabled_peers.discard(peer_id)
@@ -1700,7 +1877,64 @@ async def main():
             processing_peers.discard(peer_id)
 
     print("🤖 Автовідповідач запущено")
+    async def followup_loop():
+        while not stop_event.is_set():
+            try:
+                now = datetime.now(tz)
+                for key, state in list(followup_state.data.items()):
+                    try:
+                        peer_id = int(key)
+                    except ValueError:
+                        continue
+                    if str(peer_id) == TEST_USER_ID:
+                        continue
+                    next_at = state.get("next_at")
+                    stage = state.get("stage")
+                    if next_at is None or stage is None:
+                        continue
+                    if now.timestamp() < float(next_at):
+                        continue
+                    delay_sec, text = FOLLOWUP_TEMPLATES[int(stage)]
+                    if not within_followup_window(now):
+                        adjusted = adjust_to_followup_window(now)
+                        state["next_at"] = adjusted.timestamp()
+                        followup_state.data[key] = state
+                        followup_state._save()
+                        continue
+                    try:
+                        entity = await client.get_entity(peer_id)
+                    except Exception:
+                        continue
+                    await send_and_update(
+                        client,
+                        sheet,
+                        tz,
+                        entity,
+                        text,
+                        status_for_text(text, status_rules),
+                        use_ai=False,
+                        schedule_followup=False,
+                        followup_state=followup_state,
+                    )
+                    next_stage, next_dt = followup_state.mark_sent_and_advance(peer_id, tz)
+                    stage_value = str(next_stage + 1) if next_stage is not None else ""
+                    next_value = next_dt.isoformat(timespec="seconds") if next_dt else ""
+                    sheet.upsert(
+                        tz=tz,
+                        peer_id=peer_id,
+                        name=getattr(entity, "first_name", "") or "Unknown",
+                        username=getattr(entity, "username", "") or "",
+                        chat_link=build_chat_link_app(entity, peer_id),
+                        followup_stage=stage_value,
+                        followup_next_at=next_value,
+                        followup_last_sent_at=datetime.now(tz).isoformat(timespec="seconds"),
+                    )
+            except Exception as err:
+                print(f"⚠️ Followup loop error: {err}")
+            await asyncio.sleep(FOLLOWUP_CHECK_SEC)
+
     try:
+        asyncio.create_task(followup_loop())
         while not stop_event.is_set():
             await asyncio.sleep(0.5)
     finally:
