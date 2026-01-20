@@ -323,7 +323,14 @@ async def should_auto_pause(history: list, text: str) -> bool:
 def should_send_question(sent_text: str, question_text: str) -> bool:
     if not sent_text:
         return True
-    return normalize_text(question_text) not in normalize_text(sent_text)
+    sent_norm = normalize_text(sent_text)
+    question_norm = normalize_text(question_text)
+    if question_norm in sent_norm:
+        return False
+    if question_text == FORMAT_QUESTION_TEXT:
+        if "формат" in sent_norm and "зруч" in sent_norm:
+            return False
+    return True
 
 
 def is_test_restart(sender: User, text: str) -> bool:
@@ -1863,6 +1870,28 @@ async def main():
             last_step = await get_last_step(client, sender, step_state)
             if message_has_question(text):
                 await send_ai_response(sender, status="знак питання", history_override=history)
+                followup_parts = ["Чи є у вас ще питання?"]
+                if last_step == STEP_SHIFTS:
+                    followup_parts.append(SHIFT_QUESTION_TEXT)
+                elif last_step == STEP_FORMAT:
+                    followup_parts.append(FORMAT_QUESTION_TEXT)
+                elif last_step in {STEP_TRAINING, STEP_VIDEO_FOLLOWUP}:
+                    followup_parts.append(TRAINING_QUESTION_TEXT)
+                followup_text = "\n\n".join(p for p in followup_parts if p)
+                if followup_text:
+                    await send_and_update(
+                        client,
+                        sheet,
+                        tz,
+                        sender,
+                        followup_text,
+                        status_for_text(CLARIFY_TEXT, status_rules),
+                        use_ai=False,
+                        delay_before=QUESTION_GAP_SEC,
+                        step_state=step_state,
+                        step_name=STEP_CLARIFY,
+                        followup_state=followup_state,
+                    )
                 return
 
             if not last_step:
