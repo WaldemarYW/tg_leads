@@ -68,7 +68,14 @@ const HR_ASSISTANT_PROMPT = `Ти – віртуальний HR-асистент
 3) Якщо кандидат ставить запитання — дай коротку відповідь у межах дозволених блоків
    і мʼяко повертай до наступного кроку сценарію.
 4) Якщо є «чернетка HR», її можна перефразувати, але зміст має лишатися в межах сценарію.
-5) Не додавай запитання, якщо їх немає у чернетці HR.`;
+5) Не додавай запитання, якщо їх немає у чернетці HR.
+6) Якщо кандидат відмовляється або каже, що йому не підходить, відповідай коротко без запитань.`;
+
+const STOP_CLASSIFY_PROMPT = `Ти класифікатор. Відповідай ТІЛЬКИ одним словом: STOP або CONTINUE.
+STOP якщо кандидат відмовляється, каже що не підходить/не цікаво/не актуально, вже знайшов роботу,
+просить не писати, хоче зупинити спілкування, або чітко не хоче продовжувати.
+CONTINUE якщо кандидат зацікавлений, ставить питання, або повідомлення нейтральне.
+Мови: укр/рус/англ. Ніяких пояснень.`;
 
 app.get("/health", (_, res) => res.json({ ok: true, env: Boolean(OPENAI_API_KEY) }));
 
@@ -118,6 +125,19 @@ function buildHistoryPrompt(history = [], draft = "") {
   return `${HR_ASSISTANT_PROMPT}\n\nОстанні повідомлення (від старих до нових):\n${normalized || "(історія пуста)"}${draftBlock}\n\nСформуй ОДНУ коротку відповідь без нумерації і без пояснень.`;
 }
 
+function buildStopPrompt(history = [], lastMessage = "") {
+  const normalized = history
+    .slice(-10)
+    .map((item) => {
+      const sender = item?.sender === "me" ? "Я" : "Кандидат";
+      const text = (item?.text || "").trim().replace(/\s+/g, " ");
+      return `${sender}: ${text}`;
+    })
+    .join("\n");
+  const lastLine = lastMessage ? `Останнє повідомлення кандидата: ${lastMessage}` : "";
+  return `${STOP_CLASSIFY_PROMPT}\n\nІсторія:\n${normalized || "(порожньо)"}\n${lastLine}`;
+}
+
 app.post("/dialog_suggest", async (req, res) => {
   try {
     const { history = [], draft = "" } = req.body || {};
@@ -126,6 +146,20 @@ app.post("/dialog_suggest", async (req, res) => {
     return res.json({ ok: true, text: (text || "").trim(), raw });
   } catch (error) {
     console.error("/dialog_suggest error", error);
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.post("/should_pause", async (req, res) => {
+  try {
+    const { history = [], last_message = "" } = req.body || {};
+    const prompt = buildStopPrompt(history, last_message);
+    const { text } = await callOpenAI({ system: "You are a strict classifier.", user: prompt });
+    const normalized = (text || "").trim().toLowerCase();
+    const stop = normalized.startsWith("stop");
+    return res.json({ ok: true, stop, text: (text || "").trim() });
+  } catch (error) {
+    console.error("/should_pause error", error);
     return res.status(500).json({ ok: false, error: error.message });
   }
 });

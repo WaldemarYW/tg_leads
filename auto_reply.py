@@ -89,6 +89,8 @@ MESSAGE_LINK_RE = re.compile(r"https?://t\.me/(c/)?([A-Za-z0-9_]+)/(\d+)")
 VIDEO_WORDS = ("відео", "видео")
 DIALOG_AI_URL = os.environ.get("DIALOG_AI_URL", "http://127.0.0.1:3000/dialog_suggest")
 DIALOG_AI_TIMEOUT_SEC = float(os.environ.get("DIALOG_AI_TIMEOUT_SEC", "20"))
+DIALOG_STOP_URL = os.environ.get("DIALOG_STOP_URL", "http://127.0.0.1:3000/should_pause")
+DIALOG_STOP_TIMEOUT_SEC = float(os.environ.get("DIALOG_STOP_TIMEOUT_SEC", "15"))
 STEP_STATE_PATH = os.environ.get("AUTO_REPLY_STEP_STATE_PATH", "/opt/tg_leads/.auto_reply.step_state.json")
 STATUS_RULES_WORKSHEET = os.environ.get("STATUS_RULES_WORKSHEET", "StatusRules")
 STATUS_RULES_CACHE_PATH = os.environ.get("STATUS_RULES_CACHE_PATH", "/opt/tg_leads/.auto_reply.status_rules.json")
@@ -105,6 +107,8 @@ REFERRAL_STATUS = "🎁 Реферал"
 IMMUTABLE_STATUSES = {CONFIRM_STATUS, REFERRAL_STATUS}
 STOP_COMMANDS = {"стоп1", "stop1"}
 START_COMMANDS = {"старт1", "start1"}
+AUTO_STOP_STATUS = "❌ Відмова"
+STOP_REPLY_TEXT = "Розумію, дякую за відповідь. Якщо обставини зміняться, дайте знати."
 
 STEP_CONTACT = "contact"
 STEP_INTEREST = "interest"
@@ -212,6 +216,41 @@ def message_has_question(text: str) -> bool:
 
 SENT_MESSAGES = {}
 
+STOP_PHRASES = [
+    "не підход",
+    "не подходит",
+    "не цікаво",
+    "не интересно",
+    "не актуаль",
+    "не хочу",
+    "не буду",
+    "не готов",
+    "не готова",
+    "не хочу працювати",
+    "не хочу работать",
+    "не буду працювати",
+    "не буду работать",
+    "вже знайш",
+    "уже наш",
+    "вже маю роботу",
+    "уже нашла работу",
+    "уже нашел работу",
+    "не пишіть",
+    "не пишите",
+    "не турбуйте",
+    "не беспокойте",
+    "не потрібно",
+    "не нужно",
+    "не интересует",
+    "не цікавить",
+    "отпис",
+    "stop",
+    "unsubscribe",
+    "not interested",
+    "no thanks",
+    "no thank you",
+]
+
 
 def track_sent_message(peer_id: int, message_id: int) -> None:
     if not peer_id or not message_id:
@@ -228,6 +267,29 @@ def is_tracked_message(peer_id: int, message_id: int) -> bool:
     if not bucket:
         return False
     return int(message_id) in bucket
+
+
+def is_stop_phrase(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    return any(phrase in t for phrase in STOP_PHRASES)
+
+
+async def should_auto_pause(history: list, text: str) -> bool:
+    if is_stop_phrase(text):
+        return True
+    if not DIALOG_STOP_URL:
+        return False
+    payload = {"history": history, "last_message": text}
+    try:
+        data = await asyncio.to_thread(_post_json, DIALOG_STOP_URL, payload, DIALOG_STOP_TIMEOUT_SEC)
+    except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError) as err:
+        print(f"⚠️ AI stop check error: {err}")
+        return False
+    if not data or not data.get("ok"):
+        return False
+    return bool(data.get("stop"))
 
 
 def should_send_question(sent_text: str, question_text: str) -> bool:
@@ -1087,10 +1149,11 @@ async def main():
     async def send_ai_response(
         entity: User,
         status: Optional[str] = None,
+        history_override: Optional[list] = None,
     ):
         if is_paused(entity):
             return
-        history = await build_ai_history(client, entity, limit=10)
+        history = history_override or await build_ai_history(client, entity, limit=10)
         ai_text = await dialog_suggest(history, "")
         if not ai_text:
             return
@@ -1524,9 +1587,35 @@ async def main():
                 last_in=text[:200],
             )
 
+            history = await build_ai_history(client, sender, limit=10)
+            if await should_auto_pause(history, text):
+                await send_and_update(
+                    client,
+                    sheet,
+                    tz,
+                    sender,
+                    STOP_REPLY_TEXT,
+                    AUTO_STOP_STATUS,
+                    use_ai=True,
+                    draft=STOP_REPLY_TEXT,
+                    auto_reply_enabled=False,
+                    step_state=step_state,
+                )
+                paused_peers.add(peer_id)
+                enabled_peers.discard(peer_id)
+                pause_store.set_status(
+                    sender.id,
+                    username,
+                    name,
+                    chat_link,
+                    "PAUSED",
+                    updated_by="auto_stop",
+                )
+                return
+
             last_step = await get_last_step(client, sender, step_state)
             if message_has_question(text):
-                await send_ai_response(sender, status="знак питання")
+                await send_ai_response(sender, status="знак питання", history_override=history)
                 return
 
             if not last_step:
