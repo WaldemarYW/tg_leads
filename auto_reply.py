@@ -743,6 +743,7 @@ async def send_and_update(
     delay_after: Optional[float] = None,
     delay_before: Optional[float] = None,
     use_ai: bool = True,
+    no_questions: bool = False,
     draft: Optional[str] = None,
     step_state: Optional["StepState"] = None,
     step_name: Optional[str] = None,
@@ -751,7 +752,7 @@ async def send_and_update(
     message_text = text
     if use_ai:
         history = await build_ai_history(client, entity, limit=10)
-        ai_text = await dialog_suggest(history, draft or text)
+        ai_text = await dialog_suggest(history, draft or text, no_questions=no_questions)
         if ai_text:
             message_text = ai_text
     effective_delay = BOT_REPLY_DELAY_SEC if delay_before is None else delay_before
@@ -890,10 +891,10 @@ async def load_cached_video_message(client: TelegramClient) -> Optional["Message
     return None
 
 
-async def dialog_suggest(history: list, draft: str) -> Optional[str]:
+async def dialog_suggest(history: list, draft: str, no_questions: bool = False) -> Optional[str]:
     if not DIALOG_AI_URL:
         return None
-    payload = {"history": history, "draft": draft}
+    payload = {"history": history, "draft": draft, "no_questions": bool(no_questions)}
     try:
         data = await asyncio.to_thread(_post_json, DIALOG_AI_URL, payload, DIALOG_AI_TIMEOUT_SEC)
     except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError) as err:
@@ -1176,7 +1177,7 @@ async def main():
         if is_paused(entity):
             return
         history = history_override or await build_ai_history(client, entity, limit=10)
-        ai_text = await dialog_suggest(history, "")
+        ai_text = await dialog_suggest(history, "", no_questions=True)
         if not ai_text:
             return
         await send_and_update(
@@ -1203,6 +1204,7 @@ async def main():
                 INTEREST_TEXT,
                 status_for_text(INTEREST_TEXT, status_rules),
                 use_ai=True,
+                no_questions=True,
                 draft=INTEREST_TEXT,
                 step_state=step_state,
                 step_name=STEP_INTEREST,
@@ -1215,6 +1217,7 @@ async def main():
                 DATING_TEXT,
                 status_for_text(DATING_TEXT, status_rules),
                 use_ai=True,
+                no_questions=True,
                 draft=DATING_TEXT,
                 step_state=step_state,
                 step_name=STEP_DATING,
@@ -1227,6 +1230,7 @@ async def main():
                 DUTIES_TEXT,
                 status_for_text(DUTIES_TEXT, status_rules),
                 use_ai=True,
+                no_questions=True,
                 draft=DUTIES_TEXT,
                 step_state=step_state,
                 step_name=STEP_DUTIES,
@@ -1266,6 +1270,7 @@ async def main():
                 SHIFTS_TEXT,
                 status_for_text(SHIFTS_TEXT, status_rules),
                 use_ai=True,
+                no_questions=True,
                 draft=SHIFTS_TEXT,
                 step_state=step_state,
                 step_name=STEP_SHIFTS,
@@ -1305,6 +1310,7 @@ async def main():
                 FORMAT_TEXT,
                 status_for_text(FORMAT_TEXT, status_rules),
                 use_ai=True,
+                no_questions=True,
                 draft=FORMAT_TEXT,
                 step_state=step_state,
                 step_name=STEP_FORMAT,
@@ -1369,6 +1375,7 @@ async def main():
                     VIDEO_FOLLOWUP_TEXT,
                     status_for_text(VIDEO_FOLLOWUP_TEXT, status_rules),
                     use_ai=True,
+                    no_questions=True,
                     draft=VIDEO_FOLLOWUP_TEXT,
                     step_state=step_state,
                     step_name=STEP_VIDEO_FOLLOWUP,
@@ -1384,6 +1391,7 @@ async def main():
                 TRAINING_TEXT,
                 status_for_text(TRAINING_TEXT, status_rules),
                 use_ai=True,
+                no_questions=True,
                 draft=TRAINING_TEXT,
                 step_state=step_state,
                 step_name=STEP_TRAINING,
@@ -1423,6 +1431,7 @@ async def main():
                 TRAINING_TEXT,
                 status_for_text(TRAINING_TEXT, status_rules),
                 use_ai=True,
+                no_questions=True,
                 draft=TRAINING_TEXT,
                 step_state=step_state,
                 step_name=STEP_TRAINING,

@@ -112,7 +112,7 @@ async function callOpenAI({ model = DEFAULT_MODEL, system, user }) {
   return { text: textOut, raw: data };
 }
 
-function buildHistoryPrompt(history = [], draft = "") {
+function buildHistoryPrompt(history = [], draft = "", forbidQuestions = false) {
   const normalized = history
     .slice(-10)
     .map((item) => {
@@ -122,7 +122,8 @@ function buildHistoryPrompt(history = [], draft = "") {
     })
     .join("\n");
   const draftBlock = draft ? `\nЧернетка HR (можна переформулювати): ${draft}` : "";
-  return `${HR_ASSISTANT_PROMPT}\n\nОстанні повідомлення (від старих до нових):\n${normalized || "(історія пуста)"}${draftBlock}\n\nСформуй ОДНУ коротку відповідь без нумерації і без пояснень.`;
+  const forbidBlock = forbidQuestions ? "\nВАЖЛИВО: не став жодних запитань і не використовуй '?'.\n" : "";
+  return `${HR_ASSISTANT_PROMPT}${forbidBlock}\nОстанні повідомлення (від старих до нових):\n${normalized || "(історія пуста)"}${draftBlock}\n\nСформуй ОДНУ коротку відповідь без нумерації і без пояснень.`;
 }
 
 function buildStopPrompt(history = [], lastMessage = "") {
@@ -140,8 +141,8 @@ function buildStopPrompt(history = [], lastMessage = "") {
 
 app.post("/dialog_suggest", async (req, res) => {
   try {
-    const { history = [], draft = "" } = req.body || {};
-    const prompt = buildHistoryPrompt(history, draft);
+    const { history = [], draft = "", no_questions = false } = req.body || {};
+    const prompt = buildHistoryPrompt(history, draft, Boolean(no_questions));
     const { text, raw } = await callOpenAI({ system: "Ти — HR Furioza. Відповідай коротко.", user: prompt });
     return res.json({ ok: true, text: (text || "").trim(), raw });
   } catch (error) {
