@@ -308,6 +308,12 @@ def is_test_restart(sender: User, text: str) -> bool:
     return normalize_text(text) in {normalize_text(cmd) for cmd in TEST_START_COMMANDS}
 
 
+def is_test_user(sender: User) -> bool:
+    if not sender:
+        return False
+    return str(getattr(sender, "id", "")) == TEST_USER_ID
+
+
 def mark_step_without_send(
     sheet: "SheetWriter",
     tz: ZoneInfo,
@@ -1599,20 +1605,36 @@ async def main():
                 auto_reply_enabled=True,
             )
             return
+        is_test = is_test_user(sender)
         excluded_ids, excluded_usernames = get_exclusions_cached()
         norm_uname = normalize_username(getattr(sender, "username", "") or "")
         if peer_id in excluded_ids or (norm_uname and norm_uname in excluded_usernames):
-            return
+            if not is_test:
+                print(f"⚠️ Filtered excluded: {peer_id}")
+                return
+            print(f"✅ Test user bypassed excluded: {peer_id}")
         if is_paused(sender):
-            return
+            if not is_test:
+                print(f"⚠️ Filtered paused: {peer_id}")
+                return
+            print(f"✅ Test user bypassed paused: {peer_id}")
         if peer_id not in enabled_peers:
-            return
+            if not is_test:
+                print(f"⚠️ Filtered not enabled: {peer_id}")
+                return
+            print(f"✅ Test user bypassed enabled check: {peer_id}")
         if peer_id in processing_peers:
-            return
+            if not is_test:
+                print(f"⚠️ Filtered already processing: {peer_id}")
+                return
+            print(f"✅ Test user bypassed processing check: {peer_id}")
         now_ts = time.time()
         last_ts = last_reply_at.get(peer_id)
         if last_ts and now_ts - last_ts < REPLY_DEBOUNCE_SEC:
-            return
+            if not is_test:
+                print(f"⚠️ Filtered debounce: {peer_id}")
+                return
+            print(f"✅ Test user bypassed debounce: {peer_id}")
         processing_peers.add(peer_id)
 
         try:
