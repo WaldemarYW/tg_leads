@@ -14,6 +14,8 @@ load_dotenv("/opt/tg_leads/.env")
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
+from telethon import TelegramClient
+from telethon.tl.types import User as TgUser
 
 from tg_to_sheets import (
     update_google_sheet,
@@ -24,7 +26,14 @@ from tg_to_sheets import (
 )
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+SESSION_FILE = os.environ["SESSION_FILE"]
+SESSION_LOCK = os.environ.get("TELETHON_SESSION_LOCK", f"{SESSION_FILE}.lock")
 LOCK_PATH = os.environ.get("LOCK_PATH", "/opt/tg_leads/.update.lock")
+EXPORT_LOCK_PATH = os.environ.get("EXPORT_LOCK_PATH", "/opt/tg_leads/.export.lock")
+EXPORT_DIR = os.environ.get("EXPORT_DIR", "/opt/tg_leads/exports")
+EXPORT_DAYS = int(os.environ.get("EXPORT_DAYS", "90"))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
@@ -45,6 +54,7 @@ def kb_main():
     kb.add(types.InlineKeyboardButton("▶️ Старт авто", callback_data="auto_start"))
     kb.add(types.InlineKeyboardButton("⏹ Стоп авто", callback_data="auto_stop"))
     kb.add(types.InlineKeyboardButton("📊 Статус авто", callback_data="auto_status"))
+    kb.add(types.InlineKeyboardButton("🧠 Експорт чатів (3 міс.)", callback_data="export_chats"))
     return kb
 
 
@@ -104,6 +114,71 @@ def read_auto_status() -> str:
         + ("працює" if running else "зупинено")
         + f"\nОстання відправка: {last_at}\nКому: {who}\nPeer ID: {peer_id}\nТекст: {preview}"
     )
+
+
+def normalize_message_text(text: str) -> str:
+    return " ".join((text or "").split())
+
+
+async def export_recent_chats() -> Tuple[Optional[str], Optional[str]]:
+    if not acquire_lock(EXPORT_LOCK_PATH, ttl_sec=1800):
+        return None, "⏳ Експорт уже виконується. Спробуйте пізніше."
+    if not acquire_lock(SESSION_LOCK, ttl_sec=300):
+        release_lock(EXPORT_LOCK_PATH)
+        return None, "⏳ Телеграм-сесія зайнята. Зупиніть авто і спробуйте ще раз."
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+    tz = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Kyiv"))
+    cutoff = datetime.now(tz) - timedelta(days=EXPORT_DAYS)
+    stamp = datetime.now(tz).strftime("%Y%m%d_%H%M%S")
+    out_path = os.path.join(EXPORT_DIR, f"chats_export_{stamp}.txt")
+
+    client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
+    try:
+        await client.start()
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(f"Export generated: {datetime.now(tz).isoformat(timespec='seconds')}\n")
+            f.write(f"Period: last {EXPORT_DAYS} days\n\n")
+            async for dialog in client.iter_dialogs():
+                if not dialog.is_user:
+                    continue
+                entity = dialog.entity
+                if isinstance(entity, TgUser) and getattr(entity, "bot", False):
+                    continue
+                messages = []
+                async for m in client.iter_messages(entity):
+                    if not m.message:
+                        continue
+                    msg_dt = m.date.astimezone(tz) if m.date else None
+                    if msg_dt and msg_dt < cutoff:
+                        break
+                    messages.append(m)
+                if not messages:
+                    continue
+                name_parts = [
+                    getattr(entity, "first_name", "") or "",
+                    getattr(entity, "last_name", "") or "",
+                ]
+                name = " ".join(p for p in name_parts if p).strip() or (dialog.name or "")
+                username = getattr(entity, "username", "") or ""
+                header = f"=== CHAT: {name} {('@' + username) if username else ''} (id {entity.id}) ===\n"
+                f.write(header)
+                for m in reversed(messages):
+                    msg_dt = m.date.astimezone(tz) if m.date else None
+                    ts = msg_dt.strftime("%Y-%m-%d %H:%M") if msg_dt else "unknown time"
+                    sender = "me" if m.out else "candidate"
+                    text = normalize_message_text(m.message)
+                    f.write(f"{ts} [{sender}]: {text}\n")
+                f.write("\n")
+        return out_path, None
+    except Exception:
+        return None, "❌ Не вдалося сформувати експорт."
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        release_lock(SESSION_LOCK)
+        release_lock(EXPORT_LOCK_PATH)
 
 
 @dp.message_handler(commands=["start"])
@@ -218,6 +293,20 @@ async def cb_auto_status(call: types.CallbackQuery):
     msg = read_auto_status()
     await call.answer()
     await call.message.reply(msg)
+
+
+@dp.callback_query_handler(lambda c: c.data == "export_chats")
+async def cb_export_chats(call: types.CallbackQuery):
+    await call.answer()
+    await call.message.reply("⏳ Готую експорт чатів за 3 місяці…")
+    path, err = await export_recent_chats()
+    if err:
+        await call.message.reply(err)
+        return
+    try:
+        await call.message.reply_document(types.InputFile(path), caption="✅ Експорт готовий")
+    except Exception:
+        await call.message.reply("❌ Не вдалося надіслати файл експорту")
 
 
 @dp.message_handler(lambda m: m.from_user.id in WAITING_FOR_EXCLUDE)

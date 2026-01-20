@@ -7,6 +7,7 @@ import signal
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple
+from collections import deque
 import urllib.request
 import urllib.error
 
@@ -62,6 +63,10 @@ VIDEO_CACHE_PATH = os.environ.get("VIDEO_CACHE_PATH", "/opt/tg_leads/.video_cach
 AUTO_REPLY_LOCK = os.environ.get("AUTO_REPLY_LOCK", "/opt/tg_leads/.auto_reply.lock")
 AUTO_REPLY_LOCK_TTL = int(os.environ.get("AUTO_REPLY_LOCK_TTL", "300"))
 REPLY_DEBOUNCE_SEC = float(os.environ.get("REPLY_DEBOUNCE_SEC", "3"))
+BOT_REPLY_DELAY_SEC = float(os.environ.get("BOT_REPLY_DELAY_SEC", "10"))
+QUESTION_GAP_SEC = float(os.environ.get("QUESTION_GAP_SEC", "10"))
+QUESTION_RESPONSE_DELAY_SEC = float(os.environ.get("QUESTION_RESPONSE_DELAY_SEC", "10"))
+SENT_MESSAGE_CACHE_LIMIT = int(os.environ.get("SENT_MESSAGE_CACHE_LIMIT", "200"))
 SESSION_LOCK = os.environ.get("TELETHON_SESSION_LOCK", f"{SESSION_FILE}.lock")
 STATUS_PATH = os.environ.get("AUTO_REPLY_STATUS_PATH", "/opt/tg_leads/.auto_reply.status")
 
@@ -94,7 +99,7 @@ EXCLUSIONS_CACHE_TTL_HOURS = int(os.environ.get("EXCLUSIONS_CACHE_TTL_HOURS", "6
 PAUSE_WORKSHEET = os.environ.get("PAUSE_WORKSHEET", "Paused")
 PAUSE_CACHE_TTL_SEC = int(os.environ.get("PAUSE_CACHE_TTL_SEC", "120"))
 GROUP_LEADS_WORKSHEET = os.environ.get("GROUP_LEADS_WORKSHEET", "GroupLeads")
-CONTINUE_DELAY_SEC = float(os.environ.get("AUTO_REPLY_CONTINUE_DELAY_SEC", "20"))
+CONTINUE_DELAY_SEC = float(os.environ.get("AUTO_REPLY_CONTINUE_DELAY_SEC", "0"))
 CONFIRM_STATUS = "✅ Погодився"
 REFERRAL_STATUS = "🎁 Реферал"
 IMMUTABLE_STATUSES = {CONFIRM_STATUS, REFERRAL_STATUS}
@@ -194,7 +199,35 @@ def extract_contact(text: str) -> Tuple[Optional[str], Optional[str]]:
 
 
 def message_has_question(text: str) -> bool:
-    return "?" in (text or "")
+    if "?" in (text or ""):
+        return True
+    t = normalize_text(text)
+    if not t:
+        return False
+    return bool(re.search(
+        r"^(коли|де|як|який|яка|які|що|чи|скільки|когда|где|как|какой|какая|какие|что|сколько|почему|зачем|можно)\b",
+        t,
+    ))
+
+
+SENT_MESSAGES = {}
+
+
+def track_sent_message(peer_id: int, message_id: int) -> None:
+    if not peer_id or not message_id:
+        return
+    bucket = SENT_MESSAGES.get(peer_id)
+    if bucket is None:
+        bucket = deque(maxlen=SENT_MESSAGE_CACHE_LIMIT)
+        SENT_MESSAGES[peer_id] = bucket
+    bucket.append(int(message_id))
+
+
+def is_tracked_message(peer_id: int, message_id: int) -> bool:
+    bucket = SENT_MESSAGES.get(peer_id)
+    if not bucket:
+        return False
+    return int(message_id) in bucket
 
 
 def should_send_question(sent_text: str, question_text: str) -> bool:
@@ -630,6 +663,7 @@ async def send_and_update(
     text: str,
     status: Optional[str],
     delay_after: Optional[float] = None,
+    delay_before: Optional[float] = None,
     use_ai: bool = True,
     draft: Optional[str] = None,
     step_state: Optional["StepState"] = None,
@@ -642,7 +676,14 @@ async def send_and_update(
         ai_text = await dialog_suggest(history, draft or text)
         if ai_text:
             message_text = ai_text
-    await client.send_message(entity, message_text)
+    effective_delay = BOT_REPLY_DELAY_SEC if delay_before is None else delay_before
+    if effective_delay and effective_delay > 0:
+        await asyncio.sleep(effective_delay)
+    sent_message = await client.send_message(entity, message_text)
+    try:
+        track_sent_message(entity.id, sent_message.id)
+    except Exception:
+        pass
     name = getattr(entity, "first_name", "") or "Unknown"
     username = getattr(entity, "username", "") or ""
     chat_link = build_chat_link_app(entity, entity.id)
@@ -1061,6 +1102,7 @@ async def main():
             ai_text,
             status,
             use_ai=False,
+            delay_before=QUESTION_RESPONSE_DELAY_SEC,
             step_state=step_state,
         )
 
@@ -1087,7 +1129,6 @@ async def main():
                 entity,
                 DATING_TEXT,
                 status_for_text(DATING_TEXT, status_rules),
-                delay_after=5,
                 use_ai=True,
                 draft=DATING_TEXT,
                 step_state=step_state,
@@ -1100,8 +1141,7 @@ async def main():
                 entity,
                 DUTIES_TEXT,
                 status_for_text(DUTIES_TEXT, status_rules),
-                delay_after=5,
-                use_ai=False,
+                use_ai=True,
                 draft=DUTIES_TEXT,
                 step_state=step_state,
                 step_name=STEP_DUTIES,
@@ -1116,6 +1156,7 @@ async def main():
                     status_for_text(CLARIFY_TEXT, status_rules),
                     use_ai=True,
                     draft=CLARIFY_TEXT,
+                    delay_before=QUESTION_GAP_SEC,
                     step_state=step_state,
                     step_name=STEP_CLARIFY,
                 )
@@ -1139,8 +1180,7 @@ async def main():
                 entity,
                 SHIFTS_TEXT,
                 status_for_text(SHIFTS_TEXT, status_rules),
-                delay_after=5,
-                use_ai=False,
+                use_ai=True,
                 draft=SHIFTS_TEXT,
                 step_state=step_state,
                 step_name=STEP_SHIFTS,
@@ -1155,6 +1195,7 @@ async def main():
                     status_for_text(SHIFT_QUESTION_TEXT, status_rules),
                     use_ai=True,
                     draft=SHIFT_QUESTION_TEXT,
+                    delay_before=QUESTION_GAP_SEC,
                     step_state=step_state,
                     step_name=STEP_SHIFT_QUESTION,
                 )
@@ -1178,8 +1219,7 @@ async def main():
                 entity,
                 FORMAT_TEXT,
                 status_for_text(FORMAT_TEXT, status_rules),
-                delay_after=5,
-                use_ai=False,
+                use_ai=True,
                 draft=FORMAT_TEXT,
                 step_state=step_state,
                 step_name=STEP_FORMAT,
@@ -1194,6 +1234,7 @@ async def main():
                     status_for_text(FORMAT_QUESTION_TEXT, status_rules),
                     use_ai=True,
                     draft=FORMAT_QUESTION_TEXT,
+                    delay_before=QUESTION_GAP_SEC,
                     step_state=step_state,
                     step_name=STEP_FORMAT_QUESTION,
                 )
@@ -1212,19 +1253,29 @@ async def main():
         if last_step == STEP_FORMAT_QUESTION:
             if wants_video(text) and video_message:
                 await asyncio.sleep(30)
+                sent = None
                 try:
                     if VIDEO_MESSAGE_LINK:
-                        await client.forward_messages(entity, video_message)
+                        sent = await client.forward_messages(entity, video_message)
                     elif video_message.media:
-                        await client.send_file(
+                        sent = await client.send_file(
                             entity,
                             video_message.media,
                             caption=video_message.message or "",
                         )
                     elif video_message.message:
-                        await client.send_message(entity, video_message.message)
+                        sent = await client.send_message(entity, video_message.message)
                 except Exception:
                     print("⚠️ Не вдалося надіслати відео")
+                else:
+                    try:
+                        if isinstance(sent, list):
+                            for msg in sent:
+                                track_sent_message(entity.id, msg.id)
+                        elif sent:
+                            track_sent_message(entity.id, sent.id)
+                    except Exception:
+                        pass
                 await send_and_update(
                     client,
                     sheet,
@@ -1247,8 +1298,7 @@ async def main():
                 entity,
                 TRAINING_TEXT,
                 status_for_text(TRAINING_TEXT, status_rules),
-                delay_after=5,
-                use_ai=False,
+                use_ai=True,
                 draft=TRAINING_TEXT,
                 step_state=step_state,
                 step_name=STEP_TRAINING,
@@ -1263,6 +1313,7 @@ async def main():
                     status_for_text(TRAINING_QUESTION_TEXT, status_rules),
                     use_ai=True,
                     draft=TRAINING_QUESTION_TEXT,
+                    delay_before=QUESTION_GAP_SEC,
                     step_state=step_state,
                     step_name=STEP_TRAINING_QUESTION,
                 )
@@ -1286,8 +1337,7 @@ async def main():
                 entity,
                 TRAINING_TEXT,
                 status_for_text(TRAINING_TEXT, status_rules),
-                delay_after=5,
-                use_ai=False,
+                use_ai=True,
                 draft=TRAINING_TEXT,
                 step_state=step_state,
                 step_name=STEP_TRAINING,
@@ -1302,6 +1352,7 @@ async def main():
                     status_for_text(TRAINING_QUESTION_TEXT, status_rules),
                     use_ai=True,
                     draft=TRAINING_QUESTION_TEXT,
+                    delay_before=QUESTION_GAP_SEC,
                     step_state=step_state,
                     step_name=STEP_TRAINING_QUESTION,
                 )
@@ -1325,7 +1376,7 @@ async def main():
                 entity,
                 FORM_TEXT,
                 status_for_text(FORM_TEXT, status_rules),
-                use_ai=True,
+                use_ai=False,
                 draft=FORM_TEXT,
                 step_state=step_state,
                 step_name=STEP_FORM,
@@ -1337,31 +1388,34 @@ async def main():
     async def on_outgoing_message(event):
         if not event.is_private:
             return
-        text = (event.raw_text or "").strip().lower()
-        if not text:
-            return
-        if text not in STOP_COMMANDS and text not in START_COMMANDS:
-            return
         peer_id = event.chat_id
         if not peer_id:
             return
+        if is_tracked_message(peer_id, event.id):
+            return
+        text = (event.raw_text or "").strip()
+        text_lower = text.lower()
         def _log_delete_result(task: asyncio.Task):
             try:
                 task.result()
             except Exception as err:
                 print(f"⚠️ Не вдалося видалити команду: {err}")
 
-        try:
-            task = asyncio.create_task(event.delete())
-            task.add_done_callback(_log_delete_result)
-        except Exception as err:
-            print(f"⚠️ Не вдалося запустити видалення: {err}")
-        if text in STOP_COMMANDS:
+        if text_lower in STOP_COMMANDS or text_lower in START_COMMANDS:
+            try:
+                task = asyncio.create_task(event.delete())
+                task.add_done_callback(_log_delete_result)
+            except Exception as err:
+                print(f"⚠️ Не вдалося запустити видалення: {err}")
+            if text_lower in STOP_COMMANDS:
+                paused_peers.add(peer_id)
+                enabled_peers.discard(peer_id)
+            else:
+                paused_peers.discard(peer_id)
+                enabled_peers.add(peer_id)
+        else:
             paused_peers.add(peer_id)
             enabled_peers.discard(peer_id)
-        else:
-            paused_peers.discard(peer_id)
-            enabled_peers.add(peer_id)
         try:
             entity = await event.get_chat()
         except Exception:
@@ -1370,7 +1424,7 @@ async def main():
             name = getattr(entity, "first_name", "") or "Unknown"
             username = getattr(entity, "username", "") or ""
             chat_link = build_chat_link_app(entity, entity.id)
-            status = "PAUSED" if text in STOP_COMMANDS else "ACTIVE"
+            status = "PAUSED" if text_lower in STOP_COMMANDS or text_lower not in START_COMMANDS else "ACTIVE"
             pause_store.set_status(entity.id, username, name, chat_link, status, updated_by="manual")
             sheet.upsert(
                 tz=tz,
@@ -1378,10 +1432,10 @@ async def main():
                 name=name,
                 username=username,
                 chat_link=chat_link,
-                auto_reply_enabled=(text in START_COMMANDS),
+                auto_reply_enabled=(text_lower in START_COMMANDS),
             )
         else:
-            status = "PAUSED" if text in STOP_COMMANDS else "ACTIVE"
+            status = "PAUSED" if text_lower in STOP_COMMANDS or text_lower not in START_COMMANDS else "ACTIVE"
             pause_store.set_status(peer_id, None, None, None, status, updated_by="manual")
     @client.on(events.NewMessage(chats=leads_group))
     async def on_lead_message(event):

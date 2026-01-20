@@ -10,6 +10,8 @@ __pycache__/
 mini-sider/node_modules/
 mini-sider/.env
 mini-sider/tmp.json
+exports/
+.export.lock
 .auto_reply.allowed.json
 .auto_reply.exclusions.json
 .auto_reply.followup_state.json
