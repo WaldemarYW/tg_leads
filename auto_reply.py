@@ -109,6 +109,8 @@ STOP_COMMANDS = {"стоп1", "stop1"}
 START_COMMANDS = {"старт1", "start1"}
 AUTO_STOP_STATUS = "❌ Відмова"
 STOP_REPLY_TEXT = "Розумію, дякую за відповідь. Якщо обставини зміняться, дайте знати."
+TEST_USER_ID = "156414561"
+TEST_START_COMMANDS = {"старт8", "start8"}
 
 STEP_CONTACT = "contact"
 STEP_INTEREST = "interest"
@@ -296,6 +298,14 @@ def should_send_question(sent_text: str, question_text: str) -> bool:
     if not sent_text:
         return True
     return normalize_text(question_text) not in normalize_text(sent_text)
+
+
+def is_test_restart(sender: User, text: str) -> bool:
+    if not sender or not text:
+        return False
+    if str(getattr(sender, "id", "")) != TEST_USER_ID:
+        return False
+    return normalize_text(text) in {normalize_text(cmd) for cmd in TEST_START_COMMANDS}
 
 
 def mark_step_without_send(
@@ -939,6 +949,12 @@ class StepState:
         self.data[str(peer_id)] = step
         self._save()
 
+    def delete(self, peer_id: int):
+        key = str(peer_id)
+        if key in self.data:
+            del self.data[key]
+            self._save()
+
 
 def load_status_rules_from_sheet() -> Tuple[Tuple[str, str], ...]:
     try:
@@ -1556,6 +1572,33 @@ async def main():
         if not isinstance(sender, User) or sender.bot:
             return
         peer_id = sender.id
+        text = event.raw_text or ""
+        name = getattr(sender, "first_name", "") or "Unknown"
+        username = getattr(sender, "username", "") or ""
+        chat_link = build_chat_link_app(sender, sender.id)
+
+        if is_test_restart(sender, text):
+            paused_peers.discard(peer_id)
+            enabled_peers.add(peer_id)
+            step_state.delete(peer_id)
+            last_reply_at.pop(peer_id, None)
+            last_incoming_at.pop(peer_id, None)
+            processing_peers.discard(peer_id)
+            pause_store.set_status(sender.id, username, name, chat_link, "ACTIVE", updated_by="test")
+            await send_and_update(
+                client,
+                sheet,
+                tz,
+                sender,
+                CONTACT_TEXT,
+                status_for_text(CONTACT_TEXT, status_rules),
+                use_ai=True,
+                draft=CONTACT_TEXT,
+                step_state=step_state,
+                step_name=STEP_CONTACT,
+                auto_reply_enabled=True,
+            )
+            return
         excluded_ids, excluded_usernames = get_exclusions_cached()
         norm_uname = normalize_username(getattr(sender, "username", "") or "")
         if peer_id in excluded_ids or (norm_uname and norm_uname in excluded_usernames):
@@ -1573,11 +1616,7 @@ async def main():
         processing_peers.add(peer_id)
 
         try:
-            text = event.raw_text or ""
             last_incoming_at[peer_id] = time.time()
-            name = getattr(sender, "first_name", "") or "Unknown"
-            username = getattr(sender, "username", "") or ""
-            chat_link = build_chat_link_app(sender, sender.id)
             sheet.upsert(
                 tz=tz,
                 peer_id=sender.id,
