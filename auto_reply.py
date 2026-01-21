@@ -1483,30 +1483,20 @@ async def main():
                 step_name=STEP_SHIFTS,
                 followup_state=followup_state,
             )
-            if should_send_question(shifts_text, SHIFT_QUESTION_TEXT):
-                await send_and_update(
-                    client,
-                    sheet,
-                    tz,
-                    entity,
-                    SHIFT_QUESTION_TEXT,
-                    status_for_text(SHIFT_QUESTION_TEXT, status_rules),
-                    use_ai=True,
-                    draft=SHIFT_QUESTION_TEXT,
-                    delay_before=QUESTION_GAP_SEC,
-                    step_state=step_state,
-                    step_name=STEP_SHIFT_QUESTION,
-                    followup_state=followup_state,
-                )
-            else:
-                mark_step_without_send(
-                    sheet,
-                    tz,
-                    entity,
-                    status_for_text(SHIFT_QUESTION_TEXT, status_rules),
-                    step_state,
-                    STEP_SHIFT_QUESTION,
-                )
+            await send_and_update(
+                client,
+                sheet,
+                tz,
+                entity,
+                SHIFT_QUESTION_TEXT,
+                status_for_text(SHIFT_QUESTION_TEXT, status_rules),
+                use_ai=True,
+                draft=SHIFT_QUESTION_TEXT,
+                delay_before=QUESTION_GAP_SEC,
+                step_state=step_state,
+                step_name=STEP_SHIFT_QUESTION,
+                followup_state=followup_state,
+            )
             last_reply_at[entity.id] = time.time()
             return
 
