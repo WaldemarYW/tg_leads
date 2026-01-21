@@ -276,6 +276,7 @@ def strip_question_trail(text: str) -> str:
 
 
 SENT_MESSAGES = {}
+PAUSE_CHECKER = None
 
 STOP_PHRASES = [
     "не підход",
@@ -972,9 +973,13 @@ async def send_and_update(
             message_text = ai_text
     if no_questions:
         message_text = strip_question_trail(message_text)
+    if PAUSE_CHECKER and PAUSE_CHECKER(entity):
+        return message_text
     effective_delay = BOT_REPLY_DELAY_SEC if delay_before is None else delay_before
     if effective_delay and effective_delay > 0:
         await asyncio.sleep(effective_delay)
+    if PAUSE_CHECKER and PAUSE_CHECKER(entity):
+        return message_text
     sent_message = await client.send_message(entity, message_text)
     try:
         track_sent_message(entity.id, sent_message.id)
@@ -1347,6 +1352,9 @@ async def main():
         chat_link = build_chat_link_app(entity, entity.id)
         pause_store.set_status(entity.id, username, name, chat_link, "ACTIVE", updated_by="auto")
         return False
+
+    global PAUSE_CHECKER
+    PAUSE_CHECKER = is_paused
 
     def handle_stop():
         stop_event.set()
