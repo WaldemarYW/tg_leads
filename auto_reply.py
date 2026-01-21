@@ -1476,8 +1476,7 @@ async def main():
                 entity,
                 SHIFTS_TEXT,
                 status_for_text(SHIFTS_TEXT, status_rules),
-                use_ai=True,
-                no_questions=True,
+                use_ai=False,
                 draft=SHIFTS_TEXT,
                 step_state=step_state,
                 step_name=STEP_SHIFTS,
@@ -1490,7 +1489,7 @@ async def main():
                 entity,
                 SHIFT_QUESTION_TEXT,
                 status_for_text(SHIFT_QUESTION_TEXT, status_rules),
-                use_ai=True,
+                use_ai=False,
                 draft=SHIFT_QUESTION_TEXT,
                 delay_before=QUESTION_GAP_SEC,
                 step_state=step_state,
@@ -1907,26 +1906,59 @@ async def main():
             last_step = await get_last_step(client, sender, step_state)
             if message_has_question(text):
                 await send_ai_response(sender, status="знак питання", history_override=history)
-                followup_parts = ["Чи є у вас ще питання?"]
+                await send_and_update(
+                    client,
+                    sheet,
+                    tz,
+                    sender,
+                    CLARIFY_TEXT,
+                    status_for_text(CLARIFY_TEXT, status_rules),
+                    use_ai=False,
+                    delay_before=QUESTION_GAP_SEC,
+                    step_state=step_state,
+                    step_name=STEP_CLARIFY,
+                    followup_state=followup_state,
+                )
                 if last_step == STEP_SHIFTS:
-                    followup_parts.append(SHIFT_QUESTION_TEXT)
-                elif last_step == STEP_FORMAT:
-                    followup_parts.append(FORMAT_QUESTION_TEXT)
-                elif last_step in {STEP_TRAINING, STEP_VIDEO_FOLLOWUP}:
-                    followup_parts.append(TRAINING_QUESTION_TEXT)
-                followup_text = "\n\n".join(p for p in followup_parts if p)
-                if followup_text:
                     await send_and_update(
                         client,
                         sheet,
                         tz,
                         sender,
-                        followup_text,
-                        status_for_text(CLARIFY_TEXT, status_rules),
+                        SHIFT_QUESTION_TEXT,
+                        status_for_text(SHIFT_QUESTION_TEXT, status_rules),
                         use_ai=False,
                         delay_before=QUESTION_GAP_SEC,
                         step_state=step_state,
-                        step_name=STEP_CLARIFY,
+                        step_name=STEP_SHIFT_QUESTION,
+                        followup_state=followup_state,
+                    )
+                elif last_step == STEP_FORMAT:
+                    await send_and_update(
+                        client,
+                        sheet,
+                        tz,
+                        sender,
+                        FORMAT_QUESTION_TEXT,
+                        status_for_text(FORMAT_QUESTION_TEXT, status_rules),
+                        use_ai=False,
+                        delay_before=QUESTION_GAP_SEC,
+                        step_state=step_state,
+                        step_name=STEP_FORMAT_QUESTION,
+                        followup_state=followup_state,
+                    )
+                elif last_step in {STEP_TRAINING, STEP_VIDEO_FOLLOWUP}:
+                    await send_and_update(
+                        client,
+                        sheet,
+                        tz,
+                        sender,
+                        TRAINING_QUESTION_TEXT,
+                        status_for_text(TRAINING_QUESTION_TEXT, status_rules),
+                        use_ai=False,
+                        delay_before=QUESTION_GAP_SEC,
+                        step_state=step_state,
+                        step_name=STEP_TRAINING_QUESTION,
                         followup_state=followup_state,
                     )
                 return
