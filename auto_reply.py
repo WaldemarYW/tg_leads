@@ -354,6 +354,28 @@ def is_stop_phrase(text: str) -> bool:
     return any(phrase in t for phrase in STOP_PHRASES)
 
 
+def is_neutral_ack(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    return any(
+        phrase in t
+        for phrase in (
+            "питань нема",
+            "питань немає",
+            "все зрозуміло",
+            "усе зрозуміло",
+            "все ясно",
+            "усе ясно",
+            "зрозуміло",
+            "зрозуміло, дякую",
+            "ок, зрозуміло",
+            "ок зрозуміло",
+            "ок",
+        )
+    )
+
+
 async def should_auto_pause(history: list, text: str) -> bool:
     if is_stop_phrase(text):
         return True
@@ -1893,7 +1915,7 @@ async def main():
             )
 
             history = await build_ai_history(client, sender, limit=10)
-            if await should_auto_pause(history, text):
+            if not is_neutral_ack(text) and await should_auto_pause(history, text):
                 await send_and_update(
                     client,
                     sheet,
