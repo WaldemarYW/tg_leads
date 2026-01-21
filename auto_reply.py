@@ -334,6 +334,23 @@ def is_stop_phrase(text: str) -> bool:
     t = normalize_text(text)
     if not t:
         return False
+    if any(
+        phrase in t
+        for phrase in (
+            "питань нема",
+            "питань немає",
+            "все зрозуміло",
+            "усе зрозуміло",
+            "все ясно",
+            "усе ясно",
+            "зрозуміло",
+            "зрозуміло, дякую",
+            "ок, зрозуміло",
+            "ок зрозуміло",
+            "ок",
+        )
+    ):
+        return False
     return any(phrase in t for phrase in STOP_PHRASES)
 
 
