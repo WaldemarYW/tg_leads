@@ -152,6 +152,22 @@ STEP_TRAINING = "training"
 STEP_TRAINING_QUESTION = "training_question"
 STEP_FORM = "form"
 
+STEP_ORDER = {
+    STEP_CONTACT: 0,
+    STEP_INTEREST: 1,
+    STEP_DATING: 2,
+    STEP_DUTIES: 3,
+    STEP_CLARIFY: 4,
+    STEP_SHIFTS: 5,
+    STEP_SHIFT_QUESTION: 6,
+    STEP_FORMAT: 7,
+    STEP_FORMAT_QUESTION: 8,
+    STEP_VIDEO_FOLLOWUP: 9,
+    STEP_TRAINING: 10,
+    STEP_TRAINING_QUESTION: 11,
+    STEP_FORM: 12,
+}
+
 TEMPLATE_TO_STEP = {
     normalize_text(CONTACT_TEXT): STEP_CONTACT,
     normalize_text(INTEREST_TEXT): STEP_INTEREST,
@@ -242,6 +258,23 @@ def message_has_question(text: str) -> bool:
     ))
 
 
+def strip_question_trail(text: str) -> str:
+    if not text:
+        return text
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    if not sentences:
+        return text
+    cleaned = []
+    for sentence in sentences:
+        lower = sentence.lower()
+        if "?" in sentence:
+            break
+        if any(word in lower for word in ("зміна", "графік", "формат", "навчання", "анкета")):
+            break
+        cleaned.append(sentence)
+    return " ".join(cleaned).strip() or text.strip()
+
+
 SENT_MESSAGES = {}
 
 STOP_PHRASES = [
@@ -327,6 +360,12 @@ def should_send_question(sent_text: str, question_text: str) -> bool:
     question_norm = normalize_text(question_text)
     if question_norm in sent_norm:
         return False
+    if question_text == CLARIFY_TEXT:
+        if "чи все зрозуміло" in sent_norm or "можливо" in sent_norm:
+            return False
+    if question_text == SHIFT_QUESTION_TEXT:
+        if "зміна" in sent_norm and "зруч" in sent_norm:
+            return False
     if question_text == FORMAT_QUESTION_TEXT:
         if "формат" in sent_norm and "зруч" in sent_norm:
             return False
@@ -892,6 +931,8 @@ async def send_and_update(
         ai_text = await dialog_suggest(history, draft or text, no_questions=no_questions)
         if ai_text:
             message_text = ai_text
+    if no_questions:
+        message_text = strip_question_trail(message_text)
     effective_delay = BOT_REPLY_DELAY_SEC if delay_before is None else delay_before
     if effective_delay and effective_delay > 0:
         await asyncio.sleep(effective_delay)
@@ -1107,7 +1148,12 @@ class StepState:
         return self.data.get(str(peer_id))
 
     def set(self, peer_id: int, step: str):
-        self.data[str(peer_id)] = step
+        key = str(peer_id)
+        existing = self.data.get(key)
+        if existing:
+            if STEP_ORDER.get(step, -1) < STEP_ORDER.get(existing, -1):
+                return
+        self.data[key] = step
         self._save()
 
     def delete(self, peer_id: int):
@@ -1335,6 +1381,7 @@ async def main():
         ai_text = await dialog_suggest(history, "", no_questions=True)
         if not ai_text:
             return
+        ai_text = strip_question_trail(ai_text)
         await send_and_update(
             client,
             sheet,
