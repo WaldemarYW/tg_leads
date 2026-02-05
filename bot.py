@@ -464,13 +464,13 @@ def parse_date(text: str):
 def parse_account_callback(data: str) -> Tuple[Optional[AccountConfig], Optional[str]]:
     if not data.startswith("acct:"):
         return None, None
+    if data == "acct:back":
+        return None, "back"
     parts = data.split(":", 2)
     if len(parts) < 3:
         return None, None
     key = parts[1]
     action = parts[2]
-    if key == "back":
-        return None, "back"
     acct = ACCOUNTS_BY_KEY.get(key)
     return acct, action
 
