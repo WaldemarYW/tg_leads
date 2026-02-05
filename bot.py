@@ -224,6 +224,10 @@ def start_auto_reply(acct: AccountConfig) -> Tuple[bool, str]:
             "AUTO_REPLY_FOLLOWUP_CHECK_SEC",
             "FOLLOWUP_WINDOW_START_HOUR",
             "FOLLOWUP_WINDOW_END_HOUR",
+            "VIDEO_MESSAGE_LINK",
+            "VIDEO_GROUP_LINK",
+            "VIDEO_GROUP_TITLE",
+            "VIDEO_CACHE_PATH",
         ):
             val = os.environ.get(acct.env_prefix + key)
             if val is not None:
