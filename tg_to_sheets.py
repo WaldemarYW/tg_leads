@@ -399,12 +399,16 @@ def release_lock(lock_path: str):
 async def update_google_sheet(
     target_date: Optional[date] = None,
     worksheet_override: Optional[str] = None,
-    replace_existing: bool = False
+    replace_existing: bool = False,
+    session_file: Optional[str] = None,
+    session_lock: Optional[str] = None,
+    api_id: Optional[int] = None,
+    api_hash: Optional[str] = None,
 ) -> Tuple[int, str]:
-    api_id = int(os.environ["API_ID"])
-    api_hash = os.environ["API_HASH"]
-    session_file = os.environ["SESSION_FILE"]
-    session_lock = os.environ.get("TELETHON_SESSION_LOCK", f"{session_file}.lock")
+    api_id = api_id or int(os.environ["API_ID"])
+    api_hash = api_hash or os.environ["API_HASH"]
+    session_file = session_file or os.environ["SESSION_FILE"]
+    session_lock = session_lock or os.environ.get("TELETHON_SESSION_LOCK", f"{session_file}.lock")
 
     tz = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Kyiv"))
     env_only_today = os.environ.get("ONLY_TODAY", "true").lower() == "true"
