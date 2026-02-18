@@ -893,7 +893,9 @@ class SheetWriter:
                 end_col = self._col_letter(len(headers))
                 ws.update(f"A{row_idx}:{end_col}{row_idx}", [existing], value_input_option="USER_ENTERED")
             else:
-                ws.append_row(existing, value_input_option="USER_ENTERED")
+                next_row = len(ws.get_all_values()) + 1
+                end_col = self._col_letter(len(headers))
+                ws.update(f"A{next_row}:{end_col}{next_row}", [existing], value_input_option="USER_ENTERED")
         except Exception as err:
             print(f"⚠️ Не вдалося записати історію: {err}")
             return None
@@ -988,7 +990,9 @@ class SheetWriter:
                 end_col = self._col_letter(len(headers))
                 ws.update(f"A{row_idx}:{end_col}{row_idx}", [existing], value_input_option="USER_ENTERED")
             else:
-                ws.append_row(existing, value_input_option="USER_ENTERED")
+                next_row = len(ws.get_all_values()) + 1
+                end_col = self._col_letter(len(headers))
+                ws.update(f"A{next_row}:{end_col}{next_row}", [existing], value_input_option="USER_ENTERED")
         except Exception as err:
             print(f"⚠️ Не вдалося записати лист '{TODAY_WORKSHEET}': {err}")
             return
@@ -1141,7 +1145,8 @@ class GroupLeadsSheet:
         if row_idx:
             self.ws.update(f"A{row_idx}:J{row_idx}", [row], value_input_option="USER_ENTERED")
         else:
-            self.ws.append_row(row, value_input_option="USER_ENTERED")
+            next_row = len(values) + 1
+            self.ws.update(f"A{next_row}:J{next_row}", [row], value_input_option="USER_ENTERED")
 
 
 async def find_group_by_title(client: TelegramClient, title: str):
