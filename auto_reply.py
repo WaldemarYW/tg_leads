@@ -1196,6 +1196,21 @@ async def get_last_outgoing_step(client: TelegramClient, entity: User) -> Option
     return None
 
 
+def detect_step_from_text(message_text: str) -> Optional[str]:
+    msg_norm = normalize_text(message_text)
+    if not msg_norm:
+        return None
+    best_step = None
+    best_order = -1
+    for tmpl_norm, step in TEMPLATE_TO_STEP.items():
+        if tmpl_norm and tmpl_norm in msg_norm:
+            order = STEP_ORDER.get(step, -1)
+            if order > best_order:
+                best_order = order
+                best_step = step
+    return best_step
+
+
 async def get_last_step(client: TelegramClient, entity: User, step_state: "StepState") -> Optional[str]:
     cached = step_state.get(entity.id)
     if cached:
@@ -2051,6 +2066,9 @@ async def main():
                 paused_peers.discard(peer_id)
                 enabled_peers.add(peer_id)
         else:
+            manual_step = detect_step_from_text(text)
+            if manual_step:
+                step_state.set(peer_id, manual_step)
             paused_peers.add(peer_id)
             enabled_peers.discard(peer_id)
         try:
@@ -2063,6 +2081,12 @@ async def main():
             chat_link = build_chat_link_app(entity, entity.id)
             status = "PAUSED" if text_lower in STOP_COMMANDS or text_lower not in START_COMMANDS else "ACTIVE"
             pause_store.set_status(entity.id, username, name, chat_link, status, updated_by="manual")
+            if text_lower in START_COMMANDS:
+                # Manual mode: after START, re-anchor step from recent outgoing script messages.
+                step_state.delete(entity.id)
+                recovered_step = await get_last_outgoing_step(client, entity)
+                if recovered_step:
+                    step_state.set(entity.id, recovered_step)
             sheet.upsert(
                 tz=tz,
                 peer_id=entity.id,
