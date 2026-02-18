@@ -1,10 +1,9 @@
 import os
 import re
-import asyncio
 import sys
 import json
 import subprocess
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Set, Optional, Tuple, Dict, List
 from dataclasses import dataclass
@@ -18,13 +17,7 @@ from aiogram.utils import executor
 from telethon import TelegramClient
 from telethon.tl.types import User as TgUser
 
-from tg_to_sheets import (
-    update_google_sheet,
-    acquire_lock,
-    release_lock,
-    add_exclusion_entry,
-    normalize_username
-)
+from tg_to_sheets import acquire_lock, release_lock
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_ID = int(os.environ["API_ID"])
@@ -36,8 +29,6 @@ EXPORT_DIR_BASE = os.environ.get("EXPORT_DIR", "/opt/tg_leads/exports")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
-WAITING_FOR_DATE: Dict[int, str] = {}
-WAITING_FOR_EXCLUDE: Dict[int, str] = {}
 AUTO_REPLY_PROCESS: Dict[str, subprocess.Popen] = {}
 
 AUTO_REPLY_PATH = os.environ.get("AUTO_REPLY_PATH", "auto_reply.py")
@@ -53,15 +44,13 @@ class AccountConfig:
     session_file: str
     auto_reply_session_file: str
     session_lock: str
-    update_lock_path: str
     export_lock_path: str
     export_dir: str
     auto_reply_lock: str
     auto_reply_status_path: str
     auto_reply_followup_state_path: str
     auto_reply_step_state_path: str
-    status_rules_cache_path: str
-    exclusions_cache_path: str
+    auto_reply_paused_state_path: str
 
 
 def env_key(name: str) -> str:
@@ -117,15 +106,13 @@ def load_accounts() -> List[AccountConfig]:
             session_file=session_file,
             auto_reply_session_file=auto_reply_session_file,
             session_lock=os.path.join(state_dir, f"telethon_{key}.lock"),
-            update_lock_path=os.path.join(state_dir, f"update_{key}.lock"),
             export_lock_path=os.path.join(state_dir, f"export_{key}.lock"),
             export_dir=export_dir,
             auto_reply_lock=os.path.join(state_dir, f"auto_reply_{key}.lock"),
             auto_reply_status_path=os.path.join(state_dir, f"auto_reply_{key}.status"),
             auto_reply_followup_state_path=os.path.join(state_dir, f"auto_reply_{key}.followup_state.json"),
             auto_reply_step_state_path=os.path.join(state_dir, f"auto_reply_{key}.step_state.json"),
-            status_rules_cache_path=os.path.join(state_dir, f"auto_reply_{key}.status_rules.json"),
-            exclusions_cache_path=os.path.join(state_dir, f"auto_reply_{key}.exclusions.json"),
+            auto_reply_paused_state_path=os.path.join(state_dir, f"auto_reply_{key}.paused.json"),
         ))
     return accounts
 
@@ -176,9 +163,6 @@ def kb_main():
 
 def kb_account(acct: AccountConfig):
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("📄 Оновити таблицю", callback_data=f"acct:{acct.key}:update"))
-    kb.add(types.InlineKeyboardButton("📅 Історія за датою", callback_data=f"acct:{acct.key}:update_by_date"))
-    kb.add(types.InlineKeyboardButton("🚫 Виключити з таблиці", callback_data=f"acct:{acct.key}:exclude_user"))
     kb.add(types.InlineKeyboardButton("▶️ Старт авто", callback_data=f"acct:{acct.key}:auto_start"))
     kb.add(types.InlineKeyboardButton("⏹ Стоп авто", callback_data=f"acct:{acct.key}:auto_stop"))
     kb.add(types.InlineKeyboardButton("📊 Статус авто", callback_data=f"acct:{acct.key}:auto_status"))
@@ -212,8 +196,8 @@ def start_auto_reply(acct: AccountConfig) -> Tuple[bool, str]:
         env["AUTO_REPLY_STATUS_PATH"] = acct.auto_reply_status_path
         env["AUTO_REPLY_FOLLOWUP_STATE_PATH"] = acct.auto_reply_followup_state_path
         env["AUTO_REPLY_STEP_STATE_PATH"] = acct.auto_reply_step_state_path
-        env["STATUS_RULES_CACHE_PATH"] = acct.status_rules_cache_path
-        env["EXCLUSIONS_CACHE_PATH"] = acct.exclusions_cache_path
+        env["AUTO_REPLY_PAUSED_STATE_PATH"] = acct.auto_reply_paused_state_path
+        env["AUTO_REPLY_ACCOUNT_KEY"] = acct.key
         for key in (
             "BOT_REPLY_DELAY_SEC",
             "REPLY_DEBOUNCE_SEC",
@@ -228,6 +212,10 @@ def start_auto_reply(acct: AccountConfig) -> Tuple[bool, str]:
             "VIDEO_GROUP_LINK",
             "VIDEO_GROUP_TITLE",
             "VIDEO_CACHE_PATH",
+            "TODAY_WORKSHEET",
+            "HISTORY_SHEET_PREFIX",
+            "GROUP_LEADS_WORKSHEET",
+            "HISTORY_RETENTION_MONTHS",
         ):
             val = os.environ.get(acct.env_prefix + key)
             if val is not None:
@@ -381,34 +369,6 @@ async def cb_account_actions(call: types.CallbackQuery):
         )
         return
 
-    if action == "update":
-        await call.answer("⏳ Оновлюю…")
-        tz = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Kyiv"))
-        today = datetime.now(tz).date()
-        sheet_title = today.strftime("%d.%m.%y")
-        n, msg = await run_update(acct, today, sheet_title, True)
-        if msg != "OK":
-            await call.message.reply(msg)
-        else:
-            await call.message.reply(f"✅ Таблицю оновлено\nЛист: {sheet_title}\nДодано: {n}")
-        return
-
-    if action == "update_by_date":
-        WAITING_FOR_EXCLUDE.pop(call.from_user.id, None)
-        WAITING_FOR_DATE[call.from_user.id] = acct.key
-        await call.answer()
-        await call.message.reply("Введіть дату у форматі ДД.ММ.РР або ДД.ММ.РРРР (наприклад, 19.08.25)")
-        return
-
-    if action == "exclude_user":
-        WAITING_FOR_DATE.pop(call.from_user.id, None)
-        WAITING_FOR_EXCLUDE[call.from_user.id] = acct.key
-        await call.answer()
-        await call.message.reply(
-            "Надішліть username, user id, посилання t.me, tg://user?id або переслане повідомлення від користувача"
-        )
-        return
-
     if action == "auto_start":
         ok, msg = start_auto_reply(acct)
         await call.answer()
@@ -442,29 +402,6 @@ async def cb_account_actions(call: types.CallbackQuery):
 
     await call.answer("Невідома дія", show_alert=True)
 
-@dp.callback_query_handler(lambda c: c.data == "update")
-async def cb_update(call: types.CallbackQuery):
-    await call.answer("⏳ Оновлюю…")
-    tz = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Kyiv"))
-    today = datetime.now(tz).date()
-    sheet_title = today.strftime("%d.%m.%y")
-    n, msg = await run_update(DEFAULT_ACCOUNT, today, sheet_title, True)
-    if msg != "OK":
-        await call.message.reply(msg)
-    else:
-        await call.message.reply(f"✅ Таблицю оновлено\nЛист: {sheet_title}\nДодано: {n}")
-
-
-def parse_date(text: str):
-    cleaned = (text or "").strip()
-    for fmt in ("%d.%m.%y", "%d.%m.%Y"):
-        try:
-            return cleaned, datetime.strptime(cleaned, fmt).date()
-        except ValueError:
-            continue
-    return None, None
-
-
 def parse_account_callback(data: str) -> Tuple[Optional[AccountConfig], Optional[str]]:
     if not data.startswith("acct:"):
         return None, None
@@ -477,84 +414,6 @@ def parse_account_callback(data: str) -> Tuple[Optional[AccountConfig], Optional
     action = parts[2]
     acct = ACCOUNTS_BY_KEY.get(key)
     return acct, action
-
-
-async def run_update(
-    acct: AccountConfig,
-    target_date: date,
-    worksheet_override: str,
-    replace_existing: bool,
-) -> Tuple[Optional[int], str]:
-    if not is_account_enabled(acct):
-        return None, "Акаунт вимкнено"
-    if not acquire_lock(acct.update_lock_path, ttl_sec=300):
-        return None, "⏳ Оновлення вже виконується. Спробуйте пізніше."
-
-    was_running = auto_reply_running(acct)
-    if was_running:
-        stop_auto_reply(acct)
-    try:
-        n, msg = await update_google_sheet(
-            target_date=target_date,
-            worksheet_override=worksheet_override,
-            replace_existing=replace_existing,
-            session_file=acct.session_file,
-            session_lock=acct.session_lock,
-            api_id=API_ID,
-            api_hash=API_HASH,
-        )
-        return n, msg
-    except Exception:
-        return None, "❌ Помилка оновлення"
-    finally:
-        if was_running:
-            start_auto_reply(acct)
-        release_lock(acct.update_lock_path)
-
-
-@dp.callback_query_handler(lambda c: c.data == "update_by_date")
-async def cb_update_by_date(call: types.CallbackQuery):
-    WAITING_FOR_EXCLUDE.pop(call.from_user.id, None)
-    WAITING_FOR_DATE[call.from_user.id] = DEFAULT_ACCOUNT.key
-    await call.answer()
-    await call.message.reply("Введіть дату у форматі ДД.ММ.РР або ДД.ММ.РРРР (наприклад, 19.08.25)")
-
-
-def extract_exclusion_target(message: types.Message) -> Tuple[Optional[int], Optional[str]]:
-    if message.forward_from:
-        return message.forward_from.id, message.forward_from.username
-
-    text = (message.text or "").strip()
-    if not text:
-        return None, None
-
-    tg_id_match = re.search(r"tg://user\\?id=(\\d+)", text)
-    if tg_id_match:
-        return int(tg_id_match.group(1)), None
-
-    tme_match = re.search(r"t\\.me/([A-Za-z0-9_]{5,})", text)
-    if tme_match:
-        return None, tme_match.group(1)
-
-    at_match = re.search(r"@([A-Za-z0-9_]{5,})", text)
-    if at_match:
-        return None, at_match.group(1)
-
-    id_match = re.search(r"\\b\\d{5,}\\b", text)
-    if id_match:
-        return int(id_match.group(0)), None
-
-    return None, None
-
-
-@dp.callback_query_handler(lambda c: c.data == "exclude_user")
-async def cb_exclude_user(call: types.CallbackQuery):
-    WAITING_FOR_DATE.pop(call.from_user.id, None)
-    WAITING_FOR_EXCLUDE[call.from_user.id] = DEFAULT_ACCOUNT.key
-    await call.answer()
-    await call.message.reply(
-        "Надішліть username, user id, посилання t.me, tg://user?id або переслане повідомлення від користувача"
-    )
 
 
 @dp.callback_query_handler(lambda c: c.data == "auto_start")
@@ -592,74 +451,5 @@ async def cb_export_chats(call: types.CallbackQuery):
         await call.message.reply("❌ Не вдалося надіслати файл експорту")
 
 
-@dp.message_handler(lambda m: m.from_user.id in WAITING_FOR_EXCLUDE)
-async def handle_exclude_input(message: types.Message):
-    acct_key = WAITING_FOR_EXCLUDE.get(message.from_user.id)
-    acct = ACCOUNTS_BY_KEY.get(acct_key) if acct_key else None
-    if not acct:
-        WAITING_FOR_EXCLUDE.pop(message.from_user.id, None)
-        await message.reply("Невідомий акаунт. Спробуйте ще раз.")
-        return
-
-    peer_id, username = extract_exclusion_target(message)
-    if peer_id is None and not username:
-        await message.reply("Не зміг розпізнати користувача. Надішліть @username, id або переслане повідомлення.")
-        return
-
-    WAITING_FOR_EXCLUDE.pop(message.from_user.id, None)
-    added_by = str(message.from_user.id)
-    norm_username = normalize_username(username)
-    ok, _ = add_exclusion_entry(peer_id, norm_username, added_by, source="manual")
-    if ok:
-        who = f"id={peer_id}" if peer_id is not None else f"@{norm_username}"
-        await message.reply(f"✅ Додано у виключення: {who}")
-    else:
-        await message.reply("ℹ️ Користувач вже у списку виключень")
-
-
-@dp.message_handler(lambda m: m.from_user.id in WAITING_FOR_DATE)
-async def handle_date_input(message: types.Message):
-    acct_key = WAITING_FOR_DATE.get(message.from_user.id)
-    acct = ACCOUNTS_BY_KEY.get(acct_key) if acct_key else None
-    if not acct:
-        WAITING_FOR_DATE.pop(message.from_user.id, None)
-        await message.reply("Невідомий акаунт. Спробуйте ще раз.")
-        return
-
-    original_text, target_date = parse_date(message.text)
-    if not target_date:
-        await message.reply("Невірний формат дати. Спробуйте ще раз у форматі 19.08.25 або 19.08.2025")
-        return
-
-    WAITING_FOR_DATE.pop(message.from_user.id, None)
-    year_part = original_text.split(".")[-1] if original_text else ""
-    sheet_title = target_date.strftime("%d.%m.%Y") if len(year_part) == 4 else target_date.strftime("%d.%m.%y")
-
-    await message.reply(f"⏳ Формую лист \"{sheet_title}\"…")
-    n, msg = await run_update(acct, target_date, sheet_title, True)
-    if msg != "OK":
-        await message.answer(msg)
-    else:
-        await message.answer(f"✅ Лист \"{sheet_title}\" оновлено\nДодано: {n}")
-
-
 if __name__ == "__main__":
-    async def scheduled_daily_update():
-        tz = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Kyiv"))
-        while True:
-            now = datetime.now(tz)
-            target = now.replace(hour=23, minute=50, second=0, microsecond=0)
-            if target <= now:
-                target += timedelta(days=1)
-            await asyncio.sleep((target - now).total_seconds())
-            today = datetime.now(tz).date()
-            sheet_title = today.strftime("%d.%m.%y")
-            for acct in ACCOUNTS:
-                if not is_account_enabled(acct):
-                    continue
-                await run_update(acct, today, sheet_title, True)
-
-    async def on_startup(_):
-        asyncio.create_task(scheduled_daily_update())
-
-    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
+    executor.start_polling(dp, skip_updates=True)

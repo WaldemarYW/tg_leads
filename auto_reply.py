@@ -4,7 +4,7 @@ import time
 import json
 import asyncio
 import signal
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple
 from collections import deque
@@ -24,10 +24,8 @@ from tg_to_sheets import (
     normalize_username,
     normalize_text,
     is_script_template,
-    classify_status,
     acquire_lock,
     release_lock,
-    load_exclusions,
     CONTACT_TEXT,
     INTEREST_TEXT,
     DATING_TEXT,
@@ -74,19 +72,41 @@ FOLLOWUP_CHECK_SEC = int(os.environ.get("AUTO_REPLY_FOLLOWUP_CHECK_SEC", "60"))
 FOLLOWUP_WINDOW_START_HOUR = int(os.environ.get("FOLLOWUP_WINDOW_START_HOUR", "9"))
 FOLLOWUP_WINDOW_END_HOUR = int(os.environ.get("FOLLOWUP_WINDOW_END_HOUR", "18"))
 
-HEADERS = [
-    "date",
-    "name",
-    "chat_link_app",
-    "username",
-    "status",
-    "auto_reply",
-    "last_in",
-    "last_out",
-    "peer_id",
-    "followup_stage",
-    "followup_next_at",
-    "followup_last_sent_at",
+ACCOUNT_KEY = os.environ.get("AUTO_REPLY_ACCOUNT_KEY", "default")
+TODAY_WORKSHEET = os.environ.get("TODAY_WORKSHEET", "Сегодня")
+HISTORY_SHEET_PREFIX = os.environ.get("HISTORY_SHEET_PREFIX", "История")
+HISTORY_RETENTION_MONTHS = int(os.environ.get("HISTORY_RETENTION_MONTHS", "6"))
+PAUSED_STATE_PATH = os.environ.get("AUTO_REPLY_PAUSED_STATE_PATH", "/opt/tg_leads/.auto_reply.paused.json")
+
+TODAY_HEADERS = [
+    "Дата",
+    "Аккаунт",
+    "Имя",
+    "Username",
+    "Ссылка на чат",
+    "Статус",
+    "Автоответчик",
+    "Последнее входящее",
+    "Последнее исходящее",
+    "Peer ID",
+    "Обновлено",
+]
+
+HISTORY_HEADERS = [
+    "Время события",
+    "Дата",
+    "Аккаунт",
+    "Тип события",
+    "Имя",
+    "Username",
+    "Ссылка на чат",
+    "Статус",
+    "Автоответчик",
+    "Входящее",
+    "Исходящее",
+    "Peer ID",
+    "Создано",
+    "Обновлено",
 ]
 
 USERNAME_RE = re.compile(r"(?:@|t\.me/)([A-Za-z0-9_]{5,})")
@@ -99,14 +119,6 @@ DIALOG_AI_TIMEOUT_SEC = float(os.environ.get("DIALOG_AI_TIMEOUT_SEC", "20"))
 DIALOG_STOP_URL = os.environ.get("DIALOG_STOP_URL", "http://127.0.0.1:3000/should_pause")
 DIALOG_STOP_TIMEOUT_SEC = float(os.environ.get("DIALOG_STOP_TIMEOUT_SEC", "15"))
 STEP_STATE_PATH = os.environ.get("AUTO_REPLY_STEP_STATE_PATH", "/opt/tg_leads/.auto_reply.step_state.json")
-STATUS_RULES_WORKSHEET = os.environ.get("STATUS_RULES_WORKSHEET", "StatusRules")
-STATUS_RULES_CACHE_PATH = os.environ.get("STATUS_RULES_CACHE_PATH", "/opt/tg_leads/.auto_reply.status_rules.json")
-STATUS_RULES_CACHE_TTL_HOURS = int(os.environ.get("STATUS_RULES_CACHE_TTL_HOURS", "48"))
-EXCLUDED_WORKSHEET = os.environ.get("EXCLUDED_WORKSHEET", "Excluded")
-EXCLUSIONS_CACHE_PATH = os.environ.get("EXCLUSIONS_CACHE_PATH", "/opt/tg_leads/.auto_reply.exclusions.json")
-EXCLUSIONS_CACHE_TTL_HOURS = int(os.environ.get("EXCLUSIONS_CACHE_TTL_HOURS", "6"))
-PAUSE_WORKSHEET = os.environ.get("PAUSE_WORKSHEET", "Paused")
-PAUSE_CACHE_TTL_SEC = int(os.environ.get("PAUSE_CACHE_TTL_SEC", "120"))
 GROUP_LEADS_WORKSHEET = os.environ.get("GROUP_LEADS_WORKSHEET", "GroupLeads")
 CONTINUE_DELAY_SEC = float(os.environ.get("AUTO_REPLY_CONTINUE_DELAY_SEC", "0"))
 CONFIRM_STATUS = "✅ Погодився"
@@ -184,15 +196,40 @@ TEMPLATE_TO_STEP = {
     normalize_text(FORM_TEXT): STEP_FORM,
 }
 
-PAUSE_HEADERS = [
-    "peer_id",
-    "username",
-    "name",
-    "chat_link_app",
-    "status",
-    "updated_at",
-    "updated_by",
-]
+LEGACY_SHEET_NAMES = {"StatusRules", "Excluded", "Paused"}
+LEGACY_DAY_SHEET_RE = re.compile(r"^\d{2}\.\d{2}\.\d{2}(\d{2})?$")
+RU_MONTHS = {
+    1: "Январь",
+    2: "Февраль",
+    3: "Март",
+    4: "Апрель",
+    5: "Май",
+    6: "Июнь",
+    7: "Июль",
+    8: "Август",
+    9: "Сентябрь",
+    10: "Октябрь",
+    11: "Ноябрь",
+    12: "Декабрь",
+}
+
+STATUS_BY_TEMPLATE = {
+    normalize_text(CONTACT_TEXT): "👋 Привітання",
+    normalize_text(INTEREST_TEXT): "👋 Привітання",
+    normalize_text(DATING_TEXT): "🏢 Знайомство з компанією",
+    normalize_text(DUTIES_TEXT): "🏢 Знайомство з компанією",
+    normalize_text(CLARIFY_TEXT): "🏢 Знайомство з компанією",
+    normalize_text(SHIFTS_TEXT): "🕒 Графік",
+    normalize_text(SHIFT_QUESTION_TEXT): "🕒 Графік",
+    normalize_text(FORMAT_TEXT): "🎥 Більше інформації",
+    normalize_text(FORMAT_QUESTION_TEXT): "🎥 Більше інформації",
+    normalize_text(VIDEO_FOLLOWUP_TEXT): "🎥 Відео",
+    normalize_text(TRAINING_TEXT): "🎓 Навчання",
+    normalize_text(TRAINING_QUESTION_TEXT): "🎓 Навчання",
+    normalize_text(FORM_TEXT): "📝 Анкета",
+    normalize_text(CONFIRM_TEXT): CONFIRM_STATUS,
+    normalize_text(REFERRAL_TEXT): REFERRAL_STATUS,
+}
 
 GROUP_LEADS_HEADERS = [
     "received_at",
@@ -582,35 +619,9 @@ class SheetWriter:
     def __init__(self):
         self.gc = sheets_client(GOOGLE_CREDS)
         self.sh = self.gc.open(SHEET_NAME)
-        self.ws = None
-        self.current_title = None
-
-    def _today_title(self, tz: ZoneInfo) -> str:
-        return datetime.now(tz).strftime("%d.%m.%y")
-
-    def get_ws(self, tz: ZoneInfo):
-        title = self._today_title(tz)
-        if self.ws is None or self.current_title != title:
-            self.ws = get_or_create_worksheet(self.sh, title, rows=1000, cols=len(HEADERS))
-            ensure_headers(self.ws, HEADERS, strict=False)
-            self.current_title = title
-        return self.ws
-
-    def _find_row(self, ws, peer_id: int):
-        values = ws.get_all_values()
-        if not values:
-            return None, None
-        headers = [h.strip().lower() for h in values[0]]
-        if "peer_id" not in headers:
-            return None, None
-        peer_idx = headers.index("peer_id")
-        for idx, row in enumerate(values[1:], start=2):
-            if peer_idx < len(row) and row[peer_idx].strip() == str(peer_id):
-                return idx, row
-        return None, None
-
-    def _get_headers(self, ws):
-        return [h.strip().lower() for h in ws.row_values(1)]
+        self.today_ws = None
+        self.today_key = None
+        self.migrate_sheets()
 
     def _col_letter(self, col_idx: int) -> str:
         result = []
@@ -618,6 +629,154 @@ class SheetWriter:
             col_idx, rem = divmod(col_idx - 1, 26)
             result.append(chr(ord("A") + rem))
         return "".join(reversed(result))
+
+    def _month_title(self, dt: date) -> str:
+        return f"{RU_MONTHS[dt.month]} {dt.year}"
+
+    def _parse_month_title(self, title: str) -> Optional[Tuple[int, int]]:
+        title = (title or "").strip()
+        for month_num, month_name in RU_MONTHS.items():
+            prefix = f"{month_name} "
+            if title.startswith(prefix):
+                year_part = title[len(prefix):].strip()
+                if year_part.isdigit():
+                    return int(year_part), month_num
+        return None
+
+    def _month_shift(self, dt: date, months: int) -> date:
+        month_index = (dt.year * 12 + dt.month - 1) + months
+        year = month_index // 12
+        month = month_index % 12 + 1
+        return date(year, month, 1)
+
+    def _today_key(self, tz: ZoneInfo) -> str:
+        return datetime.now(tz).strftime("%Y-%m-%d")
+
+    def _ensure_today_ws(self, tz: ZoneInfo):
+        key = self._today_key(tz)
+        if self.today_ws is None:
+            self.today_ws = get_or_create_worksheet(self.sh, TODAY_WORKSHEET, rows=1000, cols=len(TODAY_HEADERS))
+            ensure_headers(self.today_ws, TODAY_HEADERS, strict=False)
+            self.today_key = key
+            return self.today_ws
+        if self.today_key != key:
+            self.today_ws.clear()
+            self.today_ws.append_row(TODAY_HEADERS, value_input_option="USER_ENTERED")
+            self.today_key = key
+        return self.today_ws
+
+    def _history_ws(self, tz: ZoneInfo):
+        title = self._month_title(datetime.now(tz).date())
+        ws = get_or_create_worksheet(self.sh, title, rows=1000, cols=len(HISTORY_HEADERS))
+        ensure_headers(ws, HISTORY_HEADERS, strict=False)
+        return ws
+
+    def migrate_sheets(self):
+        try:
+            worksheets = self.sh.worksheets()
+        except Exception:
+            return
+        for ws in worksheets:
+            title = (ws.title or "").strip()
+            if title in {GROUP_LEADS_WORKSHEET, TODAY_WORKSHEET}:
+                continue
+            if title in LEGACY_SHEET_NAMES or LEGACY_DAY_SHEET_RE.match(title):
+                try:
+                    self.sh.del_worksheet(ws)
+                except Exception as err:
+                    print(f"⚠️ Не вдалося видалити legacy лист '{title}': {err}")
+        self.cleanup_old_month_sheets()
+
+    def cleanup_old_month_sheets(self):
+        if HISTORY_RETENTION_MONTHS <= 0:
+            return
+        today = datetime.now(ZoneInfo(TIMEZONE)).date()
+        keep_from = self._month_shift(date(today.year, today.month, 1), -(HISTORY_RETENTION_MONTHS - 1))
+        try:
+            worksheets = self.sh.worksheets()
+        except Exception:
+            return
+        for ws in worksheets:
+            parsed = self._parse_month_title(ws.title or "")
+            if not parsed:
+                continue
+            year, month = parsed
+            sheet_month = date(year, month, 1)
+            if sheet_month < keep_from:
+                try:
+                    self.sh.del_worksheet(ws)
+                except Exception as err:
+                    print(f"⚠️ Не вдалося видалити старий лист '{ws.title}': {err}")
+
+    def _find_row(self, ws, peer_id: int, account_key: str):
+        values = ws.get_all_values()
+        if not values:
+            return None, None
+        headers = [h.strip() for h in values[0]]
+        try:
+            peer_idx = headers.index("Peer ID")
+            account_idx = headers.index("Аккаунт")
+        except ValueError:
+            return None, None
+        for idx, row in enumerate(values[1:], start=2):
+            peer_match = peer_idx < len(row) and row[peer_idx].strip() == str(peer_id)
+            account_match = account_idx < len(row) and row[account_idx].strip() == account_key
+            if peer_match and account_match:
+                return idx, row
+        return None, None
+
+    def _event_type(
+        self,
+        status: Optional[str],
+        auto_reply_enabled: Optional[bool],
+        last_in: Optional[str],
+        last_out: Optional[str],
+    ) -> str:
+        if last_out is not None:
+            return "Исходящее сообщение"
+        if last_in is not None:
+            return "Входящее сообщение"
+        if auto_reply_enabled is not None:
+            return "Переключение автоответчика"
+        if status is not None:
+            return "Изменение статуса"
+        return "Служебное обновление"
+
+    def append_history_event(
+        self,
+        tz: ZoneInfo,
+        event_type: str,
+        peer_id: int,
+        name: str,
+        username: str,
+        chat_link: str,
+        status: Optional[str],
+        auto_reply_enabled: Optional[bool],
+        last_in: Optional[str],
+        last_out: Optional[str],
+    ):
+        ws = self._history_ws(tz)
+        now_iso = datetime.now(tz).isoformat(timespec="seconds")
+        row = [
+            now_iso,
+            str(datetime.now(tz).date()),
+            ACCOUNT_KEY,
+            event_type,
+            name,
+            ("@" + username) if username else "",
+            chat_link,
+            status or "",
+            ("ON" if auto_reply_enabled else "OFF") if auto_reply_enabled is not None else "",
+            last_in or "",
+            last_out or "",
+            str(peer_id),
+            now_iso,
+            now_iso,
+        ]
+        try:
+            ws.append_row(row, value_input_option="USER_ENTERED")
+        except Exception as err:
+            print(f"⚠️ Не вдалося записати історію: {err}")
 
     def upsert(
         self,
@@ -634,9 +793,10 @@ class SheetWriter:
         followup_next_at: Optional[str] = None,
         followup_last_sent_at: Optional[str] = None,
     ):
-        ws = self.get_ws(tz)
-        headers = self._get_headers(ws)
-        row_idx, existing = self._find_row(ws, peer_id)
+        del followup_stage, followup_next_at, followup_last_sent_at
+        ws = self._ensure_today_ws(tz)
+        headers = [h.strip() for h in ws.row_values(1)]
+        row_idx, existing = self._find_row(ws, peer_id, ACCOUNT_KEY)
         existing = existing or [""] * len(headers)
         if len(existing) < len(headers):
             existing = existing + [""] * (len(headers) - len(existing))
@@ -655,119 +815,106 @@ class SheetWriter:
                 return
             existing[idx] = value
 
-        status_idx = col_idx("status")
-        existing_status = (
-            existing[status_idx] if status_idx is not None and status_idx < len(existing) else ""
-        )
+        status_idx = col_idx("Статус")
+        existing_status = existing[status_idx] if status_idx is not None and status_idx < len(existing) else ""
         if existing_status in IMMUTABLE_STATUSES:
             status = existing_status
 
-        set_value("date", str(datetime.now(tz).date()))
-        set_value("name", name)
-        set_value("chat_link_app", chat_link)
-        set_value("username", ("@" + username) if username else "")
-        if status is not None:
-            set_value("status", status)
+        now_iso = datetime.now(tz).isoformat(timespec="seconds")
+        set_value("Дата", str(datetime.now(tz).date()))
+        set_value("Аккаунт", ACCOUNT_KEY)
+        set_value("Имя", name)
+        set_value("Username", ("@" + username) if username else "")
+        set_value("Ссылка на чат", chat_link)
+        set_value("Статус", status)
         if auto_reply_enabled is not None:
-            set_value("auto_reply", "ON" if auto_reply_enabled else "OFF")
-        if last_in is not None:
-            set_value("last_in", last_in)
-        if last_out is not None:
-            set_value("last_out", last_out)
-        if followup_stage is not None:
-            set_value("followup_stage", followup_stage)
-        if followup_next_at is not None:
-            set_value("followup_next_at", followup_next_at)
-        if followup_last_sent_at is not None:
-            set_value("followup_last_sent_at", followup_last_sent_at)
-        set_value("peer_id", str(peer_id))
+            set_value("Автоответчик", "ON" if auto_reply_enabled else "OFF")
+        set_value("Последнее входящее", last_in)
+        set_value("Последнее исходящее", last_out)
+        set_value("Peer ID", str(peer_id))
+        set_value("Обновлено", now_iso)
 
-        if row_idx:
-            end_col = self._col_letter(len(headers))
-            ws.update(f"A{row_idx}:{end_col}{row_idx}", [existing], value_input_option="USER_ENTERED")
-        else:
-            ws.append_row(existing, value_input_option="USER_ENTERED")
+        try:
+            if row_idx:
+                end_col = self._col_letter(len(headers))
+                ws.update(f"A{row_idx}:{end_col}{row_idx}", [existing], value_input_option="USER_ENTERED")
+            else:
+                ws.append_row(existing, value_input_option="USER_ENTERED")
+        except Exception as err:
+            print(f"⚠️ Не вдалося записати лист '{TODAY_WORKSHEET}': {err}")
+
+        event_type = self._event_type(status, auto_reply_enabled, last_in, last_out)
+        self.append_history_event(
+            tz=tz,
+            event_type=event_type,
+            peer_id=peer_id,
+            name=name,
+            username=username,
+            chat_link=chat_link,
+            status=status,
+            auto_reply_enabled=auto_reply_enabled,
+            last_in=last_in,
+            last_out=last_out,
+        )
 
     def load_enabled_peers(self, tz: ZoneInfo) -> set:
-        ws = self.get_ws(tz)
+        ws = self._ensure_today_ws(tz)
         values = ws.get_all_values()
         if not values:
             return set()
-        headers = [h.strip().lower() for h in values[0]]
+        headers = [h.strip() for h in values[0]]
         try:
-            peer_idx = headers.index("peer_id")
-            auto_idx = headers.index("auto_reply")
+            peer_idx = headers.index("Peer ID")
+            auto_idx = headers.index("Автоответчик")
+            account_idx = headers.index("Аккаунт")
         except ValueError:
             return set()
         enabled = set()
         for row in values[1:]:
-            if peer_idx >= len(row) or auto_idx >= len(row):
+            if peer_idx >= len(row) or auto_idx >= len(row) or account_idx >= len(row):
+                continue
+            if row[account_idx].strip() != ACCOUNT_KEY:
                 continue
             peer_raw = row[peer_idx].strip()
             auto_raw = row[auto_idx].strip().lower()
-            if not peer_raw.isdigit():
-                continue
-            if auto_raw in {"on", "1", "yes", "true", "enabled"}:
+            if peer_raw.isdigit() and auto_raw in {"on", "1", "yes", "true", "enabled"}:
                 enabled.add(int(peer_raw))
         return enabled
 
 
-class PauseStore:
-    def __init__(self):
-        self.gc = sheets_client(GOOGLE_CREDS)
-        self.sh = self.gc.open(SHEET_NAME)
-        self.ws = get_or_create_worksheet(self.sh, PAUSE_WORKSHEET, rows=1000, cols=len(PAUSE_HEADERS))
-        ensure_headers(self.ws, PAUSE_HEADERS, strict=False)
-        self.cache = {}
-        self.username_cache = {}
-        self.loaded_at = 0.0
+class LocalPauseStore:
+    def __init__(self, path: str):
+        self.path = path
+        self.data = {}
+        self._load()
 
-    def _load_cache(self):
-        try:
-            values = self.ws.get_all_values()
-        except Exception:
-            values = []
-        self.cache = {}
-        self.username_cache = {}
-        self.loaded_at = time.time()
-        if not values:
+    def _load(self):
+        if not os.path.exists(self.path):
+            self.data = {}
             return
-        headers = [h.strip().lower() for h in values[0]]
+        try:
+            with open(self.path, "r") as f:
+                raw = json.load(f)
+            self.data = raw if isinstance(raw, dict) else {}
+        except Exception:
+            self.data = {}
 
-        def get_col(name: str) -> Optional[int]:
-            try:
-                return headers.index(name)
-            except ValueError:
-                return None
-
-        peer_idx = get_col("peer_id")
-        user_idx = get_col("username")
-        status_idx = get_col("status")
-        for row in values[1:]:
-            status = row[status_idx].strip() if status_idx is not None and status_idx < len(row) else ""
-            if peer_idx is not None and peer_idx < len(row):
-                raw = row[peer_idx].strip()
-                if raw.isdigit():
-                    self.cache[int(raw)] = status
-            if user_idx is not None and user_idx < len(row):
-                uname = normalize_username(row[user_idx])
-                if uname:
-                    self.username_cache[uname] = status
+    def _save(self):
+        try:
+            with open(self.path, "w") as f:
+                json.dump(self.data, f, ensure_ascii=True)
+        except Exception:
+            pass
 
     def get_status(self, peer_id: int, username: Optional[str]) -> Optional[str]:
-        now = time.time()
-        if not self.loaded_at or now - self.loaded_at > PAUSE_CACHE_TTL_SEC:
-            self._load_cache()
-        status = self.cache.get(peer_id)
-        if not status and username:
-            status = self.username_cache.get(normalize_username(username))
+        key = str(peer_id)
+        status = self.data.get("by_peer_id", {}).get(key)
         if status:
             return status
-        self._load_cache()
-        status = self.cache.get(peer_id)
-        if not status and username:
-            status = self.username_cache.get(normalize_username(username))
-        return status or None
+        uname = normalize_username(username)
+        if not uname:
+            return None
+        return self.data.get("by_username", {}).get(uname)
 
     def set_status(
         self,
@@ -778,50 +925,19 @@ class PauseStore:
         status: str,
         updated_by: str = "manual",
     ):
-        try:
-            values = self.ws.get_all_values()
-        except Exception:
-            values = []
-        headers = [h.strip().lower() for h in values[0]] if values else []
-
-        def get_col(name: str) -> Optional[int]:
-            try:
-                return headers.index(name)
-            except ValueError:
-                return None
-
-        row_idx = None
-        peer_idx = get_col("peer_id")
-        user_idx = get_col("username")
-        if values and (peer_idx is not None or user_idx is not None):
-            for idx, row in enumerate(values[1:], start=2):
-                if peer_idx is not None and peer_idx < len(row):
-                    if row[peer_idx].strip() == str(peer_id):
-                        row_idx = idx
-                        break
-                if row_idx is None and user_idx is not None and user_idx < len(row):
-                    if normalize_username(row[user_idx]) == normalize_username(username):
-                        row_idx = idx
-                        break
-
-        updated_at = datetime.now(ZoneInfo(TIMEZONE)).isoformat(timespec="seconds")
-        row = [
-            str(peer_id),
-            ("@" + normalize_username(username)) if username else "",
-            name or "",
-            chat_link or "",
-            status,
-            updated_at,
-            updated_by,
-        ]
-        if row_idx:
-            self.ws.update(f"A{row_idx}:G{row_idx}", [row], value_input_option="USER_ENTERED")
-        else:
-            self.ws.append_row(row, value_input_option="USER_ENTERED")
-        self.cache[peer_id] = status
-        if username:
-            self.username_cache[normalize_username(username)] = status
-        self.loaded_at = time.time()
+        del name, chat_link
+        by_peer = self.data.setdefault("by_peer_id", {})
+        by_user = self.data.setdefault("by_username", {})
+        meta = self.data.setdefault("meta", {})
+        by_peer[str(peer_id)] = status
+        uname = normalize_username(username)
+        if uname:
+            by_user[uname] = status
+        meta[str(peer_id)] = {
+            "updated_at": datetime.now(ZoneInfo(TIMEZONE)).isoformat(timespec="seconds"),
+            "updated_by": updated_by,
+        }
+        self._save()
 
 
 class GroupLeadsSheet:
@@ -1207,119 +1323,18 @@ class StepState:
             self._save()
 
 
-def load_status_rules_from_sheet() -> Tuple[Tuple[str, str], ...]:
-    try:
-        gc = sheets_client(GOOGLE_CREDS)
-        sh = gc.open(SHEET_NAME)
-        ws = get_or_create_worksheet(sh, STATUS_RULES_WORKSHEET, rows=1000, cols=2)
-        ensure_headers(ws, ["template", "status"], strict=False)
-        values = ws.get_all_values()
-        if len(values) <= 1:
-            rows = [
-                [CONTACT_TEXT, "👋 Привітання"],
-                [CLARIFY_TEXT, "🏢 Знайомство з компанією"],
-                [SHIFT_QUESTION_TEXT, "🕒 Графік"],
-                [FORMAT_QUESTION_TEXT, "🎥 Більше інформації"],
-                [VIDEO_FOLLOWUP_TEXT, "🎥 Відео"],
-                [TRAINING_QUESTION_TEXT, "🎓 Навчання"],
-                [CONFIRM_TEXT, "✅ Погодився Дякую! 🙌 Передаю вас на етап навчання"],
-                [REFERRAL_TEXT, "🎁 Реферал Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."],
-            ]
-            ws.append_rows(rows, value_input_option="USER_ENTERED")
-            return tuple((r[0], r[1]) for r in rows)
-
-        rules = []
-        for row in values[1:]:
-            if len(row) < 2:
-                continue
-            template = row[0].strip()
-            status = row[1].strip()
-            if template and status:
-                rules.append((template, status))
-        return tuple(rules) if rules else tuple()
-    except Exception:
-        return tuple()
-
-
-def get_status_rules_cached() -> Tuple[Tuple[str, str], ...]:
-    now_ts = time.time()
-    ttl_sec = STATUS_RULES_CACHE_TTL_HOURS * 3600
-    if os.path.exists(STATUS_RULES_CACHE_PATH):
-        try:
-            with open(STATUS_RULES_CACHE_PATH, "r") as f:
-                data = json.load(f)
-            fetched_at = float(data.get("fetched_at", 0))
-            rules = data.get("rules", [])
-            if now_ts - fetched_at < ttl_sec and rules:
-                return tuple((r[0], r[1]) for r in rules if len(r) >= 2)
-        except Exception:
-            pass
-
-    rules = load_status_rules_from_sheet()
-    if rules:
-        try:
-            with open(STATUS_RULES_CACHE_PATH, "w") as f:
-                json.dump(
-                    {"fetched_at": now_ts, "rules": [list(r) for r in rules]},
-                    f,
-                    ensure_ascii=True,
-                )
-        except Exception:
-            pass
-    return rules
-
-
-def status_for_text(text: str, rules: Tuple[Tuple[str, str], ...]) -> Optional[str]:
+def status_for_text(text: str) -> Optional[str]:
     t = normalize_text(text)
-    for template, status in rules:
-        if normalize_text(template) in t:
+    for template, status in STATUS_BY_TEMPLATE.items():
+        if template and template in t:
             return status
     return None
-
-
-def get_exclusions_cached() -> Tuple[set, set]:
-    now_ts = time.time()
-    ttl_sec = EXCLUSIONS_CACHE_TTL_HOURS * 3600
-    if os.path.exists(EXCLUSIONS_CACHE_PATH):
-        try:
-            with open(EXCLUSIONS_CACHE_PATH, "r") as f:
-                data = json.load(f)
-            fetched_at = float(data.get("fetched_at", 0))
-            peer_ids = set(data.get("peer_ids", []))
-            usernames = set(data.get("usernames", []))
-            if now_ts - fetched_at < ttl_sec:
-                return peer_ids, usernames
-        except Exception:
-            pass
-
-    try:
-        gc = sheets_client(GOOGLE_CREDS)
-        sh = gc.open(SHEET_NAME)
-        peer_ids, usernames = load_exclusions(sh, EXCLUDED_WORKSHEET)
-    except Exception:
-        peer_ids, usernames = set(), set()
-
-    try:
-        with open(EXCLUSIONS_CACHE_PATH, "w") as f:
-            json.dump(
-                {
-                    "fetched_at": now_ts,
-                    "peer_ids": list(peer_ids),
-                    "usernames": list(usernames),
-                },
-                f,
-                ensure_ascii=True,
-            )
-    except Exception:
-        pass
-
-    return peer_ids, usernames
 
 
 async def main():
     tz = ZoneInfo(TIMEZONE)
     sheet = SheetWriter()
-    pause_store = PauseStore()
+    pause_store = LocalPauseStore(PAUSED_STATE_PATH)
     group_leads_sheet = GroupLeadsSheet()
     client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
     processing_peers = set()
@@ -1329,7 +1344,6 @@ async def main():
     last_incoming_at = {}
     step_state = StepState(STEP_STATE_PATH)
     followup_state = FollowupState(FOLLOWUP_STATE_PATH)
-    status_rules = get_status_rules_cached()
     stop_event = asyncio.Event()
     try:
         enabled_peers = sheet.load_enabled_peers(tz)
@@ -1348,9 +1362,6 @@ async def main():
         if status == "ACTIVE":
             paused_peers.discard(peer_id)
             return False
-        name = getattr(entity, "first_name", "") or "Unknown"
-        chat_link = build_chat_link_app(entity, entity.id)
-        pause_store.set_status(entity.id, username, name, chat_link, "ACTIVE", updated_by="auto")
         return False
 
     global PAUSE_CHECKER
@@ -1452,7 +1463,7 @@ async def main():
                 tz,
                 entity,
                 INTEREST_TEXT,
-                status_for_text(INTEREST_TEXT, status_rules),
+                status_for_text(INTEREST_TEXT),
                 use_ai=True,
                 no_questions=True,
                 draft=INTEREST_TEXT,
@@ -1466,7 +1477,7 @@ async def main():
                 tz,
                 entity,
                 DATING_TEXT,
-                status_for_text(DATING_TEXT, status_rules),
+                status_for_text(DATING_TEXT),
                 use_ai=True,
                 no_questions=True,
                 draft=DATING_TEXT,
@@ -1480,7 +1491,7 @@ async def main():
                 tz,
                 entity,
                 DUTIES_TEXT,
-                status_for_text(DUTIES_TEXT, status_rules),
+                status_for_text(DUTIES_TEXT),
                 use_ai=True,
                 no_questions=True,
                 draft=DUTIES_TEXT,
@@ -1495,7 +1506,7 @@ async def main():
                     tz,
                     entity,
                     CLARIFY_TEXT,
-                    status_for_text(CLARIFY_TEXT, status_rules),
+                    status_for_text(CLARIFY_TEXT),
                     use_ai=True,
                     draft=CLARIFY_TEXT,
                     delay_before=QUESTION_GAP_SEC,
@@ -1508,7 +1519,7 @@ async def main():
                     sheet,
                     tz,
                     entity,
-                    status_for_text(CLARIFY_TEXT, status_rules),
+                    status_for_text(CLARIFY_TEXT),
                     step_state,
                     STEP_CLARIFY,
                 )
@@ -1522,7 +1533,7 @@ async def main():
                 tz,
                 entity,
                 SHIFTS_TEXT,
-                status_for_text(SHIFTS_TEXT, status_rules),
+                status_for_text(SHIFTS_TEXT),
                 use_ai=False,
                 draft=SHIFTS_TEXT,
                 step_state=step_state,
@@ -1535,7 +1546,7 @@ async def main():
                 tz,
                 entity,
                 SHIFT_QUESTION_TEXT,
-                status_for_text(SHIFT_QUESTION_TEXT, status_rules),
+                status_for_text(SHIFT_QUESTION_TEXT),
                 use_ai=False,
                 draft=SHIFT_QUESTION_TEXT,
                 delay_before=QUESTION_GAP_SEC,
@@ -1553,7 +1564,7 @@ async def main():
                 tz,
                 entity,
                 FORMAT_TEXT,
-                status_for_text(FORMAT_TEXT, status_rules),
+                status_for_text(FORMAT_TEXT),
                 use_ai=True,
                 no_questions=True,
                 draft=FORMAT_TEXT,
@@ -1568,7 +1579,7 @@ async def main():
                     tz,
                     entity,
                     FORMAT_QUESTION_TEXT,
-                    status_for_text(FORMAT_QUESTION_TEXT, status_rules),
+                    status_for_text(FORMAT_QUESTION_TEXT),
                     use_ai=True,
                     draft=FORMAT_QUESTION_TEXT,
                     delay_before=QUESTION_GAP_SEC,
@@ -1581,7 +1592,7 @@ async def main():
                     sheet,
                     tz,
                     entity,
-                    status_for_text(FORMAT_QUESTION_TEXT, status_rules),
+                    status_for_text(FORMAT_QUESTION_TEXT),
                     step_state,
                     STEP_FORMAT_QUESTION,
                 )
@@ -1620,7 +1631,7 @@ async def main():
                     tz,
                     entity,
                     VIDEO_FOLLOWUP_TEXT,
-                    status_for_text(VIDEO_FOLLOWUP_TEXT, status_rules),
+                    status_for_text(VIDEO_FOLLOWUP_TEXT),
                     use_ai=True,
                     no_questions=True,
                     draft=VIDEO_FOLLOWUP_TEXT,
@@ -1637,7 +1648,7 @@ async def main():
                 tz,
                 entity,
                 TRAINING_TEXT,
-                status_for_text(TRAINING_TEXT, status_rules),
+                status_for_text(TRAINING_TEXT),
                 use_ai=True,
                 no_questions=True,
                 draft=TRAINING_TEXT,
@@ -1652,7 +1663,7 @@ async def main():
                     tz,
                     entity,
                     TRAINING_QUESTION_TEXT,
-                    status_for_text(TRAINING_QUESTION_TEXT, status_rules),
+                    status_for_text(TRAINING_QUESTION_TEXT),
                     use_ai=True,
                     draft=TRAINING_QUESTION_TEXT,
                     delay_before=QUESTION_GAP_SEC,
@@ -1665,7 +1676,7 @@ async def main():
                     sheet,
                     tz,
                     entity,
-                    status_for_text(TRAINING_QUESTION_TEXT, status_rules),
+                    status_for_text(TRAINING_QUESTION_TEXT),
                     step_state,
                     STEP_TRAINING_QUESTION,
                 )
@@ -1679,7 +1690,7 @@ async def main():
                 tz,
                 entity,
                 TRAINING_TEXT,
-                status_for_text(TRAINING_TEXT, status_rules),
+                status_for_text(TRAINING_TEXT),
                 use_ai=True,
                 no_questions=True,
                 draft=TRAINING_TEXT,
@@ -1694,7 +1705,7 @@ async def main():
                     tz,
                     entity,
                     TRAINING_QUESTION_TEXT,
-                    status_for_text(TRAINING_QUESTION_TEXT, status_rules),
+                    status_for_text(TRAINING_QUESTION_TEXT),
                     use_ai=True,
                     draft=TRAINING_QUESTION_TEXT,
                     delay_before=QUESTION_GAP_SEC,
@@ -1707,7 +1718,7 @@ async def main():
                     sheet,
                     tz,
                     entity,
-                    status_for_text(TRAINING_QUESTION_TEXT, status_rules),
+                    status_for_text(TRAINING_QUESTION_TEXT),
                     step_state,
                     STEP_TRAINING_QUESTION,
                 )
@@ -1721,7 +1732,7 @@ async def main():
                 tz,
                 entity,
                 FORM_TEXT,
-                status_for_text(FORM_TEXT, status_rules),
+                status_for_text(FORM_TEXT),
                 use_ai=False,
                 draft=FORM_TEXT,
                 step_state=step_state,
@@ -1789,7 +1800,7 @@ async def main():
         text = event.raw_text or ""
         try:
             group_data = parse_group_message(text)
-            group_status = status_for_text(CONTACT_TEXT, status_rules)
+            group_status = status_for_text(CONTACT_TEXT)
             group_leads_sheet.upsert(tz, group_data, group_status)
         except Exception:
             pass
@@ -1802,11 +1813,6 @@ async def main():
             print(f"⏭️ Пропускаю контакт: {username or phone} (немає в контактах)")
             return
         if getattr(entity, "bot", False):
-            return
-        excluded_ids, excluded_usernames = get_exclusions_cached()
-        norm_uname = normalize_username(getattr(entity, "username", "") or "")
-        if entity.id in excluded_ids or (norm_uname and norm_uname in excluded_usernames):
-            print(f"⏭️ Пропускаю виключеного користувача: {entity.id}")
             return
         if is_paused(entity):
             print(f"⏭️ Призупинено для користувача: {entity.id}")
@@ -1823,7 +1829,7 @@ async def main():
             tz,
             entity,
             CONTACT_TEXT,
-            status_for_text(CONTACT_TEXT, status_rules),
+            status_for_text(CONTACT_TEXT),
             use_ai=True,
             draft=CONTACT_TEXT,
             step_state=step_state,
@@ -1860,7 +1866,7 @@ async def main():
                 tz,
                 sender,
                 CONTACT_TEXT,
-                status_for_text(CONTACT_TEXT, status_rules),
+                status_for_text(CONTACT_TEXT),
                 use_ai=True,
                 draft=CONTACT_TEXT,
                 step_state=step_state,
@@ -1869,13 +1875,6 @@ async def main():
             )
             return
         is_test = is_test_user(sender)
-        excluded_ids, excluded_usernames = get_exclusions_cached()
-        norm_uname = normalize_username(getattr(sender, "username", "") or "")
-        if peer_id in excluded_ids or (norm_uname and norm_uname in excluded_usernames):
-            if not is_test:
-                print(f"⚠️ Filtered excluded: {peer_id}")
-                return
-            print(f"✅ Test user bypassed excluded: {peer_id}")
         if is_paused(sender):
             if not is_test:
                 print(f"⚠️ Filtered paused: {peer_id}")
@@ -1959,7 +1958,7 @@ async def main():
                     tz,
                     sender,
                     CLARIFY_TEXT,
-                    status_for_text(CLARIFY_TEXT, status_rules),
+                    status_for_text(CLARIFY_TEXT),
                     use_ai=False,
                     delay_before=QUESTION_GAP_SEC,
                     step_state=step_state,
@@ -1973,7 +1972,7 @@ async def main():
                         tz,
                         sender,
                         SHIFT_QUESTION_TEXT,
-                        status_for_text(SHIFT_QUESTION_TEXT, status_rules),
+                        status_for_text(SHIFT_QUESTION_TEXT),
                         use_ai=False,
                         delay_before=QUESTION_GAP_SEC,
                         step_state=step_state,
@@ -1987,7 +1986,7 @@ async def main():
                         tz,
                         sender,
                         FORMAT_QUESTION_TEXT,
-                        status_for_text(FORMAT_QUESTION_TEXT, status_rules),
+                        status_for_text(FORMAT_QUESTION_TEXT),
                         use_ai=False,
                         delay_before=QUESTION_GAP_SEC,
                         step_state=step_state,
@@ -2001,7 +2000,7 @@ async def main():
                         tz,
                         sender,
                         TRAINING_QUESTION_TEXT,
-                        status_for_text(TRAINING_QUESTION_TEXT, status_rules),
+                        status_for_text(TRAINING_QUESTION_TEXT),
                         use_ai=False,
                         delay_before=QUESTION_GAP_SEC,
                         step_state=step_state,
@@ -2056,7 +2055,7 @@ async def main():
                         tz,
                         entity,
                         text,
-                        status_for_text(text, status_rules),
+                        status_for_text(text),
                         use_ai=False,
                         schedule_followup=False,
                         followup_state=followup_state,

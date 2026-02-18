@@ -4,6 +4,9 @@ from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple, List, Set
 
+# Legacy module: manual sheet update/exclusion flows are preserved for compatibility,
+# but runtime auto-reply now writes directly via auto_reply.py to the "Сегодня"/history model.
+
 from dotenv import load_dotenv
 load_dotenv("/opt/tg_leads/.env")
 
