@@ -65,7 +65,6 @@ BOT_REPLY_DELAY_SEC = float(os.environ.get("BOT_REPLY_DELAY_SEC", "10"))
 QUESTION_GAP_SEC = float(os.environ.get("QUESTION_GAP_SEC", "10"))
 QUESTION_RESPONSE_DELAY_SEC = float(os.environ.get("QUESTION_RESPONSE_DELAY_SEC", "10"))
 TRAINING_TO_FORM_DELAY_SEC = float(os.environ.get("TRAINING_TO_FORM_DELAY_SEC", "300"))
-QUESTION_HOLD_SEC = float(os.environ.get("QUESTION_HOLD_SEC", "300"))
 SENT_MESSAGE_CACHE_LIMIT = int(os.environ.get("SENT_MESSAGE_CACHE_LIMIT", "200"))
 SESSION_LOCK = os.environ.get("TELETHON_SESSION_LOCK", f"{SESSION_FILE}.lock")
 STATUS_PATH = os.environ.get("AUTO_REPLY_STATUS_PATH", "/opt/tg_leads/.auto_reply.status")
@@ -199,7 +198,7 @@ TEMPLATE_TO_STEP = {
     normalize_text(FORM_TEXT): STEP_FORM,
 }
 
-LEGACY_SHEET_NAMES = {"StatusRules", "Excluded", "Paused"}
+LEGACY_SHEET_NAMES = {"StatusRules", "Excluded", "Paused", "Leads"}
 LEGACY_DAY_SHEET_RE = re.compile(r"^\d{2}\.\d{2}\.\d{2}(\d{2})?$")
 RU_MONTHS = {
     1: "Январь",
@@ -1400,7 +1399,6 @@ async def main():
     enabled_peers = set()
     last_reply_at = {}
     last_incoming_at = {}
-    question_hold_until = {}
     step_state = StepState(STEP_STATE_PATH)
     followup_state = FollowupState(FOLLOWUP_STATE_PATH)
     stop_event = asyncio.Event()
@@ -1923,7 +1921,6 @@ async def main():
             step_state.delete(peer_id)
             last_reply_at.pop(peer_id, None)
             last_incoming_at.pop(peer_id, None)
-            question_hold_until.pop(peer_id, None)
             processing_peers.discard(peer_id)
             pause_store.set_status(sender.id, username, name, chat_link, "ACTIVE", updated_by="test")
             await send_and_update(
@@ -2023,8 +2020,6 @@ async def main():
                     history_override=history,
                     append_clarify=True,
                 )
-                if QUESTION_HOLD_SEC > 0:
-                    question_hold_until[peer_id] = time.time() + QUESTION_HOLD_SEC
                 if not sent:
                     await send_and_update(
                         client,
@@ -2042,13 +2037,6 @@ async def main():
 
             if not last_step:
                 return
-
-            hold_until = question_hold_until.get(peer_id)
-            if hold_until and time.time() < hold_until:
-                if not is_test:
-                    print(f"ℹ️ Очікування після питання: {peer_id}")
-                return
-            question_hold_until.pop(peer_id, None)
 
             if CONTINUE_DELAY_SEC > 0:
                 await asyncio.sleep(CONTINUE_DELAY_SEC)

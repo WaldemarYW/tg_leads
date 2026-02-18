@@ -6,6 +6,12 @@ from typing import Optional, Tuple, List, Set
 
 # Legacy module: manual sheet update/exclusion flows are preserved for compatibility,
 # but runtime auto-reply now writes directly via auto_reply.py to the "Сегодня"/history model.
+LEGACY_SHEETS_WRITE_ENABLED = os.environ.get("LEGACY_SHEETS_WRITE_ENABLED", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 from dotenv import load_dotenv
 load_dotenv("/opt/tg_leads/.env")
@@ -232,6 +238,8 @@ def normalize_username(username: Optional[str]) -> str:
 
 
 def load_status_rules(sh) -> List[Tuple[str, str]]:
+    if not LEGACY_SHEETS_WRITE_ENABLED:
+        return DEFAULT_STATUS_RULES[:]
     ws = get_or_create_worksheet(sh, STATUS_RULES_WORKSHEET, rows=1000, cols=len(STATUS_RULES_HEADERS))
     ensure_headers(ws, STATUS_RULES_HEADERS, strict=False)
     values = ws.get_all_values()
@@ -298,6 +306,8 @@ def add_exclusion_entry(
     name: Optional[str] = None,
     chat_link_app: Optional[str] = None
 ) -> Tuple[bool, str]:
+    if not LEGACY_SHEETS_WRITE_ENABLED:
+        return False, "disabled"
     creds_path = os.environ["GOOGLE_CREDS"]
     sheet_name = os.environ["SHEET_NAME"]
     worksheet_name = os.environ.get("EXCLUDED_WORKSHEET", "Excluded")
@@ -332,6 +342,8 @@ def add_exclusion_entry(
 
 def add_exclusion_entries_bulk(entries: List[Tuple[Optional[int], Optional[str], str, str, Optional[str], Optional[str]]]) -> int:
     if not entries:
+        return 0
+    if not LEGACY_SHEETS_WRITE_ENABLED:
         return 0
 
     creds_path = os.environ["GOOGLE_CREDS"]
@@ -408,6 +420,8 @@ async def update_google_sheet(
     api_id: Optional[int] = None,
     api_hash: Optional[str] = None,
 ) -> Tuple[int, str]:
+    if not LEGACY_SHEETS_WRITE_ENABLED:
+        return 0, "❌ Legacy update_google_sheet вимкнено (LEGACY_SHEETS_WRITE_ENABLED=0)"
     api_id = api_id or int(os.environ["API_ID"])
     api_hash = api_hash or os.environ["API_HASH"]
     session_file = session_file or os.environ["SESSION_FILE"]
