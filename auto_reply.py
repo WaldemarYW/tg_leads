@@ -95,6 +95,7 @@ TODAY_HEADERS = [
     "Последнее входящее",
     "Последнее исходящее",
     "Peer ID",
+    "Тех. шаг",
     "Обновлено",
     "Аккаунт",
 ]
@@ -146,6 +147,10 @@ CLARIFY_VARIANTS = [
     "Чи все зрозуміло після пояснення?\nЯкщо є ще питання, із задоволенням уточню.",
     "Чи залишилися ще запитання по цьому етапу?\nГотовий коротко пояснити детальніше.",
 ]
+MISSING_STEP_RECOVERY_TEXT = (
+    "Щоб коректно продовжити, уточню поточний етап.\n"
+    "Підкажіть, будь ласка, яка зміна вам зручніша: денна чи нічна?"
+)
 
 FOLLOWUP_TEMPLATES = [
     (
@@ -560,6 +565,7 @@ def mark_step_without_send(
         chat_link=chat_link,
         status=status,
         last_out=None,
+        tech_step=step_name,
     )
 
 
@@ -971,6 +977,7 @@ class SheetWriter:
         auto_reply_enabled: Optional[bool] = None,
         last_in: Optional[str] = None,
         last_out: Optional[str] = None,
+        tech_step: Optional[str] = None,
         followup_stage: Optional[str] = None,
         followup_next_at: Optional[str] = None,
         followup_last_sent_at: Optional[str] = None,
@@ -1022,6 +1029,7 @@ class SheetWriter:
         set_value("Последнее входящее", last_in)
         set_value("Последнее исходящее", last_out)
         set_value("Peer ID", str(peer_id))
+        set_value("Тех. шаг", tech_step)
         set_value("Обновлено", now_iso)
         set_value("Аккаунт", ACCOUNT_KEY)
 
@@ -1266,6 +1274,19 @@ def detect_step_from_text(message_text: str) -> Optional[str]:
     return best_step
 
 
+def detect_message_intent_step(text: str) -> Optional[str]:
+    t = normalize_text(text)
+    if not t:
+        return None
+    if any(word in t for word in FORMAT_VIDEO_WORDS) or any(word in t for word in FORMAT_MINI_COURSE_WORDS):
+        return STEP_FORMAT_QUESTION
+    if re.search(r"\b(денна|днев|ніч|ноч|зміна|смена)\b", t):
+        return STEP_SHIFT_QUESTION
+    if re.search(r"\b(готов|ready|готовий|готова)\b", t):
+        return STEP_TRAINING_QUESTION
+    return None
+
+
 async def get_last_step(client: TelegramClient, entity: User, step_state: "StepState") -> Optional[str]:
     cached = step_state.get(entity.id)
     if cached:
@@ -1354,6 +1375,7 @@ async def send_and_update(
         status=status,
         auto_reply_enabled=auto_reply_enabled,
         last_out=message_text[:200],
+        tech_step=step_name,
     )
     if schedule_followup and followup_state and status != AUTO_STOP_STATUS:
         followup_state.schedule_from_now(entity.id, tz)
@@ -1605,6 +1627,7 @@ async def main():
     last_incoming_at = {}
     pending_question_resume = {}
     skip_stop_check_once = set()
+    manual_step_hints = {}
     clarify_variant_state = {}
     format_delivery_state = {}
     step_state = StepState(STEP_STATE_PATH)
@@ -1693,6 +1716,15 @@ async def main():
                 break
     if not video_message:
         print("⚠️ Не знайшов відео у групі для пересилання")
+
+    async def recover_step_after_start(entity: User, peer_id: int) -> Tuple[str, str]:
+        manual_step = manual_step_hints.get(peer_id)
+        if manual_step:
+            return manual_step, "manual"
+        history_step = await get_last_outgoing_step(client, entity)
+        if history_step:
+            return history_step, "history"
+        return STEP_SHIFT_QUESTION, "fallback"
 
     async def send_ai_response(
         entity: User,
@@ -2124,6 +2156,7 @@ async def main():
             if text_lower in STOP_COMMANDS:
                 paused_peers.add(peer_id)
                 enabled_peers.discard(peer_id)
+                manual_step_hints.pop(peer_id, None)
             else:
                 paused_peers.discard(peer_id)
                 enabled_peers.add(peer_id)
@@ -2131,6 +2164,7 @@ async def main():
         else:
             manual_step = detect_step_from_text(text)
             if manual_step:
+                manual_step_hints[peer_id] = manual_step
                 step_state.set(peer_id, manual_step)
             paused_peers.add(peer_id)
             enabled_peers.discard(peer_id)
@@ -2145,11 +2179,12 @@ async def main():
             status = "PAUSED" if text_lower in STOP_COMMANDS or text_lower not in START_COMMANDS else "ACTIVE"
             pause_store.set_status(entity.id, username, name, chat_link, status, updated_by="manual")
             if text_lower in START_COMMANDS:
-                # Manual mode: after START, re-anchor step from recent outgoing script messages.
                 step_state.delete(entity.id)
-                recovered_step = await get_last_outgoing_step(client, entity)
-                if recovered_step:
-                    step_state.set(entity.id, recovered_step)
+                recovered_step, recover_source = await recover_step_after_start(entity, entity.id)
+                step_state.set(entity.id, recovered_step)
+                print(f"START1_RECOVER peer={entity.id} source={recover_source} step={recovered_step}")
+                if recover_source == "fallback":
+                    print(f"MISSING_STEP_FALLBACK peer={entity.id} chosen={STEP_SHIFT_QUESTION}")
             sheet.upsert(
                 tz=tz,
                 peer_id=entity.id,
@@ -2157,6 +2192,7 @@ async def main():
                 username=username,
                 chat_link=chat_link,
                 auto_reply_enabled=(text_lower in START_COMMANDS),
+                tech_step=(step_state.get(entity.id) if text_lower in START_COMMANDS else None),
             )
         else:
             status = "PAUSED" if text_lower in STOP_COMMANDS or text_lower not in START_COMMANDS else "ACTIVE"
@@ -2298,6 +2334,7 @@ async def main():
             skip_stop_for_this_message = peer_id in skip_stop_check_once
             if skip_stop_for_this_message:
                 skip_stop_check_once.discard(peer_id)
+                print(f"START1_RECOVER peer={peer_id} source=skip_stop step={step_state.get(peer_id) or ''}")
             if (not skip_stop_for_this_message) and (not is_neutral_ack(text)) and await should_auto_pause(history, text):
                 await send_and_update(
                     client,
@@ -2326,6 +2363,54 @@ async def main():
                 return
 
             last_step = await get_last_step(client, sender, step_state)
+            if not last_step:
+                fallback_step = STEP_SHIFT_QUESTION
+                print(f"MISSING_STEP_FALLBACK peer={peer_id} chosen={fallback_step}")
+                step_state.set(peer_id, fallback_step)
+                sheet.upsert(
+                    tz=tz,
+                    peer_id=sender.id,
+                    name=name,
+                    username=username,
+                    chat_link=chat_link,
+                    tech_step=fallback_step,
+                )
+                inferred_step = detect_message_intent_step(text)
+                if inferred_step == STEP_SHIFT_QUESTION:
+                    await continue_flow(sender, fallback_step, text)
+                    return
+                await send_and_update(
+                    client,
+                    sheet,
+                    tz,
+                    sender,
+                    MISSING_STEP_RECOVERY_TEXT,
+                    status_for_text(SHIFT_QUESTION_TEXT),
+                    use_ai=False,
+                    draft=MISSING_STEP_RECOVERY_TEXT,
+                    step_state=step_state,
+                    step_name=fallback_step,
+                    followup_state=followup_state,
+                )
+                last_reply_at[peer_id] = time.time()
+                return
+
+            inferred_step = detect_message_intent_step(text)
+            current_order = STEP_ORDER.get(last_step, -1)
+            inferred_order = STEP_ORDER.get(inferred_step, -1) if inferred_step else -1
+            if inferred_step and inferred_order == current_order + 1:
+                print(f"STEP_JUMP peer={peer_id} from={last_step} to={inferred_step} reason=message_intent")
+                step_state.set(peer_id, inferred_step)
+                last_step = inferred_step
+                sheet.upsert(
+                    tz=tz,
+                    peer_id=sender.id,
+                    name=name,
+                    username=username,
+                    chat_link=chat_link,
+                    tech_step=last_step,
+                )
+
             if message_has_question(text):
                 sent = await send_ai_response(
                     sender,
@@ -2352,9 +2437,6 @@ async def main():
                         "last_incoming_at": last_incoming_at.get(peer_id, time.time()),
                         "step": last_step,
                     }
-                return
-
-            if not last_step:
                 return
 
             if last_step in {STEP_FORMAT_QUESTION, STEP_VIDEO_FOLLOWUP, STEP_TRAINING, STEP_TRAINING_QUESTION}:
