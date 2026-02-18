@@ -64,6 +64,7 @@ REPLY_DEBOUNCE_SEC = float(os.environ.get("REPLY_DEBOUNCE_SEC", "3"))
 BOT_REPLY_DELAY_SEC = float(os.environ.get("BOT_REPLY_DELAY_SEC", "10"))
 QUESTION_GAP_SEC = float(os.environ.get("QUESTION_GAP_SEC", "10"))
 QUESTION_RESPONSE_DELAY_SEC = float(os.environ.get("QUESTION_RESPONSE_DELAY_SEC", "10"))
+QUESTION_RESUME_DELAY_SEC = float(os.environ.get("QUESTION_RESUME_DELAY_SEC", "300"))
 TRAINING_TO_FORM_DELAY_SEC = float(os.environ.get("TRAINING_TO_FORM_DELAY_SEC", "300"))
 SENT_MESSAGE_CACHE_LIMIT = int(os.environ.get("SENT_MESSAGE_CACHE_LIMIT", "200"))
 SESSION_LOCK = os.environ.get("TELETHON_SESSION_LOCK", f"{SESSION_FILE}.lock")
@@ -81,16 +82,18 @@ PAUSED_STATE_PATH = os.environ.get("AUTO_REPLY_PAUSED_STATE_PATH", "/opt/tg_lead
 
 TODAY_HEADERS = [
     "Дата",
-    "Аккаунт",
     "Имя",
     "Username",
     "Ссылка на чат",
+    "Ссылка на заявку",
+    "Ссылка на журнал",
     "Статус",
     "Автоответчик",
     "Последнее входящее",
     "Последнее исходящее",
     "Peer ID",
     "Обновлено",
+    "Аккаунт",
 ]
 
 HISTORY_HEADERS = [
@@ -130,6 +133,12 @@ STOP_COMMANDS = {"стоп1", "stop1"}
 START_COMMANDS = {"старт1", "start1"}
 AUTO_STOP_STATUS = "❌ Відмова"
 STOP_REPLY_TEXT = "Розумію, дякую за відповідь. Якщо обставини зміняться, дайте знати."
+CLARIFY_VARIANTS = [
+    CLARIFY_TEXT,
+    "Чи вдалося відповісти на ваше запитання?\nЯкщо хочете, можу одразу пояснити наступний етап.",
+    "Чи все зрозуміло після пояснення?\nЯкщо є ще питання, із задоволенням уточню.",
+    "Чи залишилися ще запитання по цьому етапу?\nГотовий коротко пояснити детальніше.",
+]
 
 FOLLOWUP_TEMPLATES = [
     (
@@ -658,7 +667,10 @@ class SheetWriter:
         key = self._today_key(tz)
         if self.today_ws is None:
             self.today_ws = get_or_create_worksheet(self.sh, TODAY_WORKSHEET, rows=1000, cols=len(TODAY_HEADERS))
-            ensure_headers(self.today_ws, TODAY_HEADERS, strict=False)
+            current = self.today_ws.row_values(1)
+            if current != TODAY_HEADERS:
+                self.today_ws.clear()
+                self.today_ws.append_row(TODAY_HEADERS, value_input_option="USER_ENTERED")
             self.today_key = key
             return self.today_ws
         if self.today_key != key:
@@ -744,6 +756,46 @@ class SheetWriter:
             return "Изменение статуса"
         return "Служебное обновление"
 
+    def _sheet_row_link(self, ws, row_idx: int, label: str) -> str:
+        return f'=HYPERLINK("#gid={ws.id}&range=A{int(row_idx)}";"{label}")'
+
+    def _find_group_lead_row(self, username: str) -> Optional[int]:
+        uname = normalize_username(username)
+        if not uname:
+            return None
+        try:
+            ws = self.sh.worksheet(GROUP_LEADS_WORKSHEET)
+        except Exception:
+            return None
+        try:
+            values = ws.get_all_values()
+        except Exception:
+            return None
+        if not values:
+            return None
+        headers = [h.strip().lower() for h in values[0]]
+        try:
+            tg_idx = headers.index("tg")
+        except ValueError:
+            return None
+        for idx, row in enumerate(values[1:], start=2):
+            if tg_idx >= len(row):
+                continue
+            if normalize_username(row[tg_idx]) == uname:
+                return idx
+        return None
+
+    def _sort_today_by_updated(self, ws, headers):
+        try:
+            updated_idx = headers.index("Обновлено") + 1
+        except ValueError:
+            return
+        end_col = self._col_letter(len(headers))
+        try:
+            ws.sort((updated_idx, "des"), range=f"A2:{end_col}{ws.row_count}")
+        except Exception as err:
+            print(f"⚠️ Не вдалося відсортувати лист '{TODAY_WORKSHEET}': {err}")
+
     def append_history_event(
         self,
         tz: ZoneInfo,
@@ -756,7 +808,7 @@ class SheetWriter:
         auto_reply_enabled: Optional[bool],
         last_in: Optional[str],
         last_out: Optional[str],
-    ):
+    ) -> Optional[str]:
         ws = self._history_ws(tz)
         now_iso = datetime.now(tz).isoformat(timespec="seconds")
         headers = [h.strip() for h in ws.row_values(1)]
@@ -834,6 +886,12 @@ class SheetWriter:
                 ws.append_row(existing, value_input_option="USER_ENTERED")
         except Exception as err:
             print(f"⚠️ Не вдалося записати історію: {err}")
+            return None
+        if not row_idx:
+            row_idx, _ = self._find_row(ws, peer_id, ACCOUNT_KEY)
+        if not row_idx:
+            return None
+        return self._sheet_row_link(ws, row_idx, "Открыть журнал")
 
     def upsert(
         self,
@@ -879,10 +937,18 @@ class SheetWriter:
 
         now_iso = datetime.now(tz).isoformat(timespec="seconds")
         set_value("Дата", str(datetime.now(tz).date()))
-        set_value("Аккаунт", ACCOUNT_KEY)
         set_value("Имя", name)
         set_value("Username", ("@" + username) if username else "")
         set_value("Ссылка на чат", chat_link)
+        try:
+            app_row = self._find_group_lead_row(username)
+            if app_row:
+                app_ws = self.sh.worksheet(GROUP_LEADS_WORKSHEET)
+                set_value("Ссылка на заявку", self._sheet_row_link(app_ws, app_row, "Открыть заявку"))
+            else:
+                set_value("Ссылка на заявку", "")
+        except Exception:
+            set_value("Ссылка на заявку", "")
         set_value("Статус", status)
         if auto_reply_enabled is not None:
             set_value("Автоответчик", "ON" if auto_reply_enabled else "OFF")
@@ -890,18 +956,10 @@ class SheetWriter:
         set_value("Последнее исходящее", last_out)
         set_value("Peer ID", str(peer_id))
         set_value("Обновлено", now_iso)
-
-        try:
-            if row_idx:
-                end_col = self._col_letter(len(headers))
-                ws.update(f"A{row_idx}:{end_col}{row_idx}", [existing], value_input_option="USER_ENTERED")
-            else:
-                ws.append_row(existing, value_input_option="USER_ENTERED")
-        except Exception as err:
-            print(f"⚠️ Не вдалося записати лист '{TODAY_WORKSHEET}': {err}")
+        set_value("Аккаунт", ACCOUNT_KEY)
 
         event_type = self._event_type(status, auto_reply_enabled, last_in, last_out)
-        self.append_history_event(
+        history_link = self.append_history_event(
             tz=tz,
             event_type=event_type,
             peer_id=peer_id,
@@ -913,6 +971,18 @@ class SheetWriter:
             last_in=last_in,
             last_out=last_out,
         )
+        set_value("Ссылка на журнал", history_link or "")
+
+        try:
+            if row_idx:
+                end_col = self._col_letter(len(headers))
+                ws.update(f"A{row_idx}:{end_col}{row_idx}", [existing], value_input_option="USER_ENTERED")
+            else:
+                ws.append_row(existing, value_input_option="USER_ENTERED")
+        except Exception as err:
+            print(f"⚠️ Не вдалося записати лист '{TODAY_WORKSHEET}': {err}")
+            return
+        self._sort_today_by_updated(ws, headers)
 
     def load_enabled_peers(self, tz: ZoneInfo) -> set:
         ws = self._ensure_today_ws(tz)
@@ -1399,6 +1469,8 @@ async def main():
     enabled_peers = set()
     last_reply_at = {}
     last_incoming_at = {}
+    pending_question_resume = {}
+    clarify_variant_state = {}
     step_state = StepState(STEP_STATE_PATH)
     followup_state = FollowupState(FOLLOWUP_STATE_PATH)
     stop_event = asyncio.Event()
@@ -1491,6 +1563,14 @@ async def main():
         history_override: Optional[list] = None,
         append_clarify: bool = False,
     ) -> bool:
+        def next_clarify_text(peer_id: int) -> str:
+            if not CLARIFY_VARIANTS:
+                return CLARIFY_TEXT
+            idx = clarify_variant_state.get(peer_id, -1) + 1
+            idx = idx % len(CLARIFY_VARIANTS)
+            clarify_variant_state[peer_id] = idx
+            return CLARIFY_VARIANTS[idx]
+
         if is_paused(entity):
             return False
         history = history_override or await build_ai_history(client, entity, limit=10)
@@ -1500,7 +1580,7 @@ async def main():
         ai_text = strip_question_trail(ai_text)
         final_text = ai_text
         if append_clarify and ai_text:
-            final_text = f"{ai_text}\n\n{CLARIFY_TEXT}"
+            final_text = f"{ai_text}\n\n{next_clarify_text(entity.id)}"
         await send_and_update(
             client,
             sheet,
@@ -1921,6 +2001,7 @@ async def main():
             step_state.delete(peer_id)
             last_reply_at.pop(peer_id, None)
             last_incoming_at.pop(peer_id, None)
+            pending_question_resume.pop(peer_id, None)
             processing_peers.discard(peer_id)
             pause_store.set_status(sender.id, username, name, chat_link, "ACTIVE", updated_by="test")
             await send_and_update(
@@ -1964,6 +2045,7 @@ async def main():
 
         try:
             last_incoming_at[peer_id] = time.time()
+            pending_question_resume.pop(peer_id, None)
             sheet.upsert(
                 tz=tz,
                 peer_id=sender.id,
@@ -2026,13 +2108,19 @@ async def main():
                         sheet,
                         tz,
                         sender,
-                        CLARIFY_TEXT,
+                        CLARIFY_VARIANTS[0] if CLARIFY_VARIANTS else CLARIFY_TEXT,
                         "знак питання",
                         use_ai=False,
                         delay_before=QUESTION_RESPONSE_DELAY_SEC,
                         step_state=step_state,
                         followup_state=followup_state,
                     )
+                if last_step and QUESTION_RESUME_DELAY_SEC > 0:
+                    pending_question_resume[peer_id] = {
+                        "due_at": time.time() + QUESTION_RESUME_DELAY_SEC,
+                        "last_incoming_at": last_incoming_at.get(peer_id, time.time()),
+                        "step": last_step,
+                    }
                 return
 
             if not last_step:
@@ -2099,6 +2187,39 @@ async def main():
                         followup_next_at=next_value,
                         followup_last_sent_at=datetime.now(tz).isoformat(timespec="seconds"),
                     )
+
+                for peer_id, state in list(pending_question_resume.items()):
+                    if now.timestamp() < float(state.get("due_at", 0)):
+                        continue
+                    if peer_id in processing_peers:
+                        continue
+                    if peer_id not in enabled_peers:
+                        pending_question_resume.pop(peer_id, None)
+                        continue
+                    baseline_in = float(state.get("last_incoming_at", 0))
+                    latest_in = float(last_incoming_at.get(peer_id, 0))
+                    if latest_in > baseline_in:
+                        pending_question_resume.pop(peer_id, None)
+                        continue
+                    try:
+                        entity = await client.get_entity(peer_id)
+                    except Exception:
+                        continue
+                    if is_paused(entity):
+                        pending_question_resume.pop(peer_id, None)
+                        continue
+                    step_name = state.get("step")
+                    if not step_name:
+                        pending_question_resume.pop(peer_id, None)
+                        continue
+                    processing_peers.add(peer_id)
+                    try:
+                        await continue_flow(entity, step_name, "")
+                    except Exception as err:
+                        print(f"⚠️ Question-resume error: {err}")
+                    finally:
+                        processing_peers.discard(peer_id)
+                        pending_question_resume.pop(peer_id, None)
             except Exception as err:
                 print(f"⚠️ Followup loop error: {err}")
             await asyncio.sleep(FOLLOWUP_CHECK_SEC)
