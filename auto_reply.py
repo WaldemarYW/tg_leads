@@ -151,6 +151,10 @@ MISSING_STEP_RECOVERY_TEXT = (
     "Щоб коректно продовжити, уточню поточний етап.\n"
     "Підкажіть, будь ласка, яка зміна вам зручніша: денна чи нічна?"
 )
+FORM_LOCK_REPLY_TEXT = (
+    "Ми вже на фінальному етапі — заповненні анкети.\n"
+    "Після отримання анкети передаю вас на старт навчання."
+)
 
 FOLLOWUP_TEMPLATES = [
     (
@@ -2179,8 +2183,11 @@ async def main():
             status = "PAUSED" if text_lower in STOP_COMMANDS or text_lower not in START_COMMANDS else "ACTIVE"
             pause_store.set_status(entity.id, username, name, chat_link, status, updated_by="manual")
             if text_lower in START_COMMANDS:
-                step_state.delete(entity.id)
                 recovered_step, recover_source = await recover_step_after_start(entity, entity.id)
+                existing_step = step_state.get(entity.id)
+                if existing_step and STEP_ORDER.get(existing_step, -1) > STEP_ORDER.get(recovered_step, -1):
+                    recovered_step = existing_step
+                    recover_source = "state"
                 step_state.set(entity.id, recovered_step)
                 print(f"START1_RECOVER peer={entity.id} source={recover_source} step={recovered_step}")
                 if recover_source == "fallback":
@@ -2410,6 +2417,24 @@ async def main():
                     chat_link=chat_link,
                     tech_step=last_step,
                 )
+
+            if last_step == STEP_FORM:
+                if message_has_question(text):
+                    await send_and_update(
+                        client,
+                        sheet,
+                        tz,
+                        sender,
+                        FORM_LOCK_REPLY_TEXT,
+                        status_for_text(FORM_TEXT),
+                        use_ai=False,
+                        draft=FORM_LOCK_REPLY_TEXT,
+                        step_state=step_state,
+                        step_name=STEP_FORM,
+                        followup_state=followup_state,
+                    )
+                    last_reply_at[peer_id] = time.time()
+                return
 
             if message_has_question(text):
                 sent = await send_ai_response(
