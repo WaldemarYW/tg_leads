@@ -36,6 +36,9 @@ from tg_to_sheets import (
     FORMAT_TEXT,
     FORMAT_QUESTION_TEXT,
     VIDEO_FOLLOWUP_TEXT,
+    MINI_COURSE_LINK,
+    MINI_COURSE_FOLLOWUP_TEXT,
+    BOTH_FORMATS_FOLLOWUP_TEXT,
     TRAINING_TEXT,
     TRAINING_QUESTION_TEXT,
     FORM_TEXT,
@@ -119,10 +122,14 @@ PHONE_RE = re.compile(r"\+?\d[\d\s\-\(\)]{9,}\d")
 MESSAGE_LINK_RE = re.compile(r"https?://t\.me/(c/)?([A-Za-z0-9_]+)/(\d+)")
 
 VIDEO_WORDS = ("відео", "видео")
+FORMAT_VIDEO_WORDS = ("відео", "видео", "video")
+FORMAT_MINI_COURSE_WORDS = ("мінікурс", "миникурс", "mini-course", "mini course", "курс", "тренажер", "сайт")
 DIALOG_AI_URL = os.environ.get("DIALOG_AI_URL", "http://127.0.0.1:3000/dialog_suggest")
 DIALOG_AI_TIMEOUT_SEC = float(os.environ.get("DIALOG_AI_TIMEOUT_SEC", "20"))
 DIALOG_STOP_URL = os.environ.get("DIALOG_STOP_URL", "http://127.0.0.1:3000/should_pause")
 DIALOG_STOP_TIMEOUT_SEC = float(os.environ.get("DIALOG_STOP_TIMEOUT_SEC", "15"))
+DIALOG_FORMAT_URL = os.environ.get("DIALOG_FORMAT_URL", "http://127.0.0.1:3000/format_choice")
+DIALOG_FORMAT_TIMEOUT_SEC = float(os.environ.get("DIALOG_FORMAT_TIMEOUT_SEC", "15"))
 STEP_STATE_PATH = os.environ.get("AUTO_REPLY_STEP_STATE_PATH", "/opt/tg_leads/.auto_reply.step_state.json")
 GROUP_LEADS_WORKSHEET = os.environ.get("GROUP_LEADS_WORKSHEET", "GroupLeads")
 CONTINUE_DELAY_SEC = float(os.environ.get("AUTO_REPLY_CONTINUE_DELAY_SEC", "0"))
@@ -235,6 +242,9 @@ STATUS_BY_TEMPLATE = {
     normalize_text(FORMAT_TEXT): "🎥 Більше інформації",
     normalize_text(FORMAT_QUESTION_TEXT): "🎥 Більше інформації",
     normalize_text(VIDEO_FOLLOWUP_TEXT): "🎥 Відео",
+    normalize_text(MINI_COURSE_LINK): "🎥 Більше інформації",
+    normalize_text(MINI_COURSE_FOLLOWUP_TEXT): "🎥 Більше інформації",
+    normalize_text(BOTH_FORMATS_FOLLOWUP_TEXT): "🎥 Більше інформації",
     normalize_text(TRAINING_TEXT): "🎓 Навчання",
     normalize_text(TRAINING_QUESTION_TEXT): "🎓 Навчання",
     normalize_text(FORM_TEXT): "📝 Анкета",
@@ -1285,6 +1295,19 @@ def wants_video(text: str) -> bool:
     return any(word in t for word in VIDEO_WORDS)
 
 
+def fallback_format_choice(text: str) -> str:
+    t = normalize_text(text)
+    has_video = any(word in t for word in FORMAT_VIDEO_WORDS)
+    has_mini = any(word in t for word in FORMAT_MINI_COURSE_WORDS)
+    if has_video and has_mini:
+        return "both"
+    if has_video:
+        return "video"
+    if has_mini:
+        return "mini_course"
+    return "unknown"
+
+
 def parse_message_link(link: str) -> Optional[Tuple[object, int]]:
     if not link:
         return None
@@ -1393,6 +1416,24 @@ async def dialog_suggest(history: list, draft: str, no_questions: bool = False) 
     return None
 
 
+async def detect_format_choice(history: list, text: str) -> str:
+    fallback = fallback_format_choice(text)
+    if not DIALOG_FORMAT_URL:
+        return fallback
+    payload = {"history": history, "last_message": text}
+    try:
+        data = await asyncio.to_thread(_post_json, DIALOG_FORMAT_URL, payload, DIALOG_FORMAT_TIMEOUT_SEC)
+    except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError) as err:
+        print(f"⚠️ AI format error: {err}")
+        return fallback
+    if not data or not data.get("ok"):
+        return fallback
+    choice = (data.get("choice") or "").strip().lower()
+    if choice in {"video", "mini_course", "both"}:
+        return choice
+    return fallback
+
+
 async def build_ai_history(client: TelegramClient, entity: User, limit: int = 10) -> list:
     items = []
     async for m in client.iter_messages(entity, limit=limit):
@@ -1471,6 +1512,7 @@ async def main():
     last_incoming_at = {}
     pending_question_resume = {}
     clarify_variant_state = {}
+    format_delivery_state = {}
     step_state = StepState(STEP_STATE_PATH)
     followup_state = FollowupState(FOLLOWUP_STATE_PATH)
     stop_event = asyncio.Event()
@@ -1594,6 +1636,142 @@ async def main():
             followup_state=followup_state,
         )
         return True
+
+    def peer_format_state(peer_id: int) -> dict:
+        state = format_delivery_state.get(peer_id)
+        if state is None:
+            state = {"video_sent": False, "mini_course_sent": False}
+            format_delivery_state[peer_id] = state
+        return state
+
+    def mark_format_stage_ready(entity: User):
+        step_state.set(entity.id, STEP_VIDEO_FOLLOWUP)
+
+    async def send_video_option(entity: User) -> bool:
+        state = peer_format_state(entity.id)
+        if state.get("video_sent"):
+            return False
+        if not video_message:
+            return False
+        await asyncio.sleep(30)
+        sent = None
+        try:
+            if VIDEO_MESSAGE_LINK:
+                sent = await client.forward_messages(entity, video_message)
+            elif video_message.media:
+                sent = await client.send_file(
+                    entity,
+                    video_message.media,
+                    caption=video_message.message or "",
+                )
+            elif video_message.message:
+                sent = await client.send_message(entity, video_message.message)
+        except Exception:
+            print("⚠️ Не вдалося надіслати відео")
+            return False
+        try:
+            if isinstance(sent, list):
+                for msg in sent:
+                    track_sent_message(entity.id, msg.id)
+            elif sent:
+                track_sent_message(entity.id, sent.id)
+        except Exception:
+            pass
+        await send_and_update(
+            client,
+            sheet,
+            tz,
+            entity,
+            VIDEO_FOLLOWUP_TEXT,
+            status_for_text(VIDEO_FOLLOWUP_TEXT),
+            use_ai=False,
+            no_questions=True,
+            draft=VIDEO_FOLLOWUP_TEXT,
+            step_state=step_state,
+            step_name=STEP_VIDEO_FOLLOWUP,
+            followup_state=followup_state,
+        )
+        state["video_sent"] = True
+        return True
+
+    async def send_mini_course_option(entity: User) -> bool:
+        state = peer_format_state(entity.id)
+        if state.get("mini_course_sent"):
+            return False
+        await send_and_update(
+            client,
+            sheet,
+            tz,
+            entity,
+            MINI_COURSE_LINK,
+            status_for_text(MINI_COURSE_LINK) or status_for_text(FORMAT_QUESTION_TEXT),
+            use_ai=False,
+            no_questions=True,
+            draft=MINI_COURSE_LINK,
+            step_state=step_state,
+            followup_state=followup_state,
+        )
+        await send_and_update(
+            client,
+            sheet,
+            tz,
+            entity,
+            MINI_COURSE_FOLLOWUP_TEXT,
+            status_for_text(MINI_COURSE_FOLLOWUP_TEXT) or status_for_text(FORMAT_QUESTION_TEXT),
+            use_ai=False,
+            no_questions=True,
+            draft=MINI_COURSE_FOLLOWUP_TEXT,
+            step_state=step_state,
+            followup_state=followup_state,
+        )
+        state["mini_course_sent"] = True
+        mark_format_stage_ready(entity)
+        return True
+
+    async def handle_format_choice(entity: User, choice: str) -> str:
+        state = peer_format_state(entity.id)
+        sent_video = False
+        sent_mini = False
+
+        if choice == "video":
+            sent_video = await send_video_option(entity)
+            if sent_video:
+                last_reply_at[entity.id] = time.time()
+                return "video"
+            return "none"
+
+        if choice == "mini_course":
+            sent_mini = await send_mini_course_option(entity)
+            if sent_mini:
+                last_reply_at[entity.id] = time.time()
+                return "mini_course"
+            return "none"
+
+        if choice == "both":
+            if not state.get("mini_course_sent"):
+                sent_mini = await send_mini_course_option(entity)
+            if not state.get("video_sent"):
+                sent_video = await send_video_option(entity)
+            if sent_mini or sent_video:
+                await send_and_update(
+                    client,
+                    sheet,
+                    tz,
+                    entity,
+                    BOTH_FORMATS_FOLLOWUP_TEXT,
+                    status_for_text(BOTH_FORMATS_FOLLOWUP_TEXT) or status_for_text(FORMAT_QUESTION_TEXT),
+                    use_ai=False,
+                    no_questions=True,
+                    draft=BOTH_FORMATS_FOLLOWUP_TEXT,
+                    step_state=step_state,
+                    followup_state=followup_state,
+                )
+                mark_format_stage_ready(entity)
+                last_reply_at[entity.id] = time.time()
+                return "both"
+            return "none"
+
+        return "unknown"
 
     async def continue_flow(entity: User, last_step: str, text: str):
         if is_paused(entity):
@@ -1742,87 +1920,27 @@ async def main():
             return
 
         if last_step == STEP_FORMAT_QUESTION:
-            if wants_video(text) and video_message:
-                await asyncio.sleep(30)
-                sent = None
-                try:
-                    if VIDEO_MESSAGE_LINK:
-                        sent = await client.forward_messages(entity, video_message)
-                    elif video_message.media:
-                        sent = await client.send_file(
-                            entity,
-                            video_message.media,
-                            caption=video_message.message or "",
-                        )
-                    elif video_message.message:
-                        sent = await client.send_message(entity, video_message.message)
-                except Exception:
-                    print("⚠️ Не вдалося надіслати відео")
-                else:
-                    try:
-                        if isinstance(sent, list):
-                            for msg in sent:
-                                track_sent_message(entity.id, msg.id)
-                        elif sent:
-                            track_sent_message(entity.id, sent.id)
-                    except Exception:
-                        pass
+            history = await build_ai_history(client, entity, limit=10)
+            choice = await detect_format_choice(history, text)
+            result = await handle_format_choice(entity, choice)
+            if result in {"video", "mini_course", "both"}:
+                return
+            if choice == "unknown" or result == "none":
                 await send_and_update(
                     client,
                     sheet,
                     tz,
                     entity,
-                    VIDEO_FOLLOWUP_TEXT,
-                    status_for_text(VIDEO_FOLLOWUP_TEXT),
-                    use_ai=True,
-                    no_questions=True,
-                    draft=VIDEO_FOLLOWUP_TEXT,
+                    FORMAT_QUESTION_TEXT,
+                    status_for_text(FORMAT_QUESTION_TEXT),
+                    use_ai=False,
+                    draft=FORMAT_QUESTION_TEXT,
                     step_state=step_state,
-                    step_name=STEP_VIDEO_FOLLOWUP,
+                    step_name=STEP_FORMAT_QUESTION,
                     followup_state=followup_state,
                 )
                 last_reply_at[entity.id] = time.time()
                 return
-
-            training_text = await send_and_update(
-                client,
-                sheet,
-                tz,
-                entity,
-                TRAINING_TEXT,
-                status_for_text(TRAINING_TEXT),
-                use_ai=True,
-                no_questions=True,
-                draft=TRAINING_TEXT,
-                step_state=step_state,
-                step_name=STEP_TRAINING,
-                followup_state=followup_state,
-            )
-            if should_send_question(training_text, TRAINING_QUESTION_TEXT):
-                await send_and_update(
-                    client,
-                    sheet,
-                    tz,
-                    entity,
-                    TRAINING_QUESTION_TEXT,
-                    status_for_text(TRAINING_QUESTION_TEXT),
-                    use_ai=True,
-                    draft=TRAINING_QUESTION_TEXT,
-                    delay_before=QUESTION_GAP_SEC,
-                    step_state=step_state,
-                    step_name=STEP_TRAINING_QUESTION,
-                    followup_state=followup_state,
-                )
-            else:
-                mark_step_without_send(
-                    sheet,
-                    tz,
-                    entity,
-                    status_for_text(TRAINING_QUESTION_TEXT),
-                    step_state,
-                    STEP_TRAINING_QUESTION,
-                )
-            last_reply_at[entity.id] = time.time()
             return
 
         if last_step == STEP_VIDEO_FOLLOWUP:
@@ -2125,6 +2243,13 @@ async def main():
 
             if not last_step:
                 return
+
+            if last_step in {STEP_FORMAT_QUESTION, STEP_VIDEO_FOLLOWUP, STEP_TRAINING, STEP_TRAINING_QUESTION}:
+                format_choice = await detect_format_choice(history, text)
+                if format_choice in {"video", "mini_course", "both"}:
+                    handled = await handle_format_choice(sender, format_choice)
+                    if handled in {"video", "mini_course", "both"}:
+                        return
 
             if CONTINUE_DELAY_SEC > 0:
                 await asyncio.sleep(CONTINUE_DELAY_SEC)

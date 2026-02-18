@@ -26,8 +26,10 @@ const HR_ASSISTANT_PROMPT = `Ти – віртуальний HR-асистент
    Питання: «Чи все зрозуміло? Можливо, є питання?»
 5) Зміни: 2 зміни (14–23, 23–08), перерви, нічна вигідніша.
    Питання: «Яка зміна вам зручніша?»
-6) Формат: відео або онлайн-співбесіда.
-   Питання: «Як вам зручніше?» Якщо просить відео — надсилаємо відео і супровід: «Якщо після перегляду ...»
+6) Формат: коротке відео або міні-курс на сайті-тренажері.
+   Питання: «Як вам зручніше: переглянути коротке відео чи пройти мінікурс?»
+   Якщо просить відео — надсилаємо відео і супровід: «Якщо після перегляду ...»
+   Якщо просить мінікурс — надсилаємо посилання: alpha-mini.pp.ua і супровідне повідомлення.
 7) Навчання: 3 години, онлайн, текстові блоки, відеоуроки, тести, у зручному темпі.
    Питання: «Чи готові перейти до навчання?»
 8) Анкета: перелік 10 пунктів і пояснення про документ для підтвердження віку.
@@ -77,6 +79,17 @@ STOP якщо кандидат відмовляється, каже що не п
 просить не писати, хоче зупинити спілкування, або чітко не хоче продовжувати.
 CONTINUE якщо кандидат зацікавлений, ставить питання, або повідомлення нейтральне.
 Мови: укр/рус/англ. Ніяких пояснень.`;
+
+const FORMAT_CHOICE_PROMPT = `Ти класифікатор вибору формату.
+Відповідай ТІЛЬКИ одним словом: VIDEO, MINI_COURSE, BOTH або UNKNOWN.
+
+Правила:
+- VIDEO: якщо кандидат просить відео.
+- MINI_COURSE: якщо кандидат просить мінікурс/курс/тренажер/сайт.
+- BOTH: якщо кандидат хоче і відео, і мінікурс.
+- UNKNOWN: якщо неможливо надійно визначити.
+
+Мови: укр/рус/англ. Без пояснень.`;
 
 app.get("/health", (_, res) => res.json({ ok: true, env: Boolean(OPENAI_API_KEY) }));
 
@@ -140,6 +153,19 @@ function buildStopPrompt(history = [], lastMessage = "") {
   return `${STOP_CLASSIFY_PROMPT}\n\nІсторія:\n${normalized || "(порожньо)"}\n${lastLine}`;
 }
 
+function buildFormatChoicePrompt(history = [], lastMessage = "") {
+  const normalized = history
+    .slice(-10)
+    .map((item) => {
+      const sender = item?.sender === "me" ? "Я" : "Кандидат";
+      const text = (item?.text || "").trim().replace(/\s+/g, " ");
+      return `${sender}: ${text}`;
+    })
+    .join("\n");
+  const lastLine = lastMessage ? `Останнє повідомлення кандидата: ${lastMessage}` : "";
+  return `${FORMAT_CHOICE_PROMPT}\n\nІсторія:\n${normalized || "(порожньо)"}\n${lastLine}`;
+}
+
 app.post("/dialog_suggest", async (req, res) => {
   try {
     const { history = [], draft = "", no_questions = false } = req.body || {};
@@ -162,6 +188,27 @@ app.post("/should_pause", async (req, res) => {
     return res.json({ ok: true, stop, text: (text || "").trim() });
   } catch (error) {
     console.error("/should_pause error", error);
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.post("/format_choice", async (req, res) => {
+  try {
+    const { history = [], last_message = "" } = req.body || {};
+    const prompt = buildFormatChoicePrompt(history, last_message);
+    const { text } = await callOpenAI({ system: "You are a strict format classifier.", user: prompt });
+    const normalized = (text || "").trim().toLowerCase();
+    let choice = "unknown";
+    if (normalized.startsWith("both")) {
+      choice = "both";
+    } else if (normalized.startsWith("mini_course") || normalized.startsWith("mini")) {
+      choice = "mini_course";
+    } else if (normalized.startsWith("video")) {
+      choice = "video";
+    }
+    return res.json({ ok: true, choice, text: (text || "").trim() });
+  } catch (error) {
+    console.error("/format_choice error", error);
     return res.status(500).json({ ok: false, error: error.message });
   }
 });
