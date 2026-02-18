@@ -64,6 +64,8 @@ REPLY_DEBOUNCE_SEC = float(os.environ.get("REPLY_DEBOUNCE_SEC", "3"))
 BOT_REPLY_DELAY_SEC = float(os.environ.get("BOT_REPLY_DELAY_SEC", "10"))
 QUESTION_GAP_SEC = float(os.environ.get("QUESTION_GAP_SEC", "10"))
 QUESTION_RESPONSE_DELAY_SEC = float(os.environ.get("QUESTION_RESPONSE_DELAY_SEC", "10"))
+TRAINING_TO_FORM_DELAY_SEC = float(os.environ.get("TRAINING_TO_FORM_DELAY_SEC", "300"))
+QUESTION_HOLD_SEC = float(os.environ.get("QUESTION_HOLD_SEC", "300"))
 SENT_MESSAGE_CACHE_LIMIT = int(os.environ.get("SENT_MESSAGE_CACHE_LIMIT", "200"))
 SESSION_LOCK = os.environ.get("TELETHON_SESSION_LOCK", f"{SESSION_FILE}.lock")
 STATUS_PATH = os.environ.get("AUTO_REPLY_STATUS_PATH", "/opt/tg_leads/.auto_reply.status")
@@ -1398,6 +1400,7 @@ async def main():
     enabled_peers = set()
     last_reply_at = {}
     last_incoming_at = {}
+    question_hold_until = {}
     step_state = StepState(STEP_STATE_PATH)
     followup_state = FollowupState(FOLLOWUP_STATE_PATH)
     stop_event = asyncio.Event()
@@ -1488,26 +1491,31 @@ async def main():
         entity: User,
         status: Optional[str] = None,
         history_override: Optional[list] = None,
-    ):
+        append_clarify: bool = False,
+    ) -> bool:
         if is_paused(entity):
-            return
+            return False
         history = history_override or await build_ai_history(client, entity, limit=10)
         ai_text = await dialog_suggest(history, "", no_questions=True)
         if not ai_text:
-            return
+            return False
         ai_text = strip_question_trail(ai_text)
+        final_text = ai_text
+        if append_clarify and ai_text:
+            final_text = f"{ai_text}\n\n{CLARIFY_TEXT}"
         await send_and_update(
             client,
             sheet,
             tz,
             entity,
-            ai_text,
+            final_text,
             status,
             use_ai=False,
             delay_before=QUESTION_RESPONSE_DELAY_SEC,
             step_state=step_state,
             followup_state=followup_state,
         )
+        return True
 
     async def continue_flow(entity: User, last_step: str, text: str):
         if is_paused(entity):
@@ -1791,6 +1799,7 @@ async def main():
                 status_for_text(FORM_TEXT),
                 use_ai=False,
                 draft=FORM_TEXT,
+                delay_before=TRAINING_TO_FORM_DELAY_SEC,
                 step_state=step_state,
                 step_name=STEP_FORM,
                 followup_state=followup_state,
@@ -1914,6 +1923,7 @@ async def main():
             step_state.delete(peer_id)
             last_reply_at.pop(peer_id, None)
             last_incoming_at.pop(peer_id, None)
+            question_hold_until.pop(peer_id, None)
             processing_peers.discard(peer_id)
             pause_store.set_status(sender.id, username, name, chat_link, "ACTIVE", updated_by="test")
             await send_and_update(
@@ -2007,66 +2017,38 @@ async def main():
 
             last_step = await get_last_step(client, sender, step_state)
             if message_has_question(text):
-                await send_ai_response(sender, status="знак питання", history_override=history)
-                await send_and_update(
-                    client,
-                    sheet,
-                    tz,
+                sent = await send_ai_response(
                     sender,
-                    CLARIFY_TEXT,
-                    status_for_text(CLARIFY_TEXT),
-                    use_ai=False,
-                    delay_before=QUESTION_GAP_SEC,
-                    step_state=step_state,
-                    step_name=STEP_CLARIFY,
-                    followup_state=followup_state,
+                    status="знак питання",
+                    history_override=history,
+                    append_clarify=True,
                 )
-                if last_step == STEP_SHIFTS:
+                if QUESTION_HOLD_SEC > 0:
+                    question_hold_until[peer_id] = time.time() + QUESTION_HOLD_SEC
+                if not sent:
                     await send_and_update(
                         client,
                         sheet,
                         tz,
                         sender,
-                        SHIFT_QUESTION_TEXT,
-                        status_for_text(SHIFT_QUESTION_TEXT),
+                        CLARIFY_TEXT,
+                        "знак питання",
                         use_ai=False,
-                        delay_before=QUESTION_GAP_SEC,
+                        delay_before=QUESTION_RESPONSE_DELAY_SEC,
                         step_state=step_state,
-                        step_name=STEP_SHIFT_QUESTION,
-                        followup_state=followup_state,
-                    )
-                elif last_step == STEP_FORMAT:
-                    await send_and_update(
-                        client,
-                        sheet,
-                        tz,
-                        sender,
-                        FORMAT_QUESTION_TEXT,
-                        status_for_text(FORMAT_QUESTION_TEXT),
-                        use_ai=False,
-                        delay_before=QUESTION_GAP_SEC,
-                        step_state=step_state,
-                        step_name=STEP_FORMAT_QUESTION,
-                        followup_state=followup_state,
-                    )
-                elif last_step in {STEP_TRAINING, STEP_VIDEO_FOLLOWUP}:
-                    await send_and_update(
-                        client,
-                        sheet,
-                        tz,
-                        sender,
-                        TRAINING_QUESTION_TEXT,
-                        status_for_text(TRAINING_QUESTION_TEXT),
-                        use_ai=False,
-                        delay_before=QUESTION_GAP_SEC,
-                        step_state=step_state,
-                        step_name=STEP_TRAINING_QUESTION,
                         followup_state=followup_state,
                     )
                 return
 
             if not last_step:
                 return
+
+            hold_until = question_hold_until.get(peer_id)
+            if hold_until and time.time() < hold_until:
+                if not is_test:
+                    print(f"ℹ️ Очікування після питання: {peer_id}")
+                return
+            question_hold_until.pop(peer_id, None)
 
             if CONTINUE_DELAY_SEC > 0:
                 await asyncio.sleep(CONTINUE_DELAY_SEC)
