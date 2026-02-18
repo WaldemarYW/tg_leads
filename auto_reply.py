@@ -377,6 +377,35 @@ STOP_PHRASES = [
     "no thank you",
 ]
 
+CONTINUE_PHRASES = [
+    "так",
+    "да",
+    "ок",
+    "добре",
+    "хорошо",
+    "готов",
+    "готова",
+    "готовий",
+    "готова перейти",
+    "продовжуйте",
+    "продолжайте",
+    "далі",
+    "дальше",
+    "поїхали",
+    "погнали",
+    "актуально",
+    "цікаво",
+    "интересно",
+    "питань нема",
+    "питань немає",
+    "нема питань",
+    "немає питань",
+    "все зрозуміло",
+    "усе зрозуміло",
+    "все ясно",
+    "усе ясно",
+]
+
 
 def track_sent_message(peer_id: int, message_id: int) -> None:
     if not peer_id or not message_id:
@@ -399,6 +428,8 @@ def is_stop_phrase(text: str) -> bool:
     t = normalize_text(text)
     if not t:
         return False
+    if message_has_question(text):
+        return False
     if any(
         phrase in t
         for phrase in (
@@ -417,6 +448,17 @@ def is_stop_phrase(text: str) -> bool:
     ):
         return False
     return any(phrase in t for phrase in STOP_PHRASES)
+
+
+def is_continue_phrase(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    if message_has_question(text):
+        return True
+    if re.search(r"пит\w*\s+н\w*ма", t):
+        return True
+    return any(phrase in t for phrase in CONTINUE_PHRASES)
 
 
 def is_neutral_ack(text: str) -> bool:
@@ -447,6 +489,8 @@ def is_neutral_ack(text: str) -> bool:
 
 
 async def should_auto_pause(history: list, text: str) -> bool:
+    if is_continue_phrase(text):
+        return False
     if is_stop_phrase(text):
         return True
     if not DIALOG_STOP_URL:
@@ -1461,6 +1505,12 @@ async def dialog_suggest(history: list, draft: str, no_questions: bool = False) 
 
 async def detect_format_choice(history: list, text: str) -> str:
     fallback = fallback_format_choice(text)
+    # Deterministic priority for explicit keywords from candidate message.
+    if fallback in {"video", "mini_course", "both"}:
+        return fallback
+    # Avoid AI over-trigger on short acknowledgements without explicit format words.
+    if fallback == "unknown" and (is_neutral_ack(text) or is_continue_phrase(text)):
+        return "unknown"
     if not DIALOG_FORMAT_URL:
         return fallback
     payload = {"history": history, "last_message": text}
@@ -1554,6 +1604,7 @@ async def main():
     last_reply_at = {}
     last_incoming_at = {}
     pending_question_resume = {}
+    skip_stop_check_once = set()
     clarify_variant_state = {}
     format_delivery_state = {}
     step_state = StepState(STEP_STATE_PATH)
@@ -2076,6 +2127,7 @@ async def main():
             else:
                 paused_peers.discard(peer_id)
                 enabled_peers.add(peer_id)
+                skip_stop_check_once.add(peer_id)
         else:
             manual_step = detect_step_from_text(text)
             if manual_step:
@@ -2243,7 +2295,10 @@ async def main():
             )
 
             history = await build_ai_history(client, sender, limit=10)
-            if not is_neutral_ack(text) and await should_auto_pause(history, text):
+            skip_stop_for_this_message = peer_id in skip_stop_check_once
+            if skip_stop_for_this_message:
+                skip_stop_check_once.discard(peer_id)
+            if (not skip_stop_for_this_message) and (not is_neutral_ack(text)) and await should_auto_pause(history, text):
                 await send_and_update(
                     client,
                     sheet,
