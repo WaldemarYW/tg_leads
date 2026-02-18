@@ -1080,6 +1080,18 @@ class LocalPauseStore:
         }
         self._save()
 
+    def active_peer_ids(self) -> set:
+        by_peer = self.data.get("by_peer_id", {})
+        result = set()
+        for key, status in by_peer.items():
+            if status != "ACTIVE":
+                continue
+            try:
+                result.add(int(key))
+            except Exception:
+                continue
+        return result
+
 
 class GroupLeadsSheet:
     def __init__(self):
@@ -1525,6 +1537,7 @@ async def main():
         enabled_peers = sheet.load_enabled_peers(tz)
     except Exception:
         enabled_peers = set()
+    enabled_peers.update(pause_store.active_peer_ids())
 
     def is_paused(entity: User) -> bool:
         peer_id = entity.id
@@ -2148,10 +2161,15 @@ async def main():
                 return
             print(f"✅ Test user bypassed paused: {peer_id}")
         if peer_id not in enabled_peers:
-            if not is_test:
-                print(f"⚠️ Filtered not enabled: {peer_id}")
-                return
-            print(f"✅ Test user bypassed enabled check: {peer_id}")
+            pause_status = pause_store.get_status(peer_id, username)
+            if pause_status == "ACTIVE":
+                enabled_peers.add(peer_id)
+                print(f"ℹ️ Restored enabled from pause-state: {peer_id}")
+            else:
+                if not is_test:
+                    print(f"⚠️ Filtered not enabled: {peer_id}")
+                    return
+                print(f"✅ Test user bypassed enabled check: {peer_id}")
         if peer_id in processing_peers:
             if not is_test:
                 print(f"⚠️ Filtered already processing: {peer_id}")
