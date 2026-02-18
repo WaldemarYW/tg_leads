@@ -93,7 +93,7 @@ const FORMAT_CHOICE_PROMPT = `Ти класифікатор вибору фор�
 
 app.get("/health", (_, res) => res.json({ ok: true, env: Boolean(OPENAI_API_KEY) }));
 
-async function callOpenAI({ model = DEFAULT_MODEL, system, user }) {
+async function callOpenAI({ model = DEFAULT_MODEL, system, user, temperature }) {
   if (!OPENAI_API_KEY) {
     throw new Error("OPENAI_API_KEY is missing on server");
   }
@@ -105,6 +105,7 @@ async function callOpenAI({ model = DEFAULT_MODEL, system, user }) {
     },
     body: JSON.stringify({
       model,
+      ...(typeof temperature === "number" ? { temperature } : {}),
       input: [
         { role: "system", content: system },
         { role: "user", content: user },
@@ -182,7 +183,11 @@ app.post("/should_pause", async (req, res) => {
   try {
     const { history = [], last_message = "" } = req.body || {};
     const prompt = buildStopPrompt(history, last_message);
-    const { text } = await callOpenAI({ system: "You are a strict classifier.", user: prompt });
+    const { text } = await callOpenAI({
+      system: "You are a strict classifier.",
+      user: prompt,
+      temperature: 0,
+    });
     const normalized = (text || "").trim().toLowerCase();
     const stop = normalized.startsWith("stop");
     return res.json({ ok: true, stop, text: (text || "").trim() });
@@ -196,7 +201,11 @@ app.post("/format_choice", async (req, res) => {
   try {
     const { history = [], last_message = "" } = req.body || {};
     const prompt = buildFormatChoicePrompt(history, last_message);
-    const { text } = await callOpenAI({ system: "You are a strict format classifier.", user: prompt });
+    const { text } = await callOpenAI({
+      system: "You are a strict format classifier.",
+      user: prompt,
+      temperature: 0,
+    });
     const normalized = (text || "").trim().toLowerCase();
     let choice = "unknown";
     if (normalized.startsWith("both")) {
