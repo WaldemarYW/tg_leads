@@ -107,6 +107,7 @@ HISTORY_HEADERS = [
     "Peer ID",
     "Создано",
     "Обновлено",
+    "Журнал событий",
 ]
 
 USERNAME_RE = re.compile(r"(?:@|t\.me/)([A-Za-z0-9_]{5,})")
@@ -757,24 +758,79 @@ class SheetWriter:
     ):
         ws = self._history_ws(tz)
         now_iso = datetime.now(tz).isoformat(timespec="seconds")
-        row = [
-            now_iso,
-            str(datetime.now(tz).date()),
-            ACCOUNT_KEY,
-            event_type,
-            name,
-            ("@" + username) if username else "",
-            chat_link,
-            status or "",
-            ("ON" if auto_reply_enabled else "OFF") if auto_reply_enabled is not None else "",
-            last_in or "",
-            last_out or "",
-            str(peer_id),
-            now_iso,
-            now_iso,
-        ]
+        headers = [h.strip() for h in ws.row_values(1)]
+        row_idx, existing = self._find_row(ws, peer_id, ACCOUNT_KEY)
+        existing = existing or [""] * len(headers)
+        if len(existing) < len(headers):
+            existing = existing + [""] * (len(headers) - len(existing))
+
+        def col_idx(name: str) -> Optional[int]:
+            try:
+                return headers.index(name)
+            except ValueError:
+                return None
+
+        def set_value(name: str, value: Optional[str]):
+            if value is None:
+                return
+            idx = col_idx(name)
+            if idx is None:
+                return
+            existing[idx] = value
+
+        def get_value(name: str) -> str:
+            idx = col_idx(name)
+            if idx is None or idx >= len(existing):
+                return ""
+            return existing[idx]
+
+        def clean(v: Optional[str], limit: int = 120) -> str:
+            txt = " ".join((v or "").split())
+            if len(txt) > limit:
+                txt = txt[:limit] + "..."
+            return txt
+
+        event_line_parts = [now_iso, event_type]
+        if status:
+            event_line_parts.append(f"Статус: {status}")
+        if auto_reply_enabled is not None:
+            event_line_parts.append(f"Авто: {'ON' if auto_reply_enabled else 'OFF'}")
+        if last_in:
+            event_line_parts.append(f"IN: {clean(last_in)}")
+        if last_out:
+            event_line_parts.append(f"OUT: {clean(last_out)}")
+        event_line = " | ".join(event_line_parts)
+
+        journal_prev = get_value("Журнал событий").strip()
+        journal_lines = [line for line in journal_prev.splitlines() if line.strip()]
+        journal_lines.append(event_line)
+        journal_lines = journal_lines[-200:]
+        journal_text = "\n".join(journal_lines)
+
+        set_value("Время события", now_iso)
+        set_value("Дата", str(datetime.now(tz).date()))
+        set_value("Аккаунт", ACCOUNT_KEY)
+        set_value("Тип события", event_type)
+        set_value("Имя", name)
+        set_value("Username", ("@" + username) if username else "")
+        set_value("Ссылка на чат", chat_link)
+        set_value("Статус", status or "")
+        if auto_reply_enabled is not None:
+            set_value("Автоответчик", "ON" if auto_reply_enabled else "OFF")
+        set_value("Входящее", last_in or "")
+        set_value("Исходящее", last_out or "")
+        set_value("Peer ID", str(peer_id))
+        if not get_value("Создано"):
+            set_value("Создано", now_iso)
+        set_value("Обновлено", now_iso)
+        set_value("Журнал событий", journal_text)
+
         try:
-            ws.append_row(row, value_input_option="USER_ENTERED")
+            if row_idx:
+                end_col = self._col_letter(len(headers))
+                ws.update(f"A{row_idx}:{end_col}{row_idx}", [existing], value_input_option="USER_ENTERED")
+            else:
+                ws.append_row(existing, value_input_option="USER_ENTERED")
         except Exception as err:
             print(f"⚠️ Не вдалося записати історію: {err}")
 
