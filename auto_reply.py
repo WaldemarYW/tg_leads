@@ -291,16 +291,16 @@ STATUS_BY_TEMPLATE = {
 }
 
 GROUP_LEADS_HEADERS = [
-    "received_at",
-    "status",
-    "full_name",
-    "age",
-    "phone",
-    "tg",
-    "pc",
-    "source_id",
-    "source_name",
-    "raw_text",
+    "Получено",
+    "Статус",
+    "ФИО",
+    "Возраст",
+    "Телефон",
+    "Telegram",
+    "ПК/ноутбук",
+    "ID источника",
+    "Источник",
+    "Сырой текст",
 ]
 
 REGISTRATION_HEADERS = [
@@ -821,9 +821,9 @@ class SheetWriter:
                     continue
             return None
 
-        tg_idx = idx_of("tg", "telegram")
+        tg_idx = idx_of("tg", "telegram", "тг")
         age_idx = idx_of("age", "возраст")
-        pc_idx = idx_of("pc", "ноутбук", "пк")
+        pc_idx = idx_of("pc", "ноутбук", "пк", "пк/ноутбук")
         full_name_idx = idx_of("full_name", "фио", "піб", "имя")
         try:
             if tg_idx is None and full_name_idx is None:
@@ -1167,7 +1167,33 @@ class GroupLeadsSheet:
         self.gc = sheets_client(GOOGLE_CREDS)
         self.sh = self.gc.open(SHEET_NAME)
         self.ws = get_or_create_worksheet(self.sh, GROUP_LEADS_WORKSHEET, rows=1000, cols=len(GROUP_LEADS_HEADERS))
-        ensure_headers(self.ws, GROUP_LEADS_HEADERS, strict=False)
+        self._ensure_headers_exact()
+
+    def _ensure_headers_exact(self):
+        try:
+            current = self.ws.row_values(1)
+        except Exception:
+            current = []
+        if not current:
+            self.ws.update(
+                range_name=f"A1:{col_letter(len(GROUP_LEADS_HEADERS))}1",
+                values=[GROUP_LEADS_HEADERS],
+                value_input_option="USER_ENTERED",
+            )
+            return
+        if current[: len(GROUP_LEADS_HEADERS)] != GROUP_LEADS_HEADERS:
+            self.ws.update(
+                range_name=f"A1:{col_letter(len(GROUP_LEADS_HEADERS))}1",
+                values=[GROUP_LEADS_HEADERS],
+                value_input_option="USER_ENTERED",
+            )
+        if len(current) > len(GROUP_LEADS_HEADERS):
+            extra = len(current) - len(GROUP_LEADS_HEADERS)
+            self.ws.update(
+                range_name=f"{col_letter(len(GROUP_LEADS_HEADERS) + 1)}1:{col_letter(len(current))}1",
+                values=[[""] * extra],
+                value_input_option="USER_ENTERED",
+            )
 
     def _find_row(self, values, tg_norm: str, phone_norm: str):
         if not values:
@@ -1181,8 +1207,16 @@ class GroupLeadsSheet:
             except ValueError:
                 return None
 
-        tg_idx = get_col("tg")
-        phone_idx = get_col("phone")
+        tg_idx = (
+            get_col("tg")
+            if get_col("tg") is not None
+            else (get_col("telegram") if get_col("telegram") is not None else get_col("тг"))
+        )
+        phone_idx = (
+            get_col("phone")
+            if get_col("phone") is not None
+            else get_col("телефон")
+        )
         for idx, row in enumerate(data, start=2):
             if tg_idx is not None and tg_idx < len(row) and tg_norm:
                 if normalize_username(row[tg_idx]) == tg_norm:
