@@ -476,6 +476,14 @@ def normalize_phone(text: str) -> str:
     return re.sub(r"[^\d+]", "", text or "")
 
 
+def col_letter(col_idx: int) -> str:
+    result = []
+    while col_idx > 0:
+        col_idx, rem = divmod(col_idx - 1, 26)
+        result.append(chr(ord("A") + rem))
+    return "".join(reversed(result))
+
+
 def within_followup_window(dt: datetime) -> bool:
     return within_followup_window_impl(dt, FOLLOWUP_WINDOW_START_HOUR, FOLLOWUP_WINDOW_END_HOUR)
 
@@ -1003,11 +1011,31 @@ class RegistrationSheet:
         self.gc = sheets_client(GOOGLE_CREDS)
         self.sh = self.gc.open(SHEET_NAME)
         self.ws = get_or_create_worksheet(self.sh, REGISTRATION_WORKSHEET, rows=1000, cols=len(REGISTRATION_HEADERS))
-        ensure_headers(self.ws, REGISTRATION_HEADERS, strict=False)
+        self._ensure_headers_exact()
+
+    def _ensure_headers_exact(self):
         try:
             current = self.ws.row_values(1)
-            if current != REGISTRATION_HEADERS:
-                self.ws.update("1:1", [REGISTRATION_HEADERS], value_input_option="USER_ENTERED")
+            if not current:
+                self.ws.update(
+                    f"A1:{col_letter(len(REGISTRATION_HEADERS))}1",
+                    [REGISTRATION_HEADERS],
+                    value_input_option="USER_ENTERED",
+                )
+                return
+            if current[: len(REGISTRATION_HEADERS)] != REGISTRATION_HEADERS:
+                self.ws.update(
+                    f"A1:{col_letter(len(REGISTRATION_HEADERS))}1",
+                    [REGISTRATION_HEADERS],
+                    value_input_option="USER_ENTERED",
+                )
+            if len(current) > len(REGISTRATION_HEADERS):
+                extra = len(current) - len(REGISTRATION_HEADERS)
+                self.ws.update(
+                    f"{col_letter(len(REGISTRATION_HEADERS) + 1)}1:{col_letter(len(current))}1",
+                    [[""] * extra],
+                    value_input_option="USER_ENTERED",
+                )
         except Exception as err:
             print(f"⚠️ Не вдалося оновити заголовки '{REGISTRATION_WORKSHEET}': {err}")
 
