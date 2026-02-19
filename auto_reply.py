@@ -1242,10 +1242,20 @@ async def load_cached_video_message(client: TelegramClient) -> Optional["Message
     return None
 
 
-async def dialog_suggest(history: list, draft: str, no_questions: bool = False) -> Optional[str]:
+async def dialog_suggest(
+    history: list,
+    draft: str,
+    no_questions: bool = False,
+    combined_answer_clarify: bool = False,
+) -> Optional[str]:
     if not DIALOG_AI_URL:
         return None
-    payload = {"history": history, "draft": draft, "no_questions": bool(no_questions)}
+    payload = {
+        "history": history,
+        "draft": draft,
+        "no_questions": bool(no_questions),
+        "combined_answer_clarify": bool(combined_answer_clarify),
+    }
     try:
         data = await asyncio.to_thread(_post_json, DIALOG_AI_URL, payload, DIALOG_AI_TIMEOUT_SEC)
     except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError) as err:
@@ -1319,7 +1329,6 @@ async def main():
     last_incoming_at = {}
     pending_question_resume = {}
     skip_stop_check_once = set()
-    clarify_variant_state = {}
     format_delivery_state = {}
     step_state = StepState(STEP_STATE_PATH)
     followup_state = FollowupState(FOLLOWUP_STATE_PATH)
@@ -1425,24 +1434,29 @@ async def main():
         history_override: Optional[list] = None,
         append_clarify: bool = False,
     ) -> bool:
-        def next_clarify_text(peer_id: int) -> str:
-            if not CLARIFY_VARIANTS:
-                return CLARIFY_TEXT
-            idx = clarify_variant_state.get(peer_id, -1) + 1
-            idx = idx % len(CLARIFY_VARIANTS)
-            clarify_variant_state[peer_id] = idx
-            return CLARIFY_VARIANTS[idx]
-
         if is_paused(entity):
             return False
         history = history_override or await build_ai_history(client, entity, limit=10)
-        ai_text = await dialog_suggest(history, "", no_questions=True)
+        if append_clarify:
+            draft = (
+                "Відповідь має бути одним повідомленням.\n"
+                "Спочатку коротко відповідай по суті на питання кандидата.\n"
+                "В кінці додай один короткий уточнюючий запит у формі питання.\n"
+                "Не розділяй відповідь на окремі повідомлення."
+            )
+            ai_text = await dialog_suggest(
+                history,
+                draft,
+                no_questions=False,
+                combined_answer_clarify=True,
+            )
+        else:
+            ai_text = await dialog_suggest(history, "", no_questions=True)
         if not ai_text:
             return False
-        ai_text = strip_question_trail(ai_text)
-        final_text = ai_text
-        if append_clarify and ai_text:
-            final_text = f"{ai_text}\n\n{next_clarify_text(entity.id)}"
+        final_text = ai_text if append_clarify else strip_question_trail(ai_text)
+        if append_clarify and not message_has_question(final_text):
+            return False
         await send_and_update(
             client,
             sheet,
@@ -2115,18 +2129,7 @@ async def main():
                     append_clarify=True,
                 )
                 if not sent:
-                    await send_and_update(
-                        client,
-                        sheet,
-                        tz,
-                        sender,
-                        CLARIFY_VARIANTS[0] if CLARIFY_VARIANTS else CLARIFY_TEXT,
-                        "знак питання",
-                        use_ai=False,
-                        delay_before=QUESTION_RESPONSE_DELAY_SEC,
-                        step_state=step_state,
-                        followup_state=followup_state,
-                    )
+                    print(f"⚠️ AI question-response skipped peer={peer_id}: no combined AI answer")
                 if last_step and QUESTION_RESUME_DELAY_SEC > 0:
                     pending_question_resume[peer_id] = {
                         "due_at": time.time() + QUESTION_RESUME_DELAY_SEC,
