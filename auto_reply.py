@@ -182,6 +182,7 @@ GROUP_LEADS_WORKSHEET = os.environ.get("GROUP_LEADS_WORKSHEET", "GroupLeads")
 REGISTRATION_WORKSHEET = os.environ.get("REGISTRATION_WORKSHEET", "Регистрация")
 REGISTRATION_DRIVE_FOLDER_ID = os.environ.get("REGISTRATION_DRIVE_FOLDER_ID", "").strip()
 REGISTRATION_DOWNLOAD_DIR = os.environ.get("REGISTRATION_DOWNLOAD_DIR", "/opt/tg_leads/registration_docs")
+REGISTRATION_PARSE_DELAY_SEC = float(os.environ.get("REGISTRATION_PARSE_DELAY_SEC", "60"))
 CONTINUE_DELAY_SEC = float(os.environ.get("AUTO_REPLY_CONTINUE_DELAY_SEC", "0"))
 CONFIRM_STATUS = "✅ Погодився"
 REFERRAL_STATUS = "🎁 Реферал"
@@ -295,21 +296,21 @@ GROUP_LEADS_HEADERS = [
 ]
 
 REGISTRATION_HEADERS = [
-    "received_at",
-    "full_name",
-    "birth_date",
-    "phone",
-    "email",
-    "candidate_tg",
-    "schedule",
-    "start_date",
-    "city",
-    "admin_tg",
-    "document_drive_link",
-    "message_link",
-    "raw_text",
-    "source_group",
-    "source_message_id",
+    "ФИО",
+    "Дата рождения",
+    "Телефон",
+    "Email",
+    "Telegram кандидата",
+    "График",
+    "Дата старта",
+    "Город",
+    "Telegram админа",
+    "Ссылка на документ (Drive)",
+    "Ссылка на сообщение",
+    "Сырой текст",
+    "Группа-источник",
+    "ID сообщения",
+    "Получено",
 ]
 
 GROUP_KEY_MAP = {
@@ -1003,10 +1004,15 @@ class RegistrationSheet:
         self.sh = self.gc.open(SHEET_NAME)
         self.ws = get_or_create_worksheet(self.sh, REGISTRATION_WORKSHEET, rows=1000, cols=len(REGISTRATION_HEADERS))
         ensure_headers(self.ws, REGISTRATION_HEADERS, strict=False)
+        try:
+            current = self.ws.row_values(1)
+            if current != REGISTRATION_HEADERS:
+                self.ws.update("1:1", [REGISTRATION_HEADERS], value_input_option="USER_ENTERED")
+        except Exception as err:
+            print(f"⚠️ Не вдалося оновити заголовки '{REGISTRATION_WORKSHEET}': {err}")
 
     def append(self, tz: ZoneInfo, data: dict):
         row = [
-            datetime.now(tz).isoformat(timespec="seconds"),
             data.get("full_name", ""),
             data.get("birth_date", ""),
             data.get("phone", ""),
@@ -1021,6 +1027,7 @@ class RegistrationSheet:
             data.get("raw_text", ""),
             data.get("source_group", ""),
             str(data.get("source_message_id", "") or ""),
+            datetime.now(tz).isoformat(timespec="seconds"),
         ]
         self.ws.append_row(row, value_input_option="USER_ENTERED")
 
@@ -1078,15 +1085,14 @@ def build_message_link(event) -> str:
     return build_registration_message_link(getattr(event, "chat_id", None), getattr(event, "id", None))
 
 
-async def upload_media_to_drive(event, uploader: GoogleDriveUploader) -> str:
+async def upload_media_to_drive(message, chat_id: int, message_id: int, uploader: GoogleDriveUploader) -> str:
     if not uploader:
         return ""
     os.makedirs(REGISTRATION_DOWNLOAD_DIR, exist_ok=True)
-    message = event.message
     file_obj = getattr(message, "file", None)
     ext = getattr(file_obj, "ext", None) or ""
     mime_type = getattr(file_obj, "mime_type", None)
-    file_name = f"registration_{int(time.time())}_{event.id}{ext}"
+    file_name = f"registration_{int(time.time())}_{message_id}{ext}"
     local_path = os.path.join(REGISTRATION_DOWNLOAD_DIR, file_name)
     downloaded_path = ""
     try:
@@ -1102,7 +1108,7 @@ async def upload_media_to_drive(event, uploader: GoogleDriveUploader) -> str:
             elif os.path.exists(local_path):
                 os.remove(local_path)
         except Exception as err:
-            print(f"⚠️ Не вдалося видалити тимчасовий файл '{local_path}': {err}")
+            print(f"⚠️ Не вдалося видалити тимчасовий файл '{local_path}' peer={chat_id} msg={message_id}: {err}")
 
 
 async def find_group_by_title(client: TelegramClient, title: str):
@@ -1491,6 +1497,7 @@ async def main():
     format_delivery_state = {}
     step_state = StepState(STEP_STATE_PATH)
     followup_state = FollowupState(FOLLOWUP_STATE_PATH)
+    pending_registration_tasks = {}
     stop_event = asyncio.Event()
     try:
         enabled_peers = sheet.load_enabled_peers(tz)
@@ -2064,32 +2071,61 @@ async def main():
         print(f"✅ Надіслано перше повідомлення: {entity.id}")
 
     if traffic_group:
-        @client.on(events.NewMessage(chats=traffic_group))
-        async def on_traffic_registration_message(event):
+        async def process_traffic_registration(chat_id: int, message_id: int):
+            key = (chat_id, message_id)
             try:
-                if not is_media_registration_message(event.message):
+                if REGISTRATION_PARSE_DELAY_SEC > 0:
+                    await asyncio.sleep(REGISTRATION_PARSE_DELAY_SEC)
+                msg = await client.get_messages(chat_id, ids=message_id)
+                if not msg:
                     return
-                text = event.raw_text or ""
+                if not is_media_registration_message(msg):
+                    return
+                text = msg.message or ""
                 parsed = parse_registration_message(text)
                 drive_link = ""
                 if registration_drive:
                     try:
-                        drive_link = await upload_media_to_drive(event, registration_drive)
+                        drive_link = await upload_media_to_drive(msg, chat_id, message_id, registration_drive)
                     except Exception as err:
-                        print(f"⚠️ Drive upload error peer={event.chat_id} msg={event.id}: {type(err).__name__}: {err}")
+                        print(f"⚠️ Drive upload error peer={chat_id} msg={message_id}: {type(err).__name__}: {err}")
                 payload = {
                     **parsed,
                     "document_drive_link": drive_link,
-                    "message_link": build_message_link(event),
-                    "source_group": (getattr(getattr(event, "chat", None), "title", None) or TRAFFIC_GROUP_TITLE),
-                    "source_message_id": str(event.id),
+                    "message_link": build_registration_message_link(chat_id, message_id),
+                    "source_group": (getattr(getattr(msg, "chat", None), "title", None) or TRAFFIC_GROUP_TITLE),
+                    "source_message_id": str(message_id),
                 }
                 if registration_sheet:
                     registration_sheet.append(tz, payload)
                 else:
                     print("⚠️ RegistrationSheet недоступний: рядок не записано")
             except Exception as err:
-                print(f"⚠️ Registration ingest error peer={event.chat_id} msg={event.id}: {type(err).__name__}: {err}")
+                print(f"⚠️ Registration ingest error peer={chat_id} msg={message_id}: {type(err).__name__}: {err}")
+            finally:
+                pending_registration_tasks.pop(key, None)
+
+        async def schedule_traffic_registration(event):
+            msg = event.message
+            if not msg:
+                return
+            if not is_media_registration_message(msg):
+                return
+            chat_id = event.chat_id
+            message_id = event.id
+            key = (chat_id, message_id)
+            existing = pending_registration_tasks.get(key)
+            if existing and not existing.done():
+                existing.cancel()
+            pending_registration_tasks[key] = asyncio.create_task(process_traffic_registration(chat_id, message_id))
+
+        @client.on(events.NewMessage(chats=traffic_group))
+        async def on_traffic_registration_message(event):
+            await schedule_traffic_registration(event)
+
+        @client.on(events.MessageEdited(chats=traffic_group))
+        async def on_traffic_registration_edit(event):
+            await schedule_traffic_registration(event)
 
     @client.on(events.NewMessage(incoming=True))
     async def on_private_message(event):
