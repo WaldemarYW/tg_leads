@@ -150,20 +150,20 @@ TODAY_HEADERS = [
 ]
 
 HISTORY_HEADERS = [
-    "Время события",
-    "Дата",
-    "Аккаунт",
-    "Тип события",
     "Имя",
     "Username",
-    "Ссылка на чат",
-    "Статус",
+    "Аккаунт",
     "Автоответчик",
+    "Статус",
+    "Peer ID",
+    "Ссылка на чат",
     "Входящее",
     "Исходящее",
-    "Peer ID",
+    "Тип события",
     "Создано",
     "Обновлено",
+    "Время события",
+    "Дата",
     "Журнал событий",
 ]
 
@@ -593,8 +593,28 @@ class SheetWriter:
     def _history_ws(self, tz: ZoneInfo):
         title = self._month_title(datetime.now(tz).date())
         ws = get_or_create_worksheet(self.sh, title, rows=1000, cols=len(HISTORY_HEADERS))
-        ensure_headers(ws, HISTORY_HEADERS, strict=False)
+        self._ensure_history_headers(ws)
         return ws
+
+    def _ensure_history_headers(self, ws):
+        values = ws.get_all_values()
+        if not values:
+            ws.append_row(HISTORY_HEADERS, value_input_option="USER_ENTERED")
+            return
+        current_headers = [h.strip() for h in values[0]]
+        if current_headers == HISTORY_HEADERS:
+            return
+        data_rows = values[1:]
+        remapped_rows = []
+        for row in data_rows:
+            row_map = {}
+            for idx, header in enumerate(current_headers):
+                row_map[header] = row[idx] if idx < len(row) else ""
+            remapped_rows.append([row_map.get(h, "") for h in HISTORY_HEADERS])
+        ws.clear()
+        ws.append_row(HISTORY_HEADERS, value_input_option="USER_ENTERED")
+        if remapped_rows:
+            ws.append_rows(remapped_rows, value_input_option="USER_ENTERED")
 
     def migrate_sheets(self):
         try:
