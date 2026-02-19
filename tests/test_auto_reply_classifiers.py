@@ -3,10 +3,13 @@ import unittest
 
 from auto_reply_classifiers import (
     Decision,
+    Intent,
     classify_format_choice,
+    classify_intent,
     classify_stop_continue,
     is_continue_phrase,
     is_neutral_ack,
+    is_short_neutral_ack,
     is_stop_phrase,
     message_has_question,
 )
@@ -16,6 +19,8 @@ class ClassifierTests(unittest.TestCase):
     def test_question_detection(self):
         self.assertTrue(message_has_question("Як це працює"))
         self.assertTrue(message_has_question("ok?"))
+        self.assertTrue(message_has_question("подскажи по графику"))
+        self.assertFalse(message_has_question("я по ночам работаю"))
         self.assertFalse(message_has_question("Дякую, все зрозуміло"))
 
     def test_stop_phrase(self):
@@ -25,6 +30,17 @@ class ClassifierTests(unittest.TestCase):
     def test_continue_and_ack(self):
         self.assertTrue(is_continue_phrase("питань нема"))
         self.assertTrue(is_neutral_ack("ок, зрозуміло"))
+        self.assertTrue(is_short_neutral_ack("нема"))
+
+    def test_classify_intent_local(self):
+        async def ai_client(_history, _text):
+            return "other"
+
+        q = asyncio.run(classify_intent("подскажи по оплате", [], last_step="clarify", ai_client=ai_client))
+        self.assertEqual(q, Intent.QUESTION)
+
+        ack = asyncio.run(classify_intent("нема", [], last_step="clarify", ai_client=ai_client))
+        self.assertEqual(ack, Intent.ACK_CONTINUE)
 
     def test_classify_stop_continue_fallback_and_ai(self):
         async def ai_client(_history, _text):

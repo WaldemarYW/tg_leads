@@ -1,5 +1,4 @@
 import re
-from dataclasses import dataclass
 from enum import Enum
 from typing import Awaitable, Callable, Optional
 
@@ -8,6 +7,13 @@ class Decision(str, Enum):
     STOP = "stop"
     CONTINUE = "continue"
     UNKNOWN = "unknown"
+
+
+class Intent(str, Enum):
+    QUESTION = "question"
+    ACK_CONTINUE = "ack_continue"
+    STOP = "stop"
+    OTHER = "other"
 
 
 STOP_PHRASES = [
@@ -83,6 +89,13 @@ CONTINUE_PHRASES = [
 VIDEO_WORDS = ("відео", "видео")
 FORMAT_VIDEO_WORDS = ("відео", "видео", "video")
 FORMAT_MINI_COURSE_WORDS = ("мінікурс", "миникурс", "mini-course", "mini course", "курс", "тренажер", "сайт")
+QUESTION_HINT_RE = re.compile(
+    r"\b(коли|де|як|який|яка|які|що|чи|скільки|когда|где|как|какой|какая|какие|что|сколько|почему|зачем|можно|можна|підкажи|подскажи|интересует|цікавить|хочу знати|хочу узнать|розкажи|расскажи)\b"
+)
+SHORT_ACK_WORDS = {
+    "ок", "окей", "ага", "угу", "ясно", "зрозуміло", "понятно", "добре", "добрий",
+    "так", "та", "yes", "yep", "нема", "нет", "неа",
+}
 
 
 def normalize_text(text: Optional[str]) -> str:
@@ -98,10 +111,15 @@ def message_has_question(text: str) -> bool:
     t = normalize_text(text)
     if not t:
         return False
-    return bool(re.search(
-        r"^(коли|де|як|який|яка|які|що|чи|скільки|когда|где|как|какой|какая|какие|что|сколько|почему|зачем|можно)\b",
-        t,
-    ))
+    if QUESTION_HINT_RE.search(t):
+        return True
+    # Support a few implicit short question forms without '?', but avoid broad "по ...".
+    return bool(
+        re.search(
+            r"^(а|ну а)\s+(графік|график|оплата|зарплата|умови|условия|обовязки|обязанности|навчання|обучение)\b",
+            t,
+        )
+    )
 
 
 def strip_question_trail(text: str) -> str:
@@ -184,6 +202,38 @@ def is_neutral_ack(text: str) -> bool:
     )
 
 
+def is_short_neutral_ack(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    parts = t.split()
+    if len(parts) > 3:
+        return False
+    if re.search(r"пит\w*\s+н\w*ма", t):
+        return True
+    if t in SHORT_ACK_WORDS:
+        return True
+    return all(part in SHORT_ACK_WORDS for part in parts)
+
+
+def classify_local_intent(text: str, last_step: Optional[str] = None) -> Intent:
+    t = normalize_text(text)
+    if not t:
+        return Intent.OTHER
+    if message_has_question(text):
+        return Intent.QUESTION
+    if is_stop_phrase(text):
+        return Intent.STOP
+    if is_continue_phrase(text):
+        return Intent.ACK_CONTINUE
+    if is_short_neutral_ack(text):
+        # Short replies like "нема"/"ок" are usually continuation in funnel steps.
+        if last_step:
+            return Intent.ACK_CONTINUE
+        return Intent.OTHER
+    return Intent.OTHER
+
+
 def should_send_question(sent_text: str, question_text: str, clarify_text: str, shift_question_text: str, format_question_text: str) -> bool:
     if not sent_text:
         return True
@@ -256,3 +306,24 @@ async def classify_format_choice(
     if ai_choice in {"video", "mini_course", "both"}:
         return ai_choice
     return fallback
+
+
+async def classify_intent(
+    text: str,
+    history: list,
+    last_step: Optional[str] = None,
+    ai_client: Optional[Callable[[list, str], Awaitable[str]]] = None,
+) -> Intent:
+    local = classify_local_intent(text, last_step=last_step)
+    if local != Intent.OTHER:
+        return local
+    if ai_client is None:
+        return Intent.OTHER
+    ai_intent = (await ai_client(history, text) or "").strip().lower()
+    if ai_intent == "question":
+        return Intent.QUESTION
+    if ai_intent in {"ack_continue", "continue"}:
+        return Intent.ACK_CONTINUE
+    if ai_intent == "stop":
+        return Intent.STOP
+    return Intent.OTHER

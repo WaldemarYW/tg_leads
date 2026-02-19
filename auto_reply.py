@@ -46,12 +46,13 @@ from tg_to_sheets import (
     REFERRAL_TEXT,
 )
 from auto_reply_classifiers import (
-    Decision,
+    Intent,
+    classify_intent,
     classify_format_choice,
-    classify_stop_continue,
     fallback_format_choice as fallback_format_choice_impl,
     is_continue_phrase as is_continue_phrase_impl,
     is_neutral_ack as is_neutral_ack_impl,
+    is_short_neutral_ack,
     is_stop_phrase as is_stop_phrase_impl,
     message_has_question as message_has_question_impl,
     should_send_question as should_send_question_impl,
@@ -166,6 +167,8 @@ DIALOG_AI_URL = os.environ.get("DIALOG_AI_URL", "http://127.0.0.1:3000/dialog_su
 DIALOG_AI_TIMEOUT_SEC = float(os.environ.get("DIALOG_AI_TIMEOUT_SEC", "20"))
 DIALOG_STOP_URL = os.environ.get("DIALOG_STOP_URL", "http://127.0.0.1:3000/should_pause")
 DIALOG_STOP_TIMEOUT_SEC = float(os.environ.get("DIALOG_STOP_TIMEOUT_SEC", "15"))
+DIALOG_INTENT_URL = os.environ.get("DIALOG_INTENT_URL", "http://127.0.0.1:3000/intent_classify")
+DIALOG_INTENT_TIMEOUT_SEC = float(os.environ.get("DIALOG_INTENT_TIMEOUT_SEC", "15"))
 DIALOG_FORMAT_URL = os.environ.get("DIALOG_FORMAT_URL", "http://127.0.0.1:3000/format_choice")
 DIALOG_FORMAT_TIMEOUT_SEC = float(os.environ.get("DIALOG_FORMAT_TIMEOUT_SEC", "15"))
 STEP_STATE_PATH = os.environ.get("AUTO_REPLY_STEP_STATE_PATH", "/opt/tg_leads/.auto_reply.step_state.json")
@@ -361,22 +364,30 @@ def is_neutral_ack(text: str) -> bool:
     return is_neutral_ack_impl(text)
 
 
-async def should_auto_pause(history: list, text: str) -> bool:
-    async def _ai_client(hist: list, last_text: str) -> Optional[bool]:
+async def classify_candidate_intent(history: list, text: str, last_step: Optional[str]) -> Intent:
+    async def _ai_client(hist: list, last_text: str) -> str:
+        if DIALOG_INTENT_URL:
+            payload = {"history": hist, "last_message": last_text}
+            try:
+                data = await asyncio.to_thread(_post_json, DIALOG_INTENT_URL, payload, DIALOG_INTENT_TIMEOUT_SEC)
+            except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError) as err:
+                print(f"⚠️ AI intent error: {err}")
+                data = None
+            if data and data.get("ok"):
+                return str(data.get("intent") or "").strip().lower()
         if not DIALOG_STOP_URL:
-            return None
+            return "other"
         payload = {"history": hist, "last_message": last_text}
         try:
             data = await asyncio.to_thread(_post_json, DIALOG_STOP_URL, payload, DIALOG_STOP_TIMEOUT_SEC)
         except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError) as err:
             print(f"⚠️ AI stop check error: {err}")
-            return None
+            return "other"
         if not data or not data.get("ok"):
-            return None
-        return bool(data.get("stop"))
+            return "other"
+        return "stop" if bool(data.get("stop")) else "ack_continue"
 
-    decision = await classify_stop_continue(text, history, ai_client=_ai_client)
-    return decision == Decision.STOP
+    return await classify_intent(text, history, last_step=last_step, ai_client=_ai_client)
 
 
 def should_send_question(sent_text: str, question_text: str) -> bool:
@@ -2030,11 +2041,13 @@ async def main():
             )
 
             history = await build_ai_history(client, sender, limit=10)
+            last_step_hint = step_state.get(peer_id)
+            intent = await classify_candidate_intent(history, text, last_step_hint)
             skip_stop_for_this_message = peer_id in skip_stop_check_once
             if skip_stop_for_this_message:
                 skip_stop_check_once.discard(peer_id)
                 print(f"START1_RECOVER peer={peer_id} source=skip_stop step={step_state.get(peer_id) or ''}")
-            if (not skip_stop_for_this_message) and (not is_neutral_ack(text)) and await should_auto_pause(history, text):
+            if (not skip_stop_for_this_message) and intent == Intent.STOP:
                 await send_and_update(
                     client,
                     sheet,
@@ -2121,7 +2134,7 @@ async def main():
                     last_reply_at[peer_id] = time.time()
                 return
 
-            if message_has_question(text):
+            if intent == Intent.QUESTION:
                 sent = await send_ai_response(
                     sender,
                     status="знак питання",
@@ -2129,7 +2142,19 @@ async def main():
                     append_clarify=True,
                 )
                 if not sent:
-                    print(f"⚠️ AI question-response skipped peer={peer_id}: no combined AI answer")
+                    print(f"⚠️ AI question-response fallback peer={peer_id}: no combined AI answer")
+                    await send_and_update(
+                        client,
+                        sheet,
+                        tz,
+                        sender,
+                        CLARIFY_TEXT,
+                        "знак питання",
+                        use_ai=False,
+                        delay_before=QUESTION_RESPONSE_DELAY_SEC,
+                        step_state=step_state,
+                        followup_state=followup_state,
+                    )
                 if last_step and QUESTION_RESUME_DELAY_SEC > 0:
                     pending_question_resume[peer_id] = {
                         "due_at": time.time() + QUESTION_RESUME_DELAY_SEC,
@@ -2137,6 +2162,9 @@ async def main():
                         "step": last_step,
                     }
                 return
+
+            if intent == Intent.ACK_CONTINUE and is_short_neutral_ack(text):
+                print(f"ℹ️ Intent ack_continue peer={peer_id} step={last_step or last_step_hint or ''} text='{text[:40]}'")
 
             if last_step in {STEP_FORMAT_QUESTION, STEP_VIDEO_FOLLOWUP, STEP_TRAINING, STEP_TRAINING_QUESTION}:
                 format_choice = await detect_format_choice(history, text)
