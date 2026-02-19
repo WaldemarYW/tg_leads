@@ -764,12 +764,49 @@ class SheetWriter:
         self._ensure_row_index(ws, headers)
         ws_id = ws.id
         idx = self._row_index_cache.get(ws_id, {}).get((str(peer_id), account_key))
-        if not idx:
-            return None, None
         end_col = self._col_letter(len(headers))
-        values = ws.get(f"A{idx}:{end_col}{idx}")
-        row = values[0] if values else []
-        return idx, row
+        if idx:
+            values = ws.get(f"A{idx}:{end_col}{idx}")
+            row = values[0] if values else []
+            if row:
+                return idx, row
+
+        # Fallback: full scan when cache misses/stales.
+        try:
+            values = ws.get_all_values()
+        except Exception:
+            self._invalidate_ws_cache(ws)
+            return None, None
+        if not values:
+            self._row_index_cache[ws_id] = {}
+            self._row_index_cache_ts[ws_id] = time.time()
+            self._next_row_cache[ws_id] = 2
+            return None, None
+        try:
+            peer_idx = headers.index("Peer ID")
+            account_idx = headers.index("Аккаунт")
+        except ValueError:
+            return None, None
+        found_idx = None
+        found_row = None
+        for row_idx, row in enumerate(values[1:], start=2):
+            peer_match = peer_idx < len(row) and row[peer_idx].strip() == str(peer_id)
+            account_match = account_idx < len(row) and row[account_idx].strip() == account_key
+            if peer_match and account_match:
+                found_idx = row_idx
+                found_row = row
+                break
+        index = self._row_index_cache.get(ws_id, {})
+        if not isinstance(index, dict):
+            index = {}
+        if found_idx:
+            index[(str(peer_id), account_key)] = found_idx
+        self._row_index_cache[ws_id] = index
+        self._row_index_cache_ts[ws_id] = time.time()
+        self._next_row_cache[ws_id] = len(values) + 1
+        if found_idx:
+            return found_idx, found_row
+        return None, None
 
     def _event_type(
         self,
@@ -919,6 +956,7 @@ class SheetWriter:
         end_col = self._col_letter(len(headers))
         try:
             ws.sort((updated_idx, "des"), range=f"A2:{end_col}{ws.row_count}")
+            self._invalidate_ws_cache(ws)
         except Exception as err:
             print(f"⚠️ Не вдалося відсортувати лист '{TODAY_WORKSHEET}': {err}")
 
@@ -1003,11 +1041,20 @@ class SheetWriter:
                 end_col = self._col_letter(len(headers))
                 ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
             else:
-                next_row = int(self._next_row_cache.get(ws.id, 2))
-                end_col = self._col_letter(len(headers))
-                ws.update(range_name=f"A{next_row}:{end_col}{next_row}", values=[existing], value_input_option="USER_ENTERED")
-                self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), ACCOUNT_KEY)] = next_row
-                self._next_row_cache[ws.id] = next_row + 1
+                row_idx_recheck, existing_recheck = self._find_row(ws, peer_id, ACCOUNT_KEY)
+                if row_idx_recheck:
+                    row_idx = row_idx_recheck
+                    existing = existing_recheck or [""] * len(headers)
+                    if len(existing) < len(headers):
+                        existing = existing + [""] * (len(headers) - len(existing))
+                    end_col = self._col_letter(len(headers))
+                    ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
+                else:
+                    next_row = int(self._next_row_cache.get(ws.id, 2))
+                    end_col = self._col_letter(len(headers))
+                    ws.update(range_name=f"A{next_row}:{end_col}{next_row}", values=[existing], value_input_option="USER_ENTERED")
+                    self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), ACCOUNT_KEY)] = next_row
+                    self._next_row_cache[ws.id] = next_row + 1
         except Exception as err:
             print(f"⚠️ Не вдалося записати історію: {err}")
             self._invalidate_ws_cache(ws)
@@ -1118,11 +1165,20 @@ class SheetWriter:
                 end_col = self._col_letter(len(headers))
                 ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
             else:
-                next_row = int(self._next_row_cache.get(ws.id, 2))
-                end_col = self._col_letter(len(headers))
-                ws.update(range_name=f"A{next_row}:{end_col}{next_row}", values=[existing], value_input_option="USER_ENTERED")
-                self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), ACCOUNT_KEY)] = next_row
-                self._next_row_cache[ws.id] = next_row + 1
+                row_idx_recheck, existing_recheck = self._find_row(ws, peer_id, ACCOUNT_KEY)
+                if row_idx_recheck:
+                    row_idx = row_idx_recheck
+                    existing = existing_recheck or [""] * len(headers)
+                    if len(existing) < len(headers):
+                        existing = existing + [""] * (len(headers) - len(existing))
+                    end_col = self._col_letter(len(headers))
+                    ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
+                else:
+                    next_row = int(self._next_row_cache.get(ws.id, 2))
+                    end_col = self._col_letter(len(headers))
+                    ws.update(range_name=f"A{next_row}:{end_col}{next_row}", values=[existing], value_input_option="USER_ENTERED")
+                    self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), ACCOUNT_KEY)] = next_row
+                    self._next_row_cache[ws.id] = next_row + 1
         except Exception as err:
             print(f"⚠️ Не вдалося записати лист '{TODAY_WORKSHEET}': {err}")
             self._invalidate_ws_cache(ws)
