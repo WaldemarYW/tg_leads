@@ -18,9 +18,16 @@ from auto_reply_flow import (
 class FlowTests(unittest.TestCase):
     def test_advance_flow_routes(self):
         ctx = FlowContext(is_question=lambda text: "?" in text)
-        self.assertEqual(advance_flow(STEP_CONTACT, "", ctx).route, "contact_chain")
+        contact = advance_flow(STEP_CONTACT, "", ctx)
+        self.assertEqual(contact.route, "contact_chain")
+        self.assertEqual(contact.operations, ["send_interest", "send_dating", "ask_clarify_if_needed"])
+
         self.assertEqual(advance_flow(STEP_CLARIFY, "", ctx).route, "clarify_chain")
-        self.assertEqual(advance_flow(STEP_SHIFT_QUESTION, "", ctx).route, "shift_question_chain")
+
+        shift_question = advance_flow(STEP_SHIFT_QUESTION, "", ctx)
+        self.assertEqual(shift_question.route, "shift_question_chain")
+        self.assertEqual(shift_question.operations, ["send_format", "auto_send_both_formats"])
+
         self.assertEqual(advance_flow(STEP_FORMAT_QUESTION, "", ctx).route, "format_choice")
         self.assertEqual(advance_flow(STEP_VIDEO_FOLLOWUP, "", ctx).route, "video_followup_chain")
         self.assertEqual(advance_flow(STEP_TRAINING_QUESTION, "", ctx).route, "training_question_chain")

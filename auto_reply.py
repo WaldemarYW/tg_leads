@@ -1614,7 +1614,7 @@ async def main():
                 step_name=STEP_INTEREST,
                 followup_state=followup_state,
             )
-            await send_and_update(
+            dating_text = await send_and_update(
                 client,
                 sheet,
                 tz,
@@ -1628,21 +1628,7 @@ async def main():
                 step_name=STEP_DATING,
                 followup_state=followup_state,
             )
-            duties_text = await send_and_update(
-                client,
-                sheet,
-                tz,
-                entity,
-                DUTIES_TEXT,
-                status_for_text(DUTIES_TEXT),
-                use_ai=True,
-                no_questions=True,
-                draft=DUTIES_TEXT,
-                step_state=step_state,
-                step_name=STEP_DUTIES,
-                followup_state=followup_state,
-            )
-            if should_send_question(duties_text, CLARIFY_TEXT):
+            if should_send_question(dating_text, CLARIFY_TEXT):
                 await send_and_update(
                     client,
                     sheet,
@@ -1670,7 +1656,7 @@ async def main():
             return
 
         if route == "clarify_chain":
-            shifts_text = await send_and_update(
+            await send_and_update(
                 client,
                 sheet,
                 tz,
@@ -1701,7 +1687,7 @@ async def main():
             return
 
         if route == "shift_question_chain":
-            format_text = await send_and_update(
+            await send_and_update(
                 client,
                 sheet,
                 tz,
@@ -1715,30 +1701,8 @@ async def main():
                 step_name=STEP_FORMAT,
                 followup_state=followup_state,
             )
-            if should_send_question(format_text, FORMAT_QUESTION_TEXT):
-                await send_and_update(
-                    client,
-                    sheet,
-                    tz,
-                    entity,
-                    FORMAT_QUESTION_TEXT,
-                    status_for_text(FORMAT_QUESTION_TEXT),
-                    use_ai=True,
-                    draft=FORMAT_QUESTION_TEXT,
-                    delay_before=QUESTION_GAP_SEC,
-                    step_state=step_state,
-                    step_name=STEP_FORMAT_QUESTION,
-                    followup_state=followup_state,
-                )
-            else:
-                mark_step_without_send(
-                    sheet,
-                    tz,
-                    entity,
-                    status_for_text(FORMAT_QUESTION_TEXT),
-                    step_state,
-                    STEP_FORMAT_QUESTION,
-                )
+            await handle_format_choice(entity, "both")
+            mark_format_stage_ready(entity)
             last_reply_at[entity.id] = time.time()
             return
 

@@ -85,7 +85,7 @@ def advance_flow(last_step: str, message_text: str, context: FlowContext) -> Flo
     if last_step == STEP_CONTACT:
         return FlowActions(
             route="contact_chain",
-            operations=["send_interest", "send_dating", "send_duties", "ask_clarify_if_needed"],
+            operations=["send_interest", "send_dating", "ask_clarify_if_needed"],
         )
     if last_step == STEP_CLARIFY:
         return FlowActions(
@@ -95,7 +95,7 @@ def advance_flow(last_step: str, message_text: str, context: FlowContext) -> Flo
     if last_step == STEP_SHIFT_QUESTION:
         return FlowActions(
             route="shift_question_chain",
-            operations=["send_format", "ask_format_if_needed"],
+            operations=["send_format", "auto_send_both_formats"],
         )
     if last_step == STEP_FORMAT_QUESTION:
         return FlowActions(
