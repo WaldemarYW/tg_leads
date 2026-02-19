@@ -13,9 +13,11 @@ class ScenarioTextTests(unittest.TestCase):
         self.assertIn("Ваші основні завдання:", self.content)
 
     def test_shifts_text_updated(self):
-        self.assertIn("У вас є вибір із кількох графіків:", self.content)
+        self.assertIn("Ми пропонує 2 зміни на вибір", self.content)
         self.assertIn("- Денна 14:00–23:00", self.content)
         self.assertIn("- Нічна 23:00–08:00", self.content)
+        self.assertIn("На кожній зміні передбачено:", self.content)
+        self.assertIn("1 година основної перерви", self.content)
         self.assertIn("8 вихідних днів", self.content)
 
     def test_shift_question_updated(self):

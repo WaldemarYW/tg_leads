@@ -1522,20 +1522,7 @@ async def main():
                 track_sent_message(entity.id, sent.id)
         except Exception:
             pass
-        await send_and_update(
-            client,
-            sheet,
-            tz,
-            entity,
-            VIDEO_FOLLOWUP_TEXT,
-            status_for_text(VIDEO_FOLLOWUP_TEXT),
-            use_ai=False,
-            no_questions=True,
-            draft=VIDEO_FOLLOWUP_TEXT,
-            step_state=step_state,
-            step_name=STEP_VIDEO_FOLLOWUP,
-            followup_state=followup_state,
-        )
+        mark_format_stage_ready(entity)
         state["video_sent"] = True
         return True
 
@@ -1553,19 +1540,6 @@ async def main():
             use_ai=False,
             no_questions=True,
             draft=MINI_COURSE_LINK,
-            step_state=step_state,
-            followup_state=followup_state,
-        )
-        await send_and_update(
-            client,
-            sheet,
-            tz,
-            entity,
-            MINI_COURSE_FOLLOWUP_TEXT,
-            status_for_text(MINI_COURSE_FOLLOWUP_TEXT) or status_for_text(FORMAT_QUESTION_TEXT),
-            use_ai=False,
-            no_questions=True,
-            draft=MINI_COURSE_FOLLOWUP_TEXT,
             step_state=step_state,
             followup_state=followup_state,
         )
