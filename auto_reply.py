@@ -478,6 +478,11 @@ def normalize_phone(text: str) -> str:
     return re.sub(r"[^\d+]", "", text or "")
 
 
+def normalize_name(text: str) -> str:
+    cleaned = normalize_text(text)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def col_letter(col_idx: int) -> str:
     result = []
     while col_idx > 0:
@@ -693,10 +698,13 @@ class SheetWriter:
     def _sheet_row_link(self, ws, row_idx: int, label: str) -> str:
         return f'=HYPERLINK("#gid={ws.id}&range=A{int(row_idx)}";"{label}")'
 
-    def _find_group_lead_info(self, username: str) -> Optional[dict]:
+    def _find_group_lead_info(self, username: str, name: str) -> Optional[dict]:
         uname = normalize_username(username)
+        name_norm = normalize_name(name)
         if not uname:
-            return None
+            uname = ""
+        if not name_norm:
+            name_norm = ""
         try:
             ws = self.sh.worksheet(GROUP_LEADS_WORKSHEET)
         except Exception:
@@ -720,19 +728,25 @@ class SheetWriter:
         tg_idx = idx_of("tg", "telegram")
         age_idx = idx_of("age", "возраст")
         pc_idx = idx_of("pc", "ноутбук", "пк")
+        full_name_idx = idx_of("full_name", "фио", "піб", "имя")
         try:
-            if tg_idx is None:
-                raise ValueError("tg column not found")
+            if tg_idx is None and full_name_idx is None:
+                raise ValueError("no lookup columns found")
         except ValueError:
             return None
+        fallback_match = None
         for idx, row in enumerate(values[1:], start=2):
-            if tg_idx >= len(row):
-                continue
-            if normalize_username(row[tg_idx]) == uname:
+            row_username = row[tg_idx] if tg_idx is not None and tg_idx < len(row) else ""
+            row_name = row[full_name_idx] if full_name_idx is not None and full_name_idx < len(row) else ""
+            if uname and normalize_username(row_username) == uname:
                 age = row[age_idx].strip() if age_idx is not None and age_idx < len(row) else ""
                 pc = row[pc_idx].strip() if pc_idx is not None and pc_idx < len(row) else ""
                 return {"row_idx": idx, "age": age, "pc": pc}
-        return None
+            if not fallback_match and name_norm and normalize_name(row_name) == name_norm:
+                age = row[age_idx].strip() if age_idx is not None and age_idx < len(row) else ""
+                pc = row[pc_idx].strip() if pc_idx is not None and pc_idx < len(row) else ""
+                fallback_match = {"row_idx": idx, "age": age, "pc": pc}
+        return fallback_match
 
     def _sort_today_by_updated(self, ws, headers):
         try:
@@ -894,7 +908,7 @@ class SheetWriter:
         set_value("Наличие ПК/ноутбука", "")
         set_value("Ссылка на чат", chat_link)
         try:
-            lead_info = self._find_group_lead_info(username)
+            lead_info = self._find_group_lead_info(username, name)
             if lead_info:
                 app_ws = self.sh.worksheet(GROUP_LEADS_WORKSHEET)
                 set_value("Ссылка на заявку", self._sheet_row_link(app_ws, int(lead_info["row_idx"]), "Открыть заявку"))
