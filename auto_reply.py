@@ -1039,7 +1039,23 @@ class RegistrationSheet:
         except Exception as err:
             print(f"⚠️ Не вдалося оновити заголовки '{REGISTRATION_WORKSHEET}': {err}")
 
-    def append(self, tz: ZoneInfo, data: dict):
+    def _find_row(self, values, source_group: str, source_message_id: str):
+        if not values:
+            return None
+        headers = [h.strip() for h in values[0]]
+        try:
+            group_idx = headers.index("Группа-источник")
+            msg_idx = headers.index("ID сообщения")
+        except ValueError:
+            return None
+        for idx, row in enumerate(values[1:], start=2):
+            group_val = row[group_idx].strip() if group_idx < len(row) else ""
+            msg_val = row[msg_idx].strip() if msg_idx < len(row) else ""
+            if group_val == source_group and msg_val == source_message_id:
+                return idx
+        return None
+
+    def upsert(self, tz: ZoneInfo, data: dict):
         row = [
             data.get("full_name", ""),
             data.get("birth_date", ""),
@@ -1057,7 +1073,24 @@ class RegistrationSheet:
             str(data.get("source_message_id", "") or ""),
             datetime.now(tz).isoformat(timespec="seconds"),
         ]
-        self.ws.append_row(row, value_input_option="USER_ENTERED")
+        source_group = str(data.get("source_group", "") or "")
+        source_message_id = str(data.get("source_message_id", "") or "")
+        values = self.ws.get_all_values()
+        row_idx = self._find_row(values, source_group, source_message_id)
+        end_col = col_letter(len(REGISTRATION_HEADERS))
+        if row_idx:
+            self.ws.update(
+                f"A{row_idx}:{end_col}{row_idx}",
+                [row],
+                value_input_option="USER_ENTERED",
+            )
+            return
+        next_row = len(values) + 1
+        self.ws.update(
+            f"A{next_row}:{end_col}{next_row}",
+            [row],
+            value_input_option="USER_ENTERED",
+        )
 
 
 class GoogleDriveUploader:
@@ -1091,6 +1124,7 @@ class GoogleDriveUploader:
             body=metadata,
             media_body=media,
             fields="id,webViewLink,webContentLink",
+            supportsAllDrives=True,
         ).execute()
         file_id = created.get("id")
         if not file_id:
@@ -1099,6 +1133,7 @@ class GoogleDriveUploader:
             service.permissions().create(
                 fileId=file_id,
                 body={"role": "reader", "type": "anyone"},
+                supportsAllDrives=True,
             ).execute()
         except Exception:
             pass
@@ -1107,6 +1142,17 @@ class GoogleDriveUploader:
             or created.get("webContentLink")
             or f"https://drive.google.com/file/d/{file_id}/view"
         )
+
+    def check_folder_access(self) -> Optional[str]:
+        if not self.folder_id:
+            return None
+        service = self._get_service()
+        info = service.files().get(
+            fileId=self.folder_id,
+            fields="id,name,driveId",
+            supportsAllDrives=True,
+        ).execute()
+        return str(info.get("name") or self.folder_id)
 
 
 def build_message_link(event) -> str:
@@ -1510,6 +1556,14 @@ async def main():
     if REGISTRATION_DRIVE_FOLDER_ID:
         try:
             registration_drive = GoogleDriveUploader(GOOGLE_CREDS, REGISTRATION_DRIVE_FOLDER_ID)
+            try:
+                folder_name = registration_drive.check_folder_access()
+                print(f"✅ Drive папка доступна: {folder_name} ({REGISTRATION_DRIVE_FOLDER_ID})")
+            except Exception as err:
+                print(
+                    "⚠️ Немає доступу до Drive папки "
+                    f"{REGISTRATION_DRIVE_FOLDER_ID}: {type(err).__name__}: {err}"
+                )
         except Exception as err:
             print(f"⚠️ Не вдалося ініціалізувати Google Drive uploader: {err}")
     else:
@@ -2125,7 +2179,7 @@ async def main():
                     "source_message_id": str(message_id),
                 }
                 if registration_sheet:
-                    registration_sheet.append(tz, payload)
+                    registration_sheet.upsert(tz, payload)
                 else:
                     print("⚠️ RegistrationSheet недоступний: рядок не записано")
             except Exception as err:
