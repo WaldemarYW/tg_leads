@@ -85,6 +85,11 @@ from auto_reply_state import (
     adjust_to_followup_window as adjust_to_followup_window_impl,
     within_followup_window as within_followup_window_impl,
 )
+from registration_ingest import (
+    build_message_link as build_registration_message_link,
+    is_media_registration_message,
+    parse_registration_message,
+)
 
 load_dotenv("/opt/tg_leads/.env")
 
@@ -97,6 +102,7 @@ GOOGLE_CREDS = os.environ["GOOGLE_CREDS"]
 TIMEZONE = os.environ.get("TIMEZONE", "Europe/Kyiv")
 
 LEADS_GROUP_TITLE = os.environ.get("LEADS_GROUP_TITLE", "DATING AGENCY | Referral")
+TRAFFIC_GROUP_TITLE = os.environ.get("TRAFFIC_GROUP_TITLE", "ТРАФИК FURIOZA")
 VIDEO_GROUP_LINK = os.environ.get("VIDEO_GROUP_LINK")
 VIDEO_GROUP_TITLE = os.environ.get("VIDEO_GROUP_TITLE", "Промо відео")
 VIDEO_MESSAGE_LINK = os.environ.get("VIDEO_MESSAGE_LINK")
@@ -173,6 +179,9 @@ DIALOG_FORMAT_URL = os.environ.get("DIALOG_FORMAT_URL", "http://127.0.0.1:3000/f
 DIALOG_FORMAT_TIMEOUT_SEC = float(os.environ.get("DIALOG_FORMAT_TIMEOUT_SEC", "15"))
 STEP_STATE_PATH = os.environ.get("AUTO_REPLY_STEP_STATE_PATH", "/opt/tg_leads/.auto_reply.step_state.json")
 GROUP_LEADS_WORKSHEET = os.environ.get("GROUP_LEADS_WORKSHEET", "GroupLeads")
+REGISTRATION_WORKSHEET = os.environ.get("REGISTRATION_WORKSHEET", "Регистрация")
+REGISTRATION_DRIVE_FOLDER_ID = os.environ.get("REGISTRATION_DRIVE_FOLDER_ID", "").strip()
+REGISTRATION_DOWNLOAD_DIR = os.environ.get("REGISTRATION_DOWNLOAD_DIR", "/opt/tg_leads/registration_docs")
 CONTINUE_DELAY_SEC = float(os.environ.get("AUTO_REPLY_CONTINUE_DELAY_SEC", "0"))
 CONFIRM_STATUS = "✅ Погодився"
 REFERRAL_STATUS = "🎁 Реферал"
@@ -283,6 +292,24 @@ GROUP_LEADS_HEADERS = [
     "source_id",
     "source_name",
     "raw_text",
+]
+
+REGISTRATION_HEADERS = [
+    "received_at",
+    "full_name",
+    "birth_date",
+    "phone",
+    "email",
+    "candidate_tg",
+    "schedule",
+    "start_date",
+    "city",
+    "admin_tg",
+    "document_drive_link",
+    "message_link",
+    "raw_text",
+    "source_group",
+    "source_message_id",
 ]
 
 GROUP_KEY_MAP = {
@@ -970,6 +997,114 @@ class GroupLeadsSheet:
             self.ws.update(f"A{next_row}:J{next_row}", [row], value_input_option="USER_ENTERED")
 
 
+class RegistrationSheet:
+    def __init__(self):
+        self.gc = sheets_client(GOOGLE_CREDS)
+        self.sh = self.gc.open(SHEET_NAME)
+        self.ws = get_or_create_worksheet(self.sh, REGISTRATION_WORKSHEET, rows=1000, cols=len(REGISTRATION_HEADERS))
+        ensure_headers(self.ws, REGISTRATION_HEADERS, strict=False)
+
+    def append(self, tz: ZoneInfo, data: dict):
+        row = [
+            datetime.now(tz).isoformat(timespec="seconds"),
+            data.get("full_name", ""),
+            data.get("birth_date", ""),
+            data.get("phone", ""),
+            data.get("email", ""),
+            data.get("candidate_tg", ""),
+            data.get("schedule", ""),
+            data.get("start_date", ""),
+            data.get("city", ""),
+            data.get("admin_tg", ""),
+            data.get("document_drive_link", ""),
+            data.get("message_link", ""),
+            data.get("raw_text", ""),
+            data.get("source_group", ""),
+            str(data.get("source_message_id", "") or ""),
+        ]
+        self.ws.append_row(row, value_input_option="USER_ENTERED")
+
+
+class GoogleDriveUploader:
+    def __init__(self, creds_path: str, folder_id: str):
+        self.creds_path = creds_path
+        self.folder_id = (folder_id or "").strip()
+        self._service = None
+
+    def _get_service(self):
+        if self._service is not None:
+            return self._service
+        from google.oauth2.service_account import Credentials
+        from googleapiclient.discovery import build
+
+        creds = Credentials.from_service_account_file(
+            self.creds_path,
+            scopes=["https://www.googleapis.com/auth/drive"],
+        )
+        self._service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        return self._service
+
+    def upload_file(self, file_path: str, file_name: str, mime_type: Optional[str] = None) -> str:
+        if not self.folder_id:
+            raise ValueError("REGISTRATION_DRIVE_FOLDER_ID is empty")
+        from googleapiclient.http import MediaFileUpload
+
+        service = self._get_service()
+        metadata = {"name": file_name, "parents": [self.folder_id]}
+        media = MediaFileUpload(file_path, mimetype=mime_type, resumable=False)
+        created = service.files().create(
+            body=metadata,
+            media_body=media,
+            fields="id,webViewLink,webContentLink",
+        ).execute()
+        file_id = created.get("id")
+        if not file_id:
+            raise RuntimeError("Drive upload returned no file id")
+        try:
+            service.permissions().create(
+                fileId=file_id,
+                body={"role": "reader", "type": "anyone"},
+            ).execute()
+        except Exception:
+            pass
+        return (
+            created.get("webViewLink")
+            or created.get("webContentLink")
+            or f"https://drive.google.com/file/d/{file_id}/view"
+        )
+
+
+def build_message_link(event) -> str:
+    return build_registration_message_link(getattr(event, "chat_id", None), getattr(event, "id", None))
+
+
+async def upload_media_to_drive(event, uploader: GoogleDriveUploader) -> str:
+    if not uploader:
+        return ""
+    os.makedirs(REGISTRATION_DOWNLOAD_DIR, exist_ok=True)
+    message = event.message
+    file_obj = getattr(message, "file", None)
+    ext = getattr(file_obj, "ext", None) or ""
+    mime_type = getattr(file_obj, "mime_type", None)
+    file_name = f"registration_{int(time.time())}_{event.id}{ext}"
+    local_path = os.path.join(REGISTRATION_DOWNLOAD_DIR, file_name)
+    downloaded_path = ""
+    try:
+        downloaded_path = await message.download_media(file=local_path)
+        if not downloaded_path:
+            raise RuntimeError("download_media returned empty path")
+        drive_name = os.path.basename(downloaded_path)
+        return await asyncio.to_thread(uploader.upload_file, downloaded_path, drive_name, mime_type)
+    finally:
+        try:
+            if downloaded_path and os.path.exists(downloaded_path):
+                os.remove(downloaded_path)
+            elif os.path.exists(local_path):
+                os.remove(local_path)
+        except Exception as err:
+            print(f"⚠️ Не вдалося видалити тимчасовий файл '{local_path}': {err}")
+
+
 async def find_group_by_title(client: TelegramClient, title: str):
     title_norm = (title or "").strip().lower()
     async for dialog in client.iter_dialogs():
@@ -1332,6 +1467,19 @@ async def main():
     sheet = SheetWriter()
     pause_store = LocalPauseStore(PAUSED_STATE_PATH)
     group_leads_sheet = GroupLeadsSheet()
+    registration_sheet = None
+    try:
+        registration_sheet = RegistrationSheet()
+    except Exception as err:
+        print(f"⚠️ Не вдалося підготувати лист '{REGISTRATION_WORKSHEET}': {err}")
+    registration_drive = None
+    if REGISTRATION_DRIVE_FOLDER_ID:
+        try:
+            registration_drive = GoogleDriveUploader(GOOGLE_CREDS, REGISTRATION_DRIVE_FOLDER_ID)
+        except Exception as err:
+            print(f"⚠️ Не вдалося ініціалізувати Google Drive uploader: {err}")
+    else:
+        print("⚠️ REGISTRATION_DRIVE_FOLDER_ID не задано: документи не будуть завантажуватись у Drive")
     client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
     processing_peers = set()
     paused_peers = set()
@@ -1393,6 +1541,9 @@ async def main():
         print(f"❌ Не знайшов групу: {LEADS_GROUP_TITLE}")
         await client.disconnect()
         return
+    traffic_group = await find_group_by_title(client, TRAFFIC_GROUP_TITLE)
+    if not traffic_group:
+        print(f"⚠️ Не знайшов групу трафіку: {TRAFFIC_GROUP_TITLE}")
 
     video_group = None
     video_message = None
@@ -1911,6 +2062,34 @@ async def main():
             followup_state=followup_state,
         )
         print(f"✅ Надіслано перше повідомлення: {entity.id}")
+
+    if traffic_group:
+        @client.on(events.NewMessage(chats=traffic_group))
+        async def on_traffic_registration_message(event):
+            try:
+                if not is_media_registration_message(event.message):
+                    return
+                text = event.raw_text or ""
+                parsed = parse_registration_message(text)
+                drive_link = ""
+                if registration_drive:
+                    try:
+                        drive_link = await upload_media_to_drive(event, registration_drive)
+                    except Exception as err:
+                        print(f"⚠️ Drive upload error peer={event.chat_id} msg={event.id}: {type(err).__name__}: {err}")
+                payload = {
+                    **parsed,
+                    "document_drive_link": drive_link,
+                    "message_link": build_message_link(event),
+                    "source_group": (getattr(getattr(event, "chat", None), "title", None) or TRAFFIC_GROUP_TITLE),
+                    "source_message_id": str(event.id),
+                }
+                if registration_sheet:
+                    registration_sheet.append(tz, payload)
+                else:
+                    print("⚠️ RegistrationSheet недоступний: рядок не записано")
+            except Exception as err:
+                print(f"⚠️ Registration ingest error peer={event.chat_id} msg={event.id}: {type(err).__name__}: {err}")
 
     @client.on(events.NewMessage(incoming=True))
     async def on_private_message(event):

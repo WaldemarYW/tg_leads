@@ -1,6 +1,9 @@
 telethon==1.36.0
 gspread==6.1.4
 google-auth==2.33.0
+google-api-python-client==2.149.0
+google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.2.1
 python-telegram-bot==21.6
 python-dotenv==1.0.1
 aiogram==2.25.1
