@@ -214,6 +214,11 @@ FORM_LOCK_REPLY_TEXT = (
     "Ми вже на фінальному етапі — заповненні анкети.\n"
     "Після отримання анкети передаю вас на старт навчання."
 )
+CLARIFY_NEGATIVE_FOLLOWUP_TEXT = (
+    "Розумію 🙌\n"
+    "Підкажіть, будь ласка, що саме залишилось незрозумілим?\n"
+    "Я коротко поясню."
+)
 
 FOLLOWUP_TEMPLATES = [
     (
@@ -412,6 +417,17 @@ def enqueue_sheet_event(event_type: str, payload: dict):
     except Exception as err:
         print(f"⚠️ SHEETS_QUEUE_ENQUEUE_FAIL type={event_type}: {type(err).__name__}: {err}")
         return False
+
+
+def is_clarify_uncertain_reply(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    if t in {"ні", "нет", "неа", "не зовсім", "не совсем", "не дуже", "не очень"}:
+        return True
+    if re.fullmatch(r"(ні|нет)[.!]?", t):
+        return True
+    return False
 
 
 async def classify_candidate_intent(history: list, text: str, last_step: Optional[str]) -> Intent:
@@ -2711,6 +2727,25 @@ async def main():
             history = await build_ai_history(client, sender, limit=10)
             last_step_hint = step_state.get(peer_id)
             intent = await classify_candidate_intent(history, text, last_step_hint)
+
+            if last_step_hint == STEP_CLARIFY and intent == Intent.STOP and is_clarify_uncertain_reply(text):
+                await send_and_update(
+                    client,
+                    sheet,
+                    tz,
+                    sender,
+                    CLARIFY_NEGATIVE_FOLLOWUP_TEXT,
+                    status_for_text(CLARIFY_TEXT),
+                    use_ai=True,
+                    draft=CLARIFY_NEGATIVE_FOLLOWUP_TEXT,
+                    step_state=step_state,
+                    step_name=STEP_CLARIFY,
+                    followup_state=followup_state,
+                )
+                last_reply_at[peer_id] = time.time()
+                print(f"ℹ️ Clarify override peer={peer_id}: short negative treated as request to clarify")
+                return
+
             skip_stop_for_this_message = peer_id in skip_stop_check_once
             if skip_stop_for_this_message:
                 skip_stop_check_once.discard(peer_id)
