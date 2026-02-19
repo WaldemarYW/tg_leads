@@ -131,9 +131,10 @@ HISTORY_RETENTION_MONTHS = int(os.environ.get("HISTORY_RETENTION_MONTHS", "6"))
 PAUSED_STATE_PATH = os.environ.get("AUTO_REPLY_PAUSED_STATE_PATH", "/opt/tg_leads/.auto_reply.paused.json")
 
 TODAY_HEADERS = [
-    "Дата",
     "Имя",
     "Username",
+    "Возраст",
+    "Наличие ПК/ноутбука",
     "Ссылка на чат",
     "Ссылка на заявку",
     "Ссылка на журнал",
@@ -145,6 +146,7 @@ TODAY_HEADERS = [
     "Тех. шаг",
     "Обновлено",
     "Аккаунт",
+    "Дата",
 ]
 
 HISTORY_HEADERS = [
@@ -671,7 +673,7 @@ class SheetWriter:
     def _sheet_row_link(self, ws, row_idx: int, label: str) -> str:
         return f'=HYPERLINK("#gid={ws.id}&range=A{int(row_idx)}";"{label}")'
 
-    def _find_group_lead_row(self, username: str) -> Optional[int]:
+    def _find_group_lead_info(self, username: str) -> Optional[dict]:
         uname = normalize_username(username)
         if not uname:
             return None
@@ -686,15 +688,30 @@ class SheetWriter:
         if not values:
             return None
         headers = [h.strip().lower() for h in values[0]]
+
+        def idx_of(*names: str) -> Optional[int]:
+            for name in names:
+                try:
+                    return headers.index(name)
+                except ValueError:
+                    continue
+            return None
+
+        tg_idx = idx_of("tg", "telegram")
+        age_idx = idx_of("age", "возраст")
+        pc_idx = idx_of("pc", "ноутбук", "пк")
         try:
-            tg_idx = headers.index("tg")
+            if tg_idx is None:
+                raise ValueError("tg column not found")
         except ValueError:
             return None
         for idx, row in enumerate(values[1:], start=2):
             if tg_idx >= len(row):
                 continue
             if normalize_username(row[tg_idx]) == uname:
-                return idx
+                age = row[age_idx].strip() if age_idx is not None and age_idx < len(row) else ""
+                pc = row[pc_idx].strip() if pc_idx is not None and pc_idx < len(row) else ""
+                return {"row_idx": idx, "age": age, "pc": pc}
         return None
 
     def _sort_today_by_updated(self, ws, headers):
@@ -853,12 +870,16 @@ class SheetWriter:
         set_value("Дата", str(datetime.now(tz).date()))
         set_value("Имя", name)
         set_value("Username", ("@" + username) if username else "")
+        set_value("Возраст", "")
+        set_value("Наличие ПК/ноутбука", "")
         set_value("Ссылка на чат", chat_link)
         try:
-            app_row = self._find_group_lead_row(username)
-            if app_row:
+            lead_info = self._find_group_lead_info(username)
+            if lead_info:
                 app_ws = self.sh.worksheet(GROUP_LEADS_WORKSHEET)
-                set_value("Ссылка на заявку", self._sheet_row_link(app_ws, app_row, "Открыть заявку"))
+                set_value("Ссылка на заявку", self._sheet_row_link(app_ws, int(lead_info["row_idx"]), "Открыть заявку"))
+                set_value("Возраст", lead_info.get("age", ""))
+                set_value("Наличие ПК/ноутбука", lead_info.get("pc", ""))
             else:
                 set_value("Ссылка на заявку", "")
         except Exception:
