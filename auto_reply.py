@@ -85,11 +85,13 @@ from auto_reply_state import (
     adjust_to_followup_window as adjust_to_followup_window_impl,
     within_followup_window as within_followup_window_impl,
 )
+from gspread.exceptions import APIError
 from registration_ingest import (
     build_message_link as build_registration_message_link,
     is_media_registration_message,
     parse_registration_message,
 )
+from sheets_queue import SheetsQueueStore, calculate_backoff_sec
 
 load_dotenv("/opt/tg_leads/.env")
 
@@ -185,6 +187,10 @@ REGISTRATION_WORKSHEET = os.environ.get("REGISTRATION_WORKSHEET", "Регист�
 REGISTRATION_DRIVE_FOLDER_ID = os.environ.get("REGISTRATION_DRIVE_FOLDER_ID", "").strip()
 REGISTRATION_DOWNLOAD_DIR = os.environ.get("REGISTRATION_DOWNLOAD_DIR", "/opt/tg_leads/registration_docs")
 REGISTRATION_PARSE_DELAY_SEC = float(os.environ.get("REGISTRATION_PARSE_DELAY_SEC", "60"))
+SHEETS_QUEUE_PATH = os.environ.get("AUTO_REPLY_SHEETS_QUEUE_PATH", "/opt/tg_leads/.sheet_events.sqlite")
+SHEETS_QUEUE_FLUSH_SEC = float(os.environ.get("AUTO_REPLY_SHEETS_QUEUE_FLUSH_SEC", "1"))
+SHEETS_QUEUE_BATCH_SIZE = int(os.environ.get("AUTO_REPLY_SHEETS_QUEUE_BATCH_SIZE", "20"))
+SHEETS_QUEUE_LOG_SEC = int(os.environ.get("AUTO_REPLY_SHEETS_QUEUE_LOG_SEC", "30"))
 CONTINUE_DELAY_SEC = float(os.environ.get("AUTO_REPLY_CONTINUE_DELAY_SEC", "0"))
 CONFIRM_STATUS = "✅ Погодився"
 REFERRAL_STATUS = "🎁 Реферал"
@@ -364,6 +370,7 @@ def strip_question_trail(text: str) -> str:
 
 SENT_MESSAGES = {}
 PAUSE_CHECKER = None
+SHEETS_EVENT_ENQUEUER = None
 
 def track_sent_message(peer_id: int, message_id: int) -> None:
     if not peer_id or not message_id:
@@ -392,6 +399,19 @@ def is_continue_phrase(text: str) -> bool:
 
 def is_neutral_ack(text: str) -> bool:
     return is_neutral_ack_impl(text)
+
+
+def enqueue_sheet_event(event_type: str, payload: dict):
+    global SHEETS_EVENT_ENQUEUER
+    if not SHEETS_EVENT_ENQUEUER:
+        return False
+    try:
+        event_id = SHEETS_EVENT_ENQUEUER(event_type, payload)
+        print(f"SHEETS_QUEUE_ENQUEUE type={event_type} id={event_id}")
+        return True
+    except Exception as err:
+        print(f"⚠️ SHEETS_QUEUE_ENQUEUE_FAIL type={event_type}: {type(err).__name__}: {err}")
+        return False
 
 
 async def classify_candidate_intent(history: list, text: str, last_step: Optional[str]) -> Intent:
@@ -457,16 +477,21 @@ def mark_step_without_send(
     name = getattr(entity, "first_name", "") or "Unknown"
     username = getattr(entity, "username", "") or ""
     chat_link = build_chat_link_app(entity, entity.id)
-    sheet.upsert(
-        tz=tz,
-        peer_id=entity.id,
-        name=name,
-        username=username,
-        chat_link=chat_link,
-        status=status,
-        last_out=None,
-        tech_step=step_name,
-    )
+    payload = {
+        "peer_id": entity.id,
+        "name": name,
+        "username": username,
+        "chat_link": chat_link,
+        "status": status,
+        "last_out": None,
+        "tech_step": step_name,
+    }
+    if not enqueue_sheet_event("today_upsert", payload):
+        try:
+            sheet.upsert(tz=tz, **payload)
+            print(f"AUTO_REPLY_CONTINUE despite_sheet_error peer={entity.id}")
+        except Exception as err:
+            print(f"⚠️ SHEETS_DIRECT_WRITE_FAIL peer={entity.id}: {type(err).__name__}: {err}")
 
 
 def normalize_key(text: str) -> str:
@@ -481,6 +506,24 @@ def normalize_phone(text: str) -> str:
 def normalize_name(text: str) -> str:
     cleaned = normalize_text(text)
     return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def names_match(left: str, right: str) -> bool:
+    l = normalize_name(left)
+    r = normalize_name(right)
+    if not l or not r:
+        return False
+    if l == r:
+        return True
+    if l.startswith(r + " ") or r.startswith(l + " "):
+        return True
+    l_tokens = [t for t in l.split(" ") if t]
+    r_tokens = [t for t in r.split(" ") if t]
+    if len(l_tokens) == 1 and l_tokens[0] in r_tokens:
+        return True
+    if len(r_tokens) == 1 and r_tokens[0] in l_tokens:
+        return True
+    return False
 
 
 def col_letter(col_idx: int) -> str:
@@ -548,6 +591,13 @@ class SheetWriter:
         self.sh = self.gc.open(SHEET_NAME)
         self.today_ws = None
         self.today_key = None
+        self._headers_cache = {}
+        self._headers_cache_ts = {}
+        self._headers_cache_ttl_sec = 30
+        self._row_index_cache = {}
+        self._row_index_cache_ts = {}
+        self._row_index_cache_ttl_sec = 30
+        self._next_row_cache = {}
         self.migrate_sheets()
 
     def _col_letter(self, col_idx: int) -> str:
@@ -588,12 +638,61 @@ class SheetWriter:
                 self.today_ws.clear()
                 self.today_ws.append_row(TODAY_HEADERS, value_input_option="USER_ENTERED")
             self.today_key = key
+            self._invalidate_ws_cache(self.today_ws)
             return self.today_ws
         if self.today_key != key:
             self.today_ws.clear()
             self.today_ws.append_row(TODAY_HEADERS, value_input_option="USER_ENTERED")
             self.today_key = key
+            self._invalidate_ws_cache(self.today_ws)
         return self.today_ws
+
+    def _invalidate_ws_cache(self, ws):
+        ws_id = ws.id
+        self._headers_cache.pop(ws_id, None)
+        self._headers_cache_ts.pop(ws_id, None)
+        self._row_index_cache.pop(ws_id, None)
+        self._row_index_cache_ts.pop(ws_id, None)
+        self._next_row_cache.pop(ws_id, None)
+
+    def _get_headers(self, ws):
+        ws_id = ws.id
+        now = time.time()
+        cached = self._headers_cache.get(ws_id)
+        ts = self._headers_cache_ts.get(ws_id, 0)
+        if cached and (now - ts) < self._headers_cache_ttl_sec:
+            return cached
+        headers = [h.strip() for h in ws.row_values(1)]
+        self._headers_cache[ws_id] = headers
+        self._headers_cache_ts[ws_id] = now
+        return headers
+
+    def _ensure_row_index(self, ws, headers):
+        ws_id = ws.id
+        now = time.time()
+        ts = self._row_index_cache_ts.get(ws_id, 0)
+        if ws_id in self._row_index_cache and (now - ts) < self._row_index_cache_ttl_sec:
+            return
+        try:
+            peer_idx = headers.index("Peer ID")
+            account_idx = headers.index("Аккаунт")
+        except ValueError:
+            self._row_index_cache[ws_id] = {}
+            self._row_index_cache_ts[ws_id] = now
+            self._next_row_cache[ws_id] = 2
+            return
+        values = ws.get_all_values()
+        index = {}
+        for idx, row in enumerate(values[1:], start=2):
+            if peer_idx >= len(row) or account_idx >= len(row):
+                continue
+            peer_raw = row[peer_idx].strip()
+            account_raw = row[account_idx].strip()
+            if peer_raw and account_raw:
+                index[(peer_raw, account_raw)] = idx
+        self._row_index_cache[ws_id] = index
+        self._row_index_cache_ts[ws_id] = now
+        self._next_row_cache[ws_id] = len(values) + 1
 
     def _history_ws(self, tz: ZoneInfo):
         title = self._month_title(datetime.now(tz).date())
@@ -605,6 +704,7 @@ class SheetWriter:
         values = ws.get_all_values()
         if not values:
             ws.append_row(HISTORY_HEADERS, value_input_option="USER_ENTERED")
+            self._invalidate_ws_cache(ws)
             return
         current_headers = [h.strip() for h in values[0]]
         if current_headers == HISTORY_HEADERS:
@@ -620,6 +720,7 @@ class SheetWriter:
         ws.append_row(HISTORY_HEADERS, value_input_option="USER_ENTERED")
         if remapped_rows:
             ws.append_rows(remapped_rows, value_input_option="USER_ENTERED")
+        self._invalidate_ws_cache(ws)
 
     def migrate_sheets(self):
         try:
@@ -659,21 +760,16 @@ class SheetWriter:
                     print(f"⚠️ Не вдалося видалити старий лист '{ws.title}': {err}")
 
     def _find_row(self, ws, peer_id: int, account_key: str):
-        values = ws.get_all_values()
-        if not values:
+        headers = self._get_headers(ws)
+        self._ensure_row_index(ws, headers)
+        ws_id = ws.id
+        idx = self._row_index_cache.get(ws_id, {}).get((str(peer_id), account_key))
+        if not idx:
             return None, None
-        headers = [h.strip() for h in values[0]]
-        try:
-            peer_idx = headers.index("Peer ID")
-            account_idx = headers.index("Аккаунт")
-        except ValueError:
-            return None, None
-        for idx, row in enumerate(values[1:], start=2):
-            peer_match = peer_idx < len(row) and row[peer_idx].strip() == str(peer_id)
-            account_match = account_idx < len(row) and row[account_idx].strip() == account_key
-            if peer_match and account_match:
-                return idx, row
-        return None, None
+        end_col = self._col_letter(len(headers))
+        values = ws.get(f"A{idx}:{end_col}{idx}")
+        row = values[0] if values else []
+        return idx, row
 
     def _event_type(
         self,
@@ -742,11 +838,78 @@ class SheetWriter:
                 age = row[age_idx].strip() if age_idx is not None and age_idx < len(row) else ""
                 pc = row[pc_idx].strip() if pc_idx is not None and pc_idx < len(row) else ""
                 return {"row_idx": idx, "age": age, "pc": pc}
-            if not fallback_match and name_norm and normalize_name(row_name) == name_norm:
+            if not fallback_match and name_norm and names_match(row_name, name_norm):
                 age = row[age_idx].strip() if age_idx is not None and age_idx < len(row) else ""
                 pc = row[pc_idx].strip() if pc_idx is not None and pc_idx < len(row) else ""
                 fallback_match = {"row_idx": idx, "age": age, "pc": pc}
         return fallback_match
+
+    def refresh_today_from_group_lead(self, tz: ZoneInfo, group_data: dict) -> int:
+        ws = self._ensure_today_ws(tz)
+        headers = self._get_headers(ws)
+        try:
+            values = ws.get_all_values()
+        except Exception:
+            self._invalidate_ws_cache(ws)
+            return 0
+        if not values or len(values) <= 1:
+            return 0
+
+        def idx_of(name: str) -> Optional[int]:
+            try:
+                return headers.index(name)
+            except ValueError:
+                return None
+
+        username_idx = idx_of("Username")
+        name_idx = idx_of("Имя")
+        app_link_idx = idx_of("Ссылка на заявку")
+        age_idx = idx_of("Возраст")
+        pc_idx = idx_of("Наличие ПК/ноутбука")
+        if app_link_idx is None or age_idx is None or pc_idx is None:
+            return 0
+
+        lead_info = self._find_group_lead_info(group_data.get("tg", ""), group_data.get("full_name", ""))
+        if not lead_info:
+            return 0
+        app_ws = self.sh.worksheet(GROUP_LEADS_WORKSHEET)
+        app_link = self._sheet_row_link(app_ws, int(lead_info["row_idx"]), "Открыть заявку")
+        lead_age = lead_info.get("age", "")
+        lead_pc = lead_info.get("pc", "")
+        target_uname = normalize_username(group_data.get("tg", ""))
+        target_name = normalize_name(group_data.get("full_name", ""))
+        updated = 0
+        end_col = self._col_letter(len(headers))
+
+        for idx, row in enumerate(values[1:], start=2):
+            row_uname = normalize_username(row[username_idx]) if username_idx is not None and username_idx < len(row) else ""
+            row_name = normalize_name(row[name_idx]) if name_idx is not None and name_idx < len(row) else ""
+            matches = False
+            if target_uname and row_uname == target_uname:
+                matches = True
+            elif target_name and names_match(row_name, target_name):
+                matches = True
+            if not matches:
+                continue
+
+            row_full = row[:] + [""] * max(0, len(headers) - len(row))
+            changed = False
+            if row_full[app_link_idx] != app_link:
+                row_full[app_link_idx] = app_link
+                changed = True
+            if row_full[age_idx] != lead_age:
+                row_full[age_idx] = lead_age
+                changed = True
+            if row_full[pc_idx] != lead_pc:
+                row_full[pc_idx] = lead_pc
+                changed = True
+            if not changed:
+                continue
+            ws.update(range_name=f"A{idx}:{end_col}{idx}", values=[row_full], value_input_option="USER_ENTERED")
+            updated += 1
+        if updated:
+            self._invalidate_ws_cache(ws)
+        return updated
 
     def _sort_today_by_updated(self, ws, headers):
         try:
@@ -778,7 +941,7 @@ class SheetWriter:
     ) -> Optional[str]:
         ws = self._history_ws(tz)
         now_iso = datetime.now(tz).isoformat(timespec="seconds")
-        headers = [h.strip() for h in ws.row_values(1)]
+        headers = self._get_headers(ws)
         row_idx, existing = self._find_row(ws, peer_id, ACCOUNT_KEY)
         existing = existing or [""] * len(headers)
         if len(existing) < len(headers):
@@ -838,13 +1001,16 @@ class SheetWriter:
         try:
             if row_idx:
                 end_col = self._col_letter(len(headers))
-                ws.update(f"A{row_idx}:{end_col}{row_idx}", [existing], value_input_option="USER_ENTERED")
+                ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
             else:
-                next_row = len(ws.get_all_values()) + 1
+                next_row = int(self._next_row_cache.get(ws.id, 2))
                 end_col = self._col_letter(len(headers))
-                ws.update(f"A{next_row}:{end_col}{next_row}", [existing], value_input_option="USER_ENTERED")
+                ws.update(range_name=f"A{next_row}:{end_col}{next_row}", values=[existing], value_input_option="USER_ENTERED")
+                self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), ACCOUNT_KEY)] = next_row
+                self._next_row_cache[ws.id] = next_row + 1
         except Exception as err:
             print(f"⚠️ Не вдалося записати історію: {err}")
+            self._invalidate_ws_cache(ws)
             return None
         if not row_idx:
             row_idx, _ = self._find_row(ws, peer_id, ACCOUNT_KEY)
@@ -875,7 +1041,7 @@ class SheetWriter:
     ):
         del followup_stage, followup_next_at, followup_last_sent_at
         ws = self._ensure_today_ws(tz)
-        headers = [h.strip() for h in ws.row_values(1)]
+        headers = self._get_headers(ws)
         row_idx, existing = self._find_row(ws, peer_id, ACCOUNT_KEY)
         existing = existing or [""] * len(headers)
         if len(existing) < len(headers):
@@ -950,13 +1116,16 @@ class SheetWriter:
         try:
             if row_idx:
                 end_col = self._col_letter(len(headers))
-                ws.update(f"A{row_idx}:{end_col}{row_idx}", [existing], value_input_option="USER_ENTERED")
+                ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
             else:
-                next_row = len(ws.get_all_values()) + 1
+                next_row = int(self._next_row_cache.get(ws.id, 2))
                 end_col = self._col_letter(len(headers))
-                ws.update(f"A{next_row}:{end_col}{next_row}", [existing], value_input_option="USER_ENTERED")
+                ws.update(range_name=f"A{next_row}:{end_col}{next_row}", values=[existing], value_input_option="USER_ENTERED")
+                self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), ACCOUNT_KEY)] = next_row
+                self._next_row_cache[ws.id] = next_row + 1
         except Exception as err:
             print(f"⚠️ Не вдалося записати лист '{TODAY_WORKSHEET}': {err}")
+            self._invalidate_ws_cache(ws)
             return
         self._sort_today_by_updated(ws, headers)
 
@@ -1390,21 +1559,26 @@ async def send_and_update(
         pass
     if step_state and step_name:
         step_state.set(entity.id, step_name)
-    sheet.upsert(
-        tz=tz,
-        peer_id=entity.id,
-        name=name,
-        username=username,
-        chat_link=chat_link,
-        status=status,
-        auto_reply_enabled=auto_reply_enabled,
-        last_out=message_text[:200],
-        tech_step=step_name,
-        sender_role="bot",
-        dialog_mode="ON",
-        step_snapshot=step_name,
-        full_text=message_text,
-    )
+    payload = {
+        "peer_id": entity.id,
+        "name": name,
+        "username": username,
+        "chat_link": chat_link,
+        "status": status,
+        "auto_reply_enabled": auto_reply_enabled,
+        "last_out": message_text[:200],
+        "tech_step": step_name,
+        "sender_role": "bot",
+        "dialog_mode": "ON",
+        "step_snapshot": step_name,
+        "full_text": message_text,
+    }
+    if not enqueue_sheet_event("today_upsert", payload):
+        try:
+            sheet.upsert(tz=tz, **payload)
+            print(f"AUTO_REPLY_CONTINUE despite_sheet_error peer={entity.id}")
+        except Exception as err:
+            print(f"⚠️ SHEETS_DIRECT_WRITE_FAIL peer={entity.id}: {type(err).__name__}: {err}")
     if schedule_followup and followup_state and status != AUTO_STOP_STATUS:
         followup_state.schedule_from_now(entity.id, tz)
         state = followup_state.get(entity.id)
@@ -1412,16 +1586,21 @@ async def send_and_update(
         stage = state.get("stage")
         if next_at is not None and stage is not None:
             next_dt = datetime.fromtimestamp(float(next_at), tz)
-            sheet.upsert(
-                tz=tz,
-                peer_id=entity.id,
-                name=name,
-                username=username,
-                chat_link=chat_link,
-                followup_stage=str(stage + 1),
-                followup_next_at=next_dt.isoformat(timespec="seconds"),
-                followup_last_sent_at=None,
-            )
+            follow_payload = {
+                "peer_id": entity.id,
+                "name": name,
+                "username": username,
+                "chat_link": chat_link,
+                "followup_stage": str(stage + 1),
+                "followup_next_at": next_dt.isoformat(timespec="seconds"),
+                "followup_last_sent_at": None,
+            }
+            if not enqueue_sheet_event("today_upsert", follow_payload):
+                try:
+                    sheet.upsert(tz=tz, **follow_payload)
+                    print(f"AUTO_REPLY_CONTINUE despite_sheet_error peer={entity.id}")
+                except Exception as err:
+                    print(f"⚠️ SHEETS_DIRECT_WRITE_FAIL peer={entity.id}: {type(err).__name__}: {err}")
     if delay_after:
         await asyncio.sleep(delay_after)
     return message_text
@@ -1634,8 +1813,25 @@ async def main():
     format_delivery_state = {}
     step_state = StepState(STEP_STATE_PATH)
     followup_state = FollowupState(FOLLOWUP_STATE_PATH)
+    sheets_queue = None
+    try:
+        sheets_queue = SheetsQueueStore(SHEETS_QUEUE_PATH)
+    except Exception as err:
+        print(f"⚠️ SHEETS_QUEUE_INIT_FAIL path={SHEETS_QUEUE_PATH}: {type(err).__name__}: {err}")
+    last_queue_log_at = 0.0
     pending_registration_tasks = {}
     stop_event = asyncio.Event()
+
+    def queue_today_upsert(**kwargs):
+        if enqueue_sheet_event("today_upsert", kwargs):
+            return True
+        try:
+            sheet.upsert(tz=tz, **kwargs)
+            print(f"AUTO_REPLY_CONTINUE despite_sheet_error peer={kwargs.get('peer_id', '')}")
+            return True
+        except Exception as err:
+            print(f"⚠️ SHEETS_DIRECT_WRITE_FAIL peer={kwargs.get('peer_id', '')}: {type(err).__name__}: {err}")
+            return False
     try:
         enabled_peers = sheet.load_enabled_peers(tz)
     except Exception:
@@ -1658,6 +1854,8 @@ async def main():
 
     global PAUSE_CHECKER
     PAUSE_CHECKER = is_paused
+    global SHEETS_EVENT_ENQUEUER
+    SHEETS_EVENT_ENQUEUER = sheets_queue.enqueue if sheets_queue else None
 
     def handle_stop():
         stop_event.set()
@@ -2143,8 +2341,7 @@ async def main():
                     step_state.set(entity.id, reconciled_step)
                     print(f"MISSING_STEP_FALLBACK peer={entity.id} chosen={STEP_SHIFT_QUESTION}")
                 print(f"START1_RECOVER peer={entity.id} source={recover_source} step={reconciled_step}")
-            sheet.upsert(
-                tz=tz,
+            queue_today_upsert(
                 peer_id=entity.id,
                 name=name,
                 username=username,
@@ -2169,7 +2366,12 @@ async def main():
         try:
             group_data = parse_group_message(text)
             group_status = status_for_text(CONTACT_TEXT)
-            group_leads_sheet.upsert(tz, group_data, group_status)
+            if not enqueue_sheet_event("group_leads_upsert", {"data": group_data, "status": group_status}):
+                try:
+                    group_leads_sheet.upsert(tz, group_data, group_status)
+                    print("AUTO_REPLY_CONTINUE despite_sheet_error peer=group_lead")
+                except Exception as err:
+                    print(f"⚠️ SHEETS_DIRECT_WRITE_FAIL group_leads: {type(err).__name__}: {err}")
         except Exception:
             pass
         username, phone = extract_contact(text)
@@ -2234,7 +2436,12 @@ async def main():
                     "source_message_id": str(message_id),
                 }
                 if registration_sheet:
-                    registration_sheet.upsert(tz, payload)
+                    if not enqueue_sheet_event("registration_upsert", payload):
+                        try:
+                            registration_sheet.upsert(tz, payload)
+                            print(f"AUTO_REPLY_CONTINUE despite_sheet_error peer={chat_id}")
+                        except Exception as err:
+                            print(f"⚠️ SHEETS_DIRECT_WRITE_FAIL registration peer={chat_id}: {type(err).__name__}: {err}")
                 else:
                     print("⚠️ RegistrationSheet недоступний: рядок не записано")
             except Exception as err:
@@ -2264,6 +2471,76 @@ async def main():
         async def on_traffic_registration_edit(event):
             await schedule_traffic_registration(event)
 
+    async def apply_sheet_event(event):
+        payload = event.payload or {}
+        if event.event_type == "today_upsert":
+            await asyncio.to_thread(sheet.upsert, tz=tz, **payload)
+            return
+        if event.event_type == "group_leads_upsert":
+            group_data = payload.get("data") or {}
+            await asyncio.to_thread(
+                group_leads_sheet.upsert,
+                tz,
+                group_data,
+                payload.get("status"),
+            )
+            try:
+                updated = await asyncio.to_thread(sheet.refresh_today_from_group_lead, tz, group_data)
+                if updated:
+                    print(f"SHEETS_GROUP_REFRESH updated={updated} tg={group_data.get('tg', '')}")
+            except Exception as err:
+                print(f"⚠️ SHEETS_GROUP_REFRESH_FAIL: {type(err).__name__}: {err}")
+            return
+        if event.event_type == "registration_upsert":
+            if registration_sheet:
+                await asyncio.to_thread(registration_sheet.upsert, tz, payload)
+            return
+        raise ValueError(f"Unknown sheet event type: {event.event_type}")
+
+    def extract_status_code(err: Exception) -> Optional[int]:
+        if isinstance(err, APIError):
+            resp = getattr(err, "response", None)
+            code = getattr(resp, "status_code", None)
+            try:
+                return int(code)
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    async def sheet_flush_loop():
+        nonlocal last_queue_log_at
+        if not sheets_queue:
+            return
+        while not stop_event.is_set():
+            try:
+                now_ts = time.time()
+                batch = sheets_queue.fetch_batch(SHEETS_QUEUE_BATCH_SIZE, now_ts)
+                for event in batch:
+                    attempts = int(event.attempts) + 1
+                    try:
+                        await apply_sheet_event(event)
+                        sheets_queue.mark_done(event.id)
+                        print(f"SHEETS_QUEUE_FLUSH ok id={event.id} type={event.event_type} attempts={attempts}")
+                    except Exception as err:
+                        status_code = extract_status_code(err)
+                        hard_error = status_code is not None and (400 <= status_code < 500) and status_code != 429
+                        backoff = calculate_backoff_sec(attempts, hard_error=hard_error)
+                        sheets_queue.mark_retry(event.id, attempts, backoff, f"{type(err).__name__}: {err}")
+                        print(
+                            f"SHEETS_QUEUE_FLUSH fail id={event.id} type={event.event_type} attempts={attempts} "
+                            f"backoff={backoff:.1f}s err={type(err).__name__}: {err}"
+                        )
+                if (now_ts - last_queue_log_at) >= max(5, SHEETS_QUEUE_LOG_SEC):
+                    stats = sheets_queue.stats()
+                    pending = int(stats.get("pending") or 0)
+                    oldest = stats.get("oldest_age_sec")
+                    oldest_fmt = f"{oldest:.1f}" if isinstance(oldest, (int, float)) else "0"
+                    print(f"SHEETS_QUEUE_BACKLOG pending={pending} oldest_sec={oldest_fmt}")
+                    last_queue_log_at = now_ts
+            except Exception as err:
+                print(f"⚠️ SHEETS_QUEUE_LOOP_ERROR: {type(err).__name__}: {err}")
+            await asyncio.sleep(max(0.2, SHEETS_QUEUE_FLUSH_SEC))
+
     @client.on(events.NewMessage(incoming=True))
     async def on_private_message(event):
         if not event.is_private:
@@ -2285,8 +2562,7 @@ async def main():
         else:
             incoming_mode = "ON" if peer_id in enabled_peers else "OFF"
 
-        sheet.upsert(
-            tz=tz,
+        queue_today_upsert(
             peer_id=sender.id,
             name=name,
             username=username,
@@ -2355,8 +2631,7 @@ async def main():
             last_incoming_at[peer_id] = time.time()
             pending_question_resume.pop(peer_id, None)
             followup_state.clear(peer_id)
-            sheet.upsert(
-                tz=tz,
+            queue_today_upsert(
                 peer_id=sender.id,
                 name=name,
                 username=username,
@@ -2406,8 +2681,7 @@ async def main():
                 if reconciled_step:
                     last_step = reconciled_step
                     print(f"START1_RECOVER peer={peer_id} source={reconcile_source} step={last_step}")
-                    sheet.upsert(
-                        tz=tz,
+                    queue_today_upsert(
                         peer_id=sender.id,
                         name=name,
                         username=username,
@@ -2418,8 +2692,7 @@ async def main():
                     fallback_step = STEP_SHIFT_QUESTION
                     print(f"MISSING_STEP_FALLBACK peer={peer_id} chosen={fallback_step}")
                     step_state.set(peer_id, fallback_step)
-                    sheet.upsert(
-                        tz=tz,
+                    queue_today_upsert(
                         peer_id=sender.id,
                         name=name,
                         username=username,
@@ -2550,8 +2823,7 @@ async def main():
                     next_stage, next_dt = followup_state.mark_sent_and_advance(peer_id, tz)
                     stage_value = str(next_stage + 1) if next_stage is not None else ""
                     next_value = next_dt.isoformat(timespec="seconds") if next_dt else ""
-                    sheet.upsert(
-                        tz=tz,
+                    queue_today_upsert(
                         peer_id=peer_id,
                         name=getattr(entity, "first_name", "") or "Unknown",
                         username=getattr(entity, "username", "") or "",
@@ -2597,11 +2869,22 @@ async def main():
                 print(f"⚠️ Followup loop error: {err}")
             await asyncio.sleep(FOLLOWUP_CHECK_SEC)
 
+    sheets_task = None
+    followup_task = None
     try:
-        asyncio.create_task(followup_loop())
+        if sheets_queue:
+            sheets_task = asyncio.create_task(sheet_flush_loop())
+        followup_task = asyncio.create_task(followup_loop())
         while not stop_event.is_set():
             await asyncio.sleep(0.5)
     finally:
+        try:
+            if sheets_task:
+                sheets_task.cancel()
+            if followup_task:
+                followup_task.cancel()
+        except Exception:
+            pass
         await client.disconnect()
         release_lock(SESSION_LOCK)
         release_lock(AUTO_REPLY_LOCK)
