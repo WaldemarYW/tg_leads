@@ -70,6 +70,7 @@ QUESTION_RESPONSE_DELAY_SEC = float(os.environ.get("QUESTION_RESPONSE_DELAY_SEC"
 QUESTION_RESUME_DELAY_SEC = float(os.environ.get("QUESTION_RESUME_DELAY_SEC", "300"))
 TRAINING_TO_FORM_DELAY_SEC = float(os.environ.get("TRAINING_TO_FORM_DELAY_SEC", "300"))
 SENT_MESSAGE_CACHE_LIMIT = int(os.environ.get("SENT_MESSAGE_CACHE_LIMIT", "200"))
+JOURNAL_MAX_LINES_PER_CHAT = int(os.environ.get("JOURNAL_MAX_LINES_PER_CHAT", "500"))
 SESSION_LOCK = os.environ.get("TELETHON_SESSION_LOCK", f"{SESSION_FILE}.lock")
 STATUS_PATH = os.environ.get("AUTO_REPLY_STATUS_PATH", "/opt/tg_leads/.auto_reply.status")
 FOLLOWUP_STATE_PATH = os.environ.get("AUTO_REPLY_FOLLOWUP_STATE_PATH", "/opt/tg_leads/.auto_reply.followup_state.json")
@@ -140,6 +141,7 @@ IMMUTABLE_STATUSES = {CONFIRM_STATUS, REFERRAL_STATUS}
 STOP_COMMANDS = {"стоп1", "stop1"}
 START_COMMANDS = {"старт1", "start1"}
 AUTO_STOP_STATUS = "❌ Відмова"
+MANUAL_OFF_STATUS = "🧑‍💼 Manual OFF"
 STOP_REPLY_TEXT = "Розумію, дякую за відповідь. Якщо обставини зміняться, дайте знати."
 CLARIFY_VARIANTS = [
     CLARIFY_TEXT,
@@ -820,7 +822,10 @@ class SheetWriter:
         auto_reply_enabled: Optional[bool],
         last_in: Optional[str],
         last_out: Optional[str],
+        event_type_override: Optional[str] = None,
     ) -> str:
+        if event_type_override:
+            return event_type_override
         if last_out is not None:
             return "Исходящее сообщение"
         if last_in is not None:
@@ -883,6 +888,10 @@ class SheetWriter:
         auto_reply_enabled: Optional[bool],
         last_in: Optional[str],
         last_out: Optional[str],
+        sender_role: Optional[str] = None,
+        dialog_mode: Optional[str] = None,
+        step_snapshot: Optional[str] = None,
+        full_text: Optional[str] = None,
     ) -> Optional[str]:
         ws = self._history_ws(tz)
         now_iso = datetime.now(tz).isoformat(timespec="seconds")
@@ -912,27 +921,17 @@ class SheetWriter:
                 return ""
             return existing[idx]
 
-        def clean(v: Optional[str], limit: int = 120) -> str:
-            txt = " ".join((v or "").split())
-            if len(txt) > limit:
-                txt = txt[:limit] + "..."
-            return txt
-
-        event_line_parts = [now_iso, event_type]
-        if status:
-            event_line_parts.append(f"Статус: {status}")
-        if auto_reply_enabled is not None:
-            event_line_parts.append(f"Авто: {'ON' if auto_reply_enabled else 'OFF'}")
-        if last_in:
-            event_line_parts.append(f"IN: {clean(last_in)}")
-        if last_out:
-            event_line_parts.append(f"OUT: {clean(last_out)}")
-        event_line = " | ".join(event_line_parts)
+        role_value = (sender_role or "").strip() or "unknown"
+        mode_value = (dialog_mode or "").strip() or "ON"
+        step_value = (step_snapshot or "").strip() or "-"
+        text_value = (full_text if full_text is not None else (last_in if last_in is not None else last_out)) or ""
+        text_value = str(text_value).replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n").strip()
+        event_line = f"{now_iso} | role={role_value} | mode={mode_value} | step={step_value} | {event_type} | text={text_value}"
 
         journal_prev = get_value("Журнал событий").strip()
         journal_lines = [line for line in journal_prev.splitlines() if line.strip()]
         journal_lines.append(event_line)
-        journal_lines = journal_lines[-200:]
+        journal_lines = journal_lines[-max(50, JOURNAL_MAX_LINES_PER_CHAT):]
         journal_text = "\n".join(journal_lines)
 
         set_value("Время события", now_iso)
@@ -982,6 +981,11 @@ class SheetWriter:
         last_in: Optional[str] = None,
         last_out: Optional[str] = None,
         tech_step: Optional[str] = None,
+        sender_role: Optional[str] = None,
+        dialog_mode: Optional[str] = None,
+        step_snapshot: Optional[str] = None,
+        full_text: Optional[str] = None,
+        event_type_override: Optional[str] = None,
         followup_stage: Optional[str] = None,
         followup_next_at: Optional[str] = None,
         followup_last_sent_at: Optional[str] = None,
@@ -1033,11 +1037,11 @@ class SheetWriter:
         set_value("Последнее входящее", last_in)
         set_value("Последнее исходящее", last_out)
         set_value("Peer ID", str(peer_id))
-        set_value("Тех. шаг", tech_step)
+        set_value("Тех. шаг", tech_step or step_snapshot)
         set_value("Обновлено", now_iso)
         set_value("Аккаунт", ACCOUNT_KEY)
 
-        event_type = self._event_type(status, auto_reply_enabled, last_in, last_out)
+        event_type = self._event_type(status, auto_reply_enabled, last_in, last_out, event_type_override)
         history_link = self.append_history_event(
             tz=tz,
             event_type=event_type,
@@ -1049,6 +1053,10 @@ class SheetWriter:
             auto_reply_enabled=auto_reply_enabled,
             last_in=last_in,
             last_out=last_out,
+            sender_role=sender_role,
+            dialog_mode=dialog_mode,
+            step_snapshot=step_snapshot or tech_step,
+            full_text=full_text,
         )
         set_value("Ссылка на журнал", history_link or "")
 
@@ -1367,6 +1375,10 @@ async def send_and_update(
         auto_reply_enabled=auto_reply_enabled,
         last_out=message_text[:200],
         tech_step=step_name,
+        sender_role="bot",
+        dialog_mode="ON",
+        step_snapshot=step_name,
+        full_text=message_text,
     )
     if schedule_followup and followup_state and status != AUTO_STOP_STATUS:
         followup_state.schedule_from_now(entity.id, tz)
@@ -2167,6 +2179,11 @@ async def main():
             username = getattr(entity, "username", "") or ""
             chat_link = build_chat_link_app(entity, entity.id)
             status = "PAUSED" if text_lower in STOP_COMMANDS or text_lower not in START_COMMANDS else "ACTIVE"
+            auto_toggle_value = None
+            if text_lower in START_COMMANDS:
+                auto_toggle_value = True
+            elif text_lower in STOP_COMMANDS:
+                auto_toggle_value = False
             pause_store.set_status(entity.id, username, name, chat_link, status, updated_by="manual")
             if text_lower in START_COMMANDS:
                 reconciled_step, recover_source = await reconcile_dialog_step(entity, use_cache=False)
@@ -2182,8 +2199,16 @@ async def main():
                 name=name,
                 username=username,
                 chat_link=chat_link,
-                auto_reply_enabled=(text_lower in START_COMMANDS),
+                auto_reply_enabled=auto_toggle_value,
                 tech_step=(step_state.get(entity.id) if text_lower in START_COMMANDS else None),
+                sender_role="operator",
+                dialog_mode=("ON" if text_lower in START_COMMANDS else "OFF"),
+                step_snapshot=step_state.get(entity.id) or "",
+                full_text=text,
+                event_type_override=(
+                    f"START1_RECOVER ({recover_source})" if text_lower in START_COMMANDS else None
+                ),
+                status=(None if text_lower in START_COMMANDS else MANUAL_OFF_STATUS),
             )
         else:
             status = "PAUSED" if text_lower in STOP_COMMANDS or text_lower not in START_COMMANDS else "ACTIVE"
@@ -2244,6 +2269,28 @@ async def main():
         name = getattr(sender, "first_name", "") or "Unknown"
         username = getattr(sender, "username", "") or ""
         chat_link = build_chat_link_app(sender, sender.id)
+        current_step_snapshot = step_state.get(peer_id) or ""
+        pause_status = pause_store.get_status(peer_id, username)
+        if pause_status == "PAUSED" or peer_id in paused_peers:
+            incoming_mode = "OFF"
+        elif pause_status == "ACTIVE":
+            incoming_mode = "ON"
+        else:
+            incoming_mode = "ON" if peer_id in enabled_peers else "OFF"
+
+        sheet.upsert(
+            tz=tz,
+            peer_id=sender.id,
+            name=name,
+            username=username,
+            chat_link=chat_link,
+            last_in=text[:200],
+            status=(MANUAL_OFF_STATUS if incoming_mode == "OFF" else None),
+            sender_role="lead",
+            dialog_mode=incoming_mode,
+            step_snapshot=current_step_snapshot,
+            full_text=text,
+        )
 
         if is_test_restart(sender, text):
             paused_peers.discard(peer_id)
@@ -2275,7 +2322,6 @@ async def main():
                 return
             print(f"✅ Test user bypassed paused: {peer_id}")
         if peer_id not in enabled_peers:
-            pause_status = pause_store.get_status(peer_id, username)
             if pause_status == "ACTIVE":
                 enabled_peers.add(peer_id)
                 print(f"ℹ️ Restored enabled from pause-state: {peer_id}")
@@ -2301,14 +2347,6 @@ async def main():
         try:
             last_incoming_at[peer_id] = time.time()
             pending_question_resume.pop(peer_id, None)
-            sheet.upsert(
-                tz=tz,
-                peer_id=sender.id,
-                name=name,
-                username=username,
-                chat_link=chat_link,
-                last_in=text[:200],
-            )
             followup_state.clear(peer_id)
             sheet.upsert(
                 tz=tz,
