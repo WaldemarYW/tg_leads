@@ -45,6 +45,45 @@ from tg_to_sheets import (
     CONFIRM_TEXT,
     REFERRAL_TEXT,
 )
+from auto_reply_classifiers import (
+    Decision,
+    classify_format_choice,
+    classify_stop_continue,
+    fallback_format_choice as fallback_format_choice_impl,
+    is_continue_phrase as is_continue_phrase_impl,
+    is_neutral_ack as is_neutral_ack_impl,
+    is_stop_phrase as is_stop_phrase_impl,
+    message_has_question as message_has_question_impl,
+    should_send_question as should_send_question_impl,
+    strip_question_trail as strip_question_trail_impl,
+    wants_video as wants_video_impl,
+)
+from auto_reply_flow import (
+    FlowContext,
+    STEP_CLARIFY,
+    STEP_CONTACT,
+    STEP_DATING,
+    STEP_DUTIES,
+    STEP_FORMAT,
+    STEP_FORMAT_QUESTION,
+    STEP_INTEREST,
+    STEP_ORDER,
+    STEP_SHIFT_QUESTION,
+    STEP_SHIFTS,
+    STEP_TRAINING,
+    STEP_TRAINING_QUESTION,
+    STEP_VIDEO_FOLLOWUP,
+    STEP_FORM,
+    advance_flow,
+    send_message_with_fallback,
+)
+from auto_reply_state import (
+    FollowupState as FollowupStateStore,
+    LocalPauseStore as LocalPauseStoreStore,
+    StepState as StepStateStore,
+    adjust_to_followup_window as adjust_to_followup_window_impl,
+    within_followup_window as within_followup_window_impl,
+)
 
 load_dotenv("/opt/tg_leads/.env")
 
@@ -123,9 +162,6 @@ USERNAME_RE = re.compile(r"(?:@|t\.me/)([A-Za-z0-9_]{5,})")
 PHONE_RE = re.compile(r"\+?\d[\d\s\-\(\)]{9,}\d")
 MESSAGE_LINK_RE = re.compile(r"https?://t\.me/(c/)?([A-Za-z0-9_]+)/(\d+)")
 
-VIDEO_WORDS = ("відео", "видео")
-FORMAT_VIDEO_WORDS = ("відео", "видео", "video")
-FORMAT_MINI_COURSE_WORDS = ("мінікурс", "миникурс", "mini-course", "mini course", "курс", "тренажер", "сайт")
 DIALOG_AI_URL = os.environ.get("DIALOG_AI_URL", "http://127.0.0.1:3000/dialog_suggest")
 DIALOG_AI_TIMEOUT_SEC = float(os.environ.get("DIALOG_AI_TIMEOUT_SEC", "20"))
 DIALOG_STOP_URL = os.environ.get("DIALOG_STOP_URL", "http://127.0.0.1:3000/should_pause")
@@ -178,36 +214,6 @@ FOLLOWUP_TEMPLATES = [
 ]
 TEST_USER_ID = "156414561"
 TEST_START_COMMANDS = {"старт8", "start8"}
-
-STEP_CONTACT = "contact"
-STEP_INTEREST = "interest"
-STEP_DATING = "dating"
-STEP_DUTIES = "duties"
-STEP_CLARIFY = "clarify"
-STEP_SHIFTS = "shifts"
-STEP_SHIFT_QUESTION = "shift_question"
-STEP_FORMAT = "format"
-STEP_FORMAT_QUESTION = "format_question"
-STEP_VIDEO_FOLLOWUP = "video_followup"
-STEP_TRAINING = "training"
-STEP_TRAINING_QUESTION = "training_question"
-STEP_FORM = "form"
-
-STEP_ORDER = {
-    STEP_CONTACT: 0,
-    STEP_INTEREST: 1,
-    STEP_DATING: 2,
-    STEP_DUTIES: 3,
-    STEP_CLARIFY: 4,
-    STEP_SHIFTS: 5,
-    STEP_SHIFT_QUESTION: 6,
-    STEP_FORMAT: 7,
-    STEP_FORMAT_QUESTION: 8,
-    STEP_VIDEO_FOLLOWUP: 9,
-    STEP_TRAINING: 10,
-    STEP_TRAINING_QUESTION: 11,
-    STEP_FORM: 12,
-}
 
 TEMPLATE_TO_STEP = {
     normalize_text(CONTACT_TEXT): STEP_CONTACT,
@@ -316,107 +322,15 @@ def extract_contact(text: str) -> Tuple[Optional[str], Optional[str]]:
 
 
 def message_has_question(text: str) -> bool:
-    if "?" in (text or ""):
-        return True
-    t = normalize_text(text)
-    if not t:
-        return False
-    return bool(re.search(
-        r"^(коли|де|як|який|яка|які|що|чи|скільки|когда|где|как|какой|какая|какие|что|сколько|почему|зачем|можно)\b",
-        t,
-    ))
+    return message_has_question_impl(text)
 
 
 def strip_question_trail(text: str) -> str:
-    if not text:
-        return text
-    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
-    if not sentences:
-        return text
-    cleaned = []
-    for sentence in sentences:
-        lower = sentence.lower()
-        if "?" in sentence:
-            break
-        if any(word in lower for word in ("зміна", "графік", "формат", "навчання", "анкета")):
-            break
-        cleaned.append(sentence)
-    return " ".join(cleaned).strip() or text.strip()
+    return strip_question_trail_impl(text)
 
 
 SENT_MESSAGES = {}
 PAUSE_CHECKER = None
-
-STOP_PHRASES = [
-    "не підход",
-    "не подходит",
-    "не цікаво",
-    "не интересно",
-    "не актуаль",
-    "не хочу",
-    "не буду",
-    "не готов",
-    "не готова",
-    "не хочу працювати",
-    "не хочу работать",
-    "не буду працювати",
-    "не буду работать",
-    "вже знайш",
-    "уже наш",
-    "вже маю роботу",
-    "уже нашла работу",
-    "уже нашел работу",
-    "не пишіть",
-    "не пишите",
-    "не турбуйте",
-    "не беспокойте",
-    "не потрібно",
-    "не нужно",
-    "не интересует",
-    "не цікавить",
-    "не зможу",
-    "не смогу",
-    "шукаю додатковий заробіток",
-    "ищу дополнительный заработок",
-    "підробіток",
-    "подработ",
-    "отпис",
-    "stop",
-    "unsubscribe",
-    "not interested",
-    "no thanks",
-    "no thank you",
-]
-
-CONTINUE_PHRASES = [
-    "так",
-    "да",
-    "ок",
-    "добре",
-    "хорошо",
-    "готов",
-    "готова",
-    "готовий",
-    "готова перейти",
-    "продовжуйте",
-    "продолжайте",
-    "далі",
-    "дальше",
-    "поїхали",
-    "погнали",
-    "актуально",
-    "цікаво",
-    "интересно",
-    "питань нема",
-    "питань немає",
-    "нема питань",
-    "немає питань",
-    "все зрозуміло",
-    "усе зрозуміло",
-    "все ясно",
-    "усе ясно",
-]
-
 
 def track_sent_message(peer_id: int, message_id: int) -> None:
     if not peer_id or not message_id:
@@ -436,104 +350,43 @@ def is_tracked_message(peer_id: int, message_id: int) -> bool:
 
 
 def is_stop_phrase(text: str) -> bool:
-    t = normalize_text(text)
-    if not t:
-        return False
-    if message_has_question(text):
-        return False
-    if any(
-        phrase in t
-        for phrase in (
-            "питань нема",
-            "питань немає",
-            "все зрозуміло",
-            "усе зрозуміло",
-            "все ясно",
-            "усе ясно",
-            "зрозуміло",
-            "зрозуміло, дякую",
-            "ок, зрозуміло",
-            "ок зрозуміло",
-            "ок",
-        )
-    ):
-        return False
-    return any(phrase in t for phrase in STOP_PHRASES)
+    return is_stop_phrase_impl(text)
 
 
 def is_continue_phrase(text: str) -> bool:
-    t = normalize_text(text)
-    if not t:
-        return False
-    if message_has_question(text):
-        return True
-    if re.search(r"пит\w*\s+н\w*ма", t):
-        return True
-    return any(phrase in t for phrase in CONTINUE_PHRASES)
+    return is_continue_phrase_impl(text)
 
 
 def is_neutral_ack(text: str) -> bool:
-    t = normalize_text(text)
-    if not t:
-        return False
-    # Tolerate typos like "питагь нема", "питань нема", "питань нэма".
-    if re.search(r"пит\w*\s+н\w*ма", t):
-        return True
-    return any(
-        phrase in t
-        for phrase in (
-            "питань нема",
-            "питань немає",
-            "нема питань",
-            "немає питань",
-            "все зрозуміло",
-            "усе зрозуміло",
-            "все ясно",
-            "усе ясно",
-            "зрозуміло",
-            "зрозуміло, дякую",
-            "ок, зрозуміло",
-            "ок зрозуміло",
-            "ок",
-        )
-    )
+    return is_neutral_ack_impl(text)
 
 
 async def should_auto_pause(history: list, text: str) -> bool:
-    if is_continue_phrase(text):
-        return False
-    if is_stop_phrase(text):
-        return True
-    if not DIALOG_STOP_URL:
-        return False
-    payload = {"history": history, "last_message": text}
-    try:
-        data = await asyncio.to_thread(_post_json, DIALOG_STOP_URL, payload, DIALOG_STOP_TIMEOUT_SEC)
-    except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError) as err:
-        print(f"⚠️ AI stop check error: {err}")
-        return False
-    if not data or not data.get("ok"):
-        return False
-    return bool(data.get("stop"))
+    async def _ai_client(hist: list, last_text: str) -> Optional[bool]:
+        if not DIALOG_STOP_URL:
+            return None
+        payload = {"history": hist, "last_message": last_text}
+        try:
+            data = await asyncio.to_thread(_post_json, DIALOG_STOP_URL, payload, DIALOG_STOP_TIMEOUT_SEC)
+        except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError) as err:
+            print(f"⚠️ AI stop check error: {err}")
+            return None
+        if not data or not data.get("ok"):
+            return None
+        return bool(data.get("stop"))
+
+    decision = await classify_stop_continue(text, history, ai_client=_ai_client)
+    return decision == Decision.STOP
 
 
 def should_send_question(sent_text: str, question_text: str) -> bool:
-    if not sent_text:
-        return True
-    sent_norm = normalize_text(sent_text)
-    question_norm = normalize_text(question_text)
-    if question_norm in sent_norm:
-        return False
-    if question_text == CLARIFY_TEXT:
-        if "чи все зрозуміло" in sent_norm or "можливо" in sent_norm:
-            return False
-    if question_text == SHIFT_QUESTION_TEXT:
-        if "зміна" in sent_norm and "зруч" in sent_norm:
-            return False
-    if question_text == FORMAT_QUESTION_TEXT:
-        if "формат" in sent_norm and "зруч" in sent_norm:
-            return False
-    return True
+    return should_send_question_impl(
+        sent_text,
+        question_text,
+        CLARIFY_TEXT,
+        SHIFT_QUESTION_TEXT,
+        FORMAT_QUESTION_TEXT,
+    )
 
 
 def is_test_restart(sender: User, text: str) -> bool:
@@ -585,96 +438,28 @@ def normalize_phone(text: str) -> str:
 
 
 def within_followup_window(dt: datetime) -> bool:
-    return FOLLOWUP_WINDOW_START_HOUR <= dt.hour < FOLLOWUP_WINDOW_END_HOUR
+    return within_followup_window_impl(dt, FOLLOWUP_WINDOW_START_HOUR, FOLLOWUP_WINDOW_END_HOUR)
 
 
 def adjust_to_followup_window(dt: datetime) -> datetime:
-    if within_followup_window(dt):
-        return dt
-    if dt.hour < FOLLOWUP_WINDOW_START_HOUR:
-        return dt.replace(
-            hour=FOLLOWUP_WINDOW_START_HOUR,
-            minute=0,
-            second=0,
-            microsecond=0,
-        )
-    next_day = (dt + timedelta(days=1)).replace(
-        hour=FOLLOWUP_WINDOW_START_HOUR,
-        minute=0,
-        second=0,
-        microsecond=0,
-    )
-    return next_day
+    return adjust_to_followup_window_impl(dt, FOLLOWUP_WINDOW_START_HOUR, FOLLOWUP_WINDOW_END_HOUR)
 
 
-class FollowupState:
+class FollowupState(FollowupStateStore):
     def __init__(self, path: str):
-        self.path = path
-        self.data = {}
-        self._load()
-
-    def _load(self):
-        if not os.path.exists(self.path):
-            return
-        try:
-            with open(self.path, "r") as f:
-                raw = json.load(f)
-            if isinstance(raw, dict):
-                self.data = raw
-        except Exception:
-            self.data = {}
-
-    def _save(self):
-        try:
-            with open(self.path, "w") as f:
-                json.dump(self.data, f, ensure_ascii=True)
-        except Exception:
-            pass
-
-    def get(self, peer_id: int) -> dict:
-        return self.data.get(str(peer_id), {})
-
-    def clear(self, peer_id: int):
-        key = str(peer_id)
-        if key in self.data:
-            del self.data[key]
-            self._save()
+        super().__init__(
+            path=path,
+            templates=FOLLOWUP_TEMPLATES,
+            start_hour=FOLLOWUP_WINDOW_START_HOUR,
+            end_hour=FOLLOWUP_WINDOW_END_HOUR,
+            test_user_id=TEST_USER_ID,
+        )
 
     def schedule_from_now(self, peer_id: int, tz: ZoneInfo):
-        if not FOLLOWUP_TEMPLATES:
-            return
-        if str(peer_id) == TEST_USER_ID:
-            return
-        delay_sec, _ = FOLLOWUP_TEMPLATES[0]
-        target = datetime.now(tz) + timedelta(seconds=delay_sec)
-        target = adjust_to_followup_window(target)
-        self.data[str(peer_id)] = {
-            "stage": 0,
-            "next_at": target.timestamp(),
-            "last_sent_at": None,
-        }
-        self._save()
+        super().schedule_from_now(peer_id, datetime.now(tz))
 
     def mark_sent_and_advance(self, peer_id: int, tz: ZoneInfo):
-        key = str(peer_id)
-        state = self.data.get(key)
-        if not state:
-            return None, None
-        stage = int(state.get("stage", 0))
-        now = datetime.now(tz)
-        state["last_sent_at"] = now.timestamp()
-        next_stage = stage + 1
-        if next_stage >= len(FOLLOWUP_TEMPLATES):
-            del self.data[key]
-            self._save()
-            return None, None
-        delay_sec, _ = FOLLOWUP_TEMPLATES[next_stage]
-        target = adjust_to_followup_window(now + timedelta(seconds=delay_sec))
-        state["stage"] = next_stage
-        state["next_at"] = target.timestamp()
-        self.data[key] = state
-        self._save()
-        return next_stage, target
+        return super().mark_sent_and_advance(peer_id, datetime.now(tz))
 
 
 def parse_group_message(text: str) -> dict:
@@ -1098,74 +883,12 @@ class SheetWriter:
         return enabled
 
 
-class LocalPauseStore:
+class LocalPauseStore(LocalPauseStoreStore):
     def __init__(self, path: str):
-        self.path = path
-        self.data = {}
-        self._load()
-
-    def _load(self):
-        if not os.path.exists(self.path):
-            self.data = {}
-            return
-        try:
-            with open(self.path, "r") as f:
-                raw = json.load(f)
-            self.data = raw if isinstance(raw, dict) else {}
-        except Exception:
-            self.data = {}
-
-    def _save(self):
-        try:
-            with open(self.path, "w") as f:
-                json.dump(self.data, f, ensure_ascii=True)
-        except Exception:
-            pass
-
-    def get_status(self, peer_id: int, username: Optional[str]) -> Optional[str]:
-        key = str(peer_id)
-        status = self.data.get("by_peer_id", {}).get(key)
-        if status:
-            return status
-        uname = normalize_username(username)
-        if not uname:
-            return None
-        return self.data.get("by_username", {}).get(uname)
-
-    def set_status(
-        self,
-        peer_id: int,
-        username: Optional[str],
-        name: Optional[str],
-        chat_link: Optional[str],
-        status: str,
-        updated_by: str = "manual",
-    ):
-        del name, chat_link
-        by_peer = self.data.setdefault("by_peer_id", {})
-        by_user = self.data.setdefault("by_username", {})
-        meta = self.data.setdefault("meta", {})
-        by_peer[str(peer_id)] = status
-        uname = normalize_username(username)
-        if uname:
-            by_user[uname] = status
-        meta[str(peer_id)] = {
-            "updated_at": datetime.now(ZoneInfo(TIMEZONE)).isoformat(timespec="seconds"),
-            "updated_by": updated_by,
-        }
-        self._save()
-
-    def active_peer_ids(self) -> set:
-        by_peer = self.data.get("by_peer_id", {})
-        result = set()
-        for key, status in by_peer.items():
-            if status != "ACTIVE":
-                continue
-            try:
-                result.add(int(key))
-            except Exception:
-                continue
-        return result
+        super().__init__(
+            path,
+            now_factory=lambda: datetime.now(ZoneInfo(TIMEZONE)),
+        )
 
 
 class GroupLeadsSheet:
@@ -1325,22 +1048,43 @@ async def send_and_update(
     auto_reply_enabled: Optional[bool] = None,
     followup_state: Optional["FollowupState"] = None,
 ):
-    message_text = text
+    history = []
     if use_ai:
         history = await build_ai_history(client, entity, limit=10)
-        ai_text = await dialog_suggest(history, draft or text, no_questions=no_questions)
-        if ai_text:
-            message_text = ai_text
-    if no_questions:
-        message_text = strip_question_trail(message_text)
     if PAUSE_CHECKER and PAUSE_CHECKER(entity):
-        return message_text
+        return text
     effective_delay = BOT_REPLY_DELAY_SEC if delay_before is None else delay_before
     if effective_delay and effective_delay > 0:
         await asyncio.sleep(effective_delay)
     if PAUSE_CHECKER and PAUSE_CHECKER(entity):
-        return message_text
-    sent_message = await client.send_message(entity, message_text)
+        return text
+
+    async def _ai_suggest(base_text: str) -> Optional[str]:
+        if not use_ai:
+            return None
+        return await dialog_suggest(history, draft or base_text, no_questions=no_questions)
+
+    sent_payload = {}
+
+    async def _sender(message_text: str):
+        sent_message = await client.send_message(entity, message_text)
+        sent_payload["message"] = sent_message
+
+    result = await send_message_with_fallback(
+        text,
+        ai_enabled=use_ai,
+        no_questions=no_questions,
+        ai_suggest=_ai_suggest,
+        strip_question_trail=strip_question_trail,
+        send=_sender,
+    )
+    message_text = result.text_used
+    if not result.success:
+        print(f"⚠️ Send error peer={entity.id} step={step_name or '-'} err={result.error}")
+        return text
+    sent_message = sent_payload.get("message")
+    if not sent_message:
+        return text
     try:
         track_sent_message(entity.id, sent_message.id)
     except Exception:
@@ -1403,21 +1147,11 @@ async def send_and_update(
 
 
 def wants_video(text: str) -> bool:
-    t = normalize_text(text)
-    return any(word in t for word in VIDEO_WORDS)
+    return wants_video_impl(text)
 
 
 def fallback_format_choice(text: str) -> str:
-    t = normalize_text(text)
-    has_video = any(word in t for word in FORMAT_VIDEO_WORDS)
-    has_mini = any(word in t for word in FORMAT_MINI_COURSE_WORDS)
-    if has_video and has_mini:
-        return "both"
-    if has_video:
-        return "video"
-    if has_mini:
-        return "mini_course"
-    return "unknown"
+    return fallback_format_choice_impl(text)
 
 
 def parse_message_link(link: str) -> Optional[Tuple[object, int]]:
@@ -1529,27 +1263,20 @@ async def dialog_suggest(history: list, draft: str, no_questions: bool = False) 
 
 
 async def detect_format_choice(history: list, text: str) -> str:
-    fallback = fallback_format_choice(text)
-    # Deterministic priority for explicit keywords from candidate message.
-    if fallback in {"video", "mini_course", "both"}:
-        return fallback
-    # Avoid AI over-trigger on short acknowledgements without explicit format words.
-    if fallback == "unknown" and (is_neutral_ack(text) or is_continue_phrase(text)):
-        return "unknown"
-    if not DIALOG_FORMAT_URL:
-        return fallback
-    payload = {"history": history, "last_message": text}
-    try:
-        data = await asyncio.to_thread(_post_json, DIALOG_FORMAT_URL, payload, DIALOG_FORMAT_TIMEOUT_SEC)
-    except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError) as err:
-        print(f"⚠️ AI format error: {err}")
-        return fallback
-    if not data or not data.get("ok"):
-        return fallback
-    choice = (data.get("choice") or "").strip().lower()
-    if choice in {"video", "mini_course", "both"}:
-        return choice
-    return fallback
+    async def _ai_client(hist: list, last_text: str) -> str:
+        if not DIALOG_FORMAT_URL:
+            return "unknown"
+        payload = {"history": hist, "last_message": last_text}
+        try:
+            data = await asyncio.to_thread(_post_json, DIALOG_FORMAT_URL, payload, DIALOG_FORMAT_TIMEOUT_SEC)
+        except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError) as err:
+            print(f"⚠️ AI format error: {err}")
+            return "unknown"
+        if not data or not data.get("ok"):
+            return "unknown"
+        return (data.get("choice") or "").strip().lower()
+
+    return await classify_format_choice(text, history, ai_client=_ai_client)
 
 
 async def build_ai_history(client: TelegramClient, entity: User, limit: int = 10) -> list:
@@ -1566,47 +1293,9 @@ async def build_ai_history(client: TelegramClient, entity: User, limit: int = 10
     return list(reversed(items))
 
 
-class StepState:
+class StepState(StepStateStore):
     def __init__(self, path: str):
-        self.path = path
-        self.data = {}
-        self._load()
-
-    def _load(self):
-        if not os.path.exists(self.path):
-            return
-        try:
-            with open(self.path, "r") as f:
-                raw = json.load(f)
-            if isinstance(raw, dict):
-                self.data = raw
-        except Exception:
-            self.data = {}
-
-    def _save(self):
-        try:
-            with open(self.path, "w") as f:
-                json.dump(self.data, f, ensure_ascii=True)
-        except Exception:
-            pass
-
-    def get(self, peer_id: int) -> Optional[str]:
-        return self.data.get(str(peer_id))
-
-    def set(self, peer_id: int, step: str):
-        key = str(peer_id)
-        existing = self.data.get(key)
-        if existing:
-            if STEP_ORDER.get(step, -1) < STEP_ORDER.get(existing, -1):
-                return
-        self.data[key] = step
-        self._save()
-
-    def delete(self, peer_id: int):
-        key = str(peer_id)
-        if key in self.data:
-            del self.data[key]
-            self._save()
+        super().__init__(path, STEP_ORDER)
 
 
 def status_for_text(text: str) -> Optional[str]:
@@ -1907,7 +1596,10 @@ async def main():
     async def continue_flow(entity: User, last_step: str, text: str):
         if is_paused(entity):
             return
-        if last_step == STEP_CONTACT:
+        flow_actions = advance_flow(last_step, text, FlowContext(is_question=message_has_question))
+        route = flow_actions.route
+
+        if route == "contact_chain":
             await send_and_update(
                 client,
                 sheet,
@@ -1977,7 +1669,7 @@ async def main():
             last_reply_at[entity.id] = time.time()
             return
 
-        if last_step == STEP_CLARIFY:
+        if route == "clarify_chain":
             shifts_text = await send_and_update(
                 client,
                 sheet,
@@ -2008,7 +1700,7 @@ async def main():
             last_reply_at[entity.id] = time.time()
             return
 
-        if last_step == STEP_SHIFT_QUESTION:
+        if route == "shift_question_chain":
             format_text = await send_and_update(
                 client,
                 sheet,
@@ -2050,7 +1742,7 @@ async def main():
             last_reply_at[entity.id] = time.time()
             return
 
-        if last_step == STEP_FORMAT_QUESTION:
+        if route == "format_choice":
             history = await build_ai_history(client, entity, limit=10)
             choice = await detect_format_choice(history, text)
             result = await handle_format_choice(entity, choice)
@@ -2074,7 +1766,7 @@ async def main():
                 return
             return
 
-        if last_step == STEP_VIDEO_FOLLOWUP:
+        if route == "video_followup_chain":
             training_text = await send_and_update(
                 client,
                 sheet,
@@ -2116,7 +1808,7 @@ async def main():
             last_reply_at[entity.id] = time.time()
             return
 
-        if last_step == STEP_TRAINING_QUESTION:
+        if route == "training_question_chain":
             await send_and_update(
                 client,
                 sheet,
