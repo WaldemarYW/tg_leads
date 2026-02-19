@@ -2313,44 +2313,21 @@ async def main():
             return
 
         if route == "video_followup_chain":
-            training_text = await send_and_update(
+            training_combined_text = f"{TRAINING_TEXT}\n\n{TRAINING_QUESTION_TEXT}"
+            await send_and_update(
                 client,
                 sheet,
                 tz,
                 entity,
-                TRAINING_TEXT,
-                status_for_text(TRAINING_TEXT),
+                training_combined_text,
+                status_for_text(TRAINING_QUESTION_TEXT) or status_for_text(TRAINING_TEXT),
                 use_ai=True,
-                no_questions=True,
-                draft=TRAINING_TEXT,
+                no_questions=False,
+                draft=training_combined_text,
                 step_state=step_state,
-                step_name=STEP_TRAINING,
+                step_name=STEP_TRAINING_QUESTION,
                 followup_state=followup_state,
             )
-            if should_send_question(training_text, TRAINING_QUESTION_TEXT):
-                await send_and_update(
-                    client,
-                    sheet,
-                    tz,
-                    entity,
-                    TRAINING_QUESTION_TEXT,
-                    status_for_text(TRAINING_QUESTION_TEXT),
-                    use_ai=True,
-                    draft=TRAINING_QUESTION_TEXT,
-                    delay_before=QUESTION_GAP_SEC,
-                    step_state=step_state,
-                    step_name=STEP_TRAINING_QUESTION,
-                    followup_state=followup_state,
-                )
-            else:
-                mark_step_without_send(
-                    sheet,
-                    tz,
-                    entity,
-                    status_for_text(TRAINING_QUESTION_TEXT),
-                    step_state,
-                    STEP_TRAINING_QUESTION,
-                )
             last_reply_at[entity.id] = time.time()
             return
 
