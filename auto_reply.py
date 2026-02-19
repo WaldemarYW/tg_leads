@@ -1278,19 +1278,6 @@ def detect_step_from_text(message_text: str) -> Optional[str]:
     return best_step
 
 
-def detect_message_intent_step(text: str) -> Optional[str]:
-    t = normalize_text(text)
-    if not t:
-        return None
-    if any(word in t for word in FORMAT_VIDEO_WORDS) or any(word in t for word in FORMAT_MINI_COURSE_WORDS):
-        return STEP_FORMAT_QUESTION
-    if re.search(r"\b(денна|днев|ніч|ноч|зміна|смена)\b", t):
-        return STEP_SHIFT_QUESTION
-    if re.search(r"\b(готов|ready|готовий|готова)\b", t):
-        return STEP_TRAINING_QUESTION
-    return None
-
-
 async def get_last_step(client: TelegramClient, entity: User, step_state: "StepState") -> Optional[str]:
     cached = step_state.get(entity.id)
     if cached:
@@ -1631,7 +1618,6 @@ async def main():
     last_incoming_at = {}
     pending_question_resume = {}
     skip_stop_check_once = set()
-    manual_step_hints = {}
     clarify_variant_state = {}
     format_delivery_state = {}
     step_state = StepState(STEP_STATE_PATH)
@@ -1721,14 +1707,16 @@ async def main():
     if not video_message:
         print("⚠️ Не знайшов відео у групі для пересилання")
 
-    async def recover_step_after_start(entity: User, peer_id: int) -> Tuple[str, str]:
-        manual_step = manual_step_hints.get(peer_id)
-        if manual_step:
-            return manual_step, "manual"
+    async def reconcile_dialog_step(entity: User, use_cache: bool = True) -> Tuple[Optional[str], str]:
+        if use_cache:
+            cached = step_state.get(entity.id)
+            if cached:
+                return cached, "state"
         history_step = await get_last_outgoing_step(client, entity)
         if history_step:
+            step_state.set(entity.id, history_step)
             return history_step, "history"
-        return STEP_SHIFT_QUESTION, "fallback"
+        return None, "none"
 
     async def send_ai_response(
         entity: User,
@@ -2160,7 +2148,6 @@ async def main():
             if text_lower in STOP_COMMANDS:
                 paused_peers.add(peer_id)
                 enabled_peers.discard(peer_id)
-                manual_step_hints.pop(peer_id, None)
             else:
                 paused_peers.discard(peer_id)
                 enabled_peers.add(peer_id)
@@ -2168,7 +2155,6 @@ async def main():
         else:
             manual_step = detect_step_from_text(text)
             if manual_step:
-                manual_step_hints[peer_id] = manual_step
                 step_state.set(peer_id, manual_step)
             paused_peers.add(peer_id)
             enabled_peers.discard(peer_id)
@@ -2183,15 +2169,13 @@ async def main():
             status = "PAUSED" if text_lower in STOP_COMMANDS or text_lower not in START_COMMANDS else "ACTIVE"
             pause_store.set_status(entity.id, username, name, chat_link, status, updated_by="manual")
             if text_lower in START_COMMANDS:
-                recovered_step, recover_source = await recover_step_after_start(entity, entity.id)
-                existing_step = step_state.get(entity.id)
-                if existing_step and STEP_ORDER.get(existing_step, -1) > STEP_ORDER.get(recovered_step, -1):
-                    recovered_step = existing_step
-                    recover_source = "state"
-                step_state.set(entity.id, recovered_step)
-                print(f"START1_RECOVER peer={entity.id} source={recover_source} step={recovered_step}")
-                if recover_source == "fallback":
+                reconciled_step, recover_source = await reconcile_dialog_step(entity, use_cache=False)
+                if not reconciled_step:
+                    reconciled_step = STEP_SHIFT_QUESTION
+                    recover_source = "fallback"
+                    step_state.set(entity.id, reconciled_step)
                     print(f"MISSING_STEP_FALLBACK peer={entity.id} chosen={STEP_SHIFT_QUESTION}")
+                print(f"START1_RECOVER peer={entity.id} source={recover_source} step={reconciled_step}")
             sheet.upsert(
                 tz=tz,
                 peer_id=entity.id,
@@ -2371,52 +2355,45 @@ async def main():
 
             last_step = await get_last_step(client, sender, step_state)
             if not last_step:
-                fallback_step = STEP_SHIFT_QUESTION
-                print(f"MISSING_STEP_FALLBACK peer={peer_id} chosen={fallback_step}")
-                step_state.set(peer_id, fallback_step)
-                sheet.upsert(
-                    tz=tz,
-                    peer_id=sender.id,
-                    name=name,
-                    username=username,
-                    chat_link=chat_link,
-                    tech_step=fallback_step,
-                )
-                inferred_step = detect_message_intent_step(text)
-                if inferred_step == STEP_SHIFT_QUESTION:
-                    await continue_flow(sender, fallback_step, text)
+                reconciled_step, reconcile_source = await reconcile_dialog_step(sender, use_cache=False)
+                if reconciled_step:
+                    last_step = reconciled_step
+                    print(f"START1_RECOVER peer={peer_id} source={reconcile_source} step={last_step}")
+                    sheet.upsert(
+                        tz=tz,
+                        peer_id=sender.id,
+                        name=name,
+                        username=username,
+                        chat_link=chat_link,
+                        tech_step=last_step,
+                    )
+                else:
+                    fallback_step = STEP_SHIFT_QUESTION
+                    print(f"MISSING_STEP_FALLBACK peer={peer_id} chosen={fallback_step}")
+                    step_state.set(peer_id, fallback_step)
+                    sheet.upsert(
+                        tz=tz,
+                        peer_id=sender.id,
+                        name=name,
+                        username=username,
+                        chat_link=chat_link,
+                        tech_step=fallback_step,
+                    )
+                    await send_and_update(
+                        client,
+                        sheet,
+                        tz,
+                        sender,
+                        MISSING_STEP_RECOVERY_TEXT,
+                        status_for_text(SHIFT_QUESTION_TEXT),
+                        use_ai=False,
+                        draft=MISSING_STEP_RECOVERY_TEXT,
+                        step_state=step_state,
+                        step_name=fallback_step,
+                        followup_state=followup_state,
+                    )
+                    last_reply_at[peer_id] = time.time()
                     return
-                await send_and_update(
-                    client,
-                    sheet,
-                    tz,
-                    sender,
-                    MISSING_STEP_RECOVERY_TEXT,
-                    status_for_text(SHIFT_QUESTION_TEXT),
-                    use_ai=False,
-                    draft=MISSING_STEP_RECOVERY_TEXT,
-                    step_state=step_state,
-                    step_name=fallback_step,
-                    followup_state=followup_state,
-                )
-                last_reply_at[peer_id] = time.time()
-                return
-
-            inferred_step = detect_message_intent_step(text)
-            current_order = STEP_ORDER.get(last_step, -1)
-            inferred_order = STEP_ORDER.get(inferred_step, -1) if inferred_step else -1
-            if inferred_step and inferred_order == current_order + 1:
-                print(f"STEP_JUMP peer={peer_id} from={last_step} to={inferred_step} reason=message_intent")
-                step_state.set(peer_id, inferred_step)
-                last_step = inferred_step
-                sheet.upsert(
-                    tz=tz,
-                    peer_id=sender.id,
-                    name=name,
-                    username=username,
-                    chat_link=chat_link,
-                    tech_step=last_step,
-                )
 
             if last_step == STEP_FORM:
                 if message_has_question(text):
