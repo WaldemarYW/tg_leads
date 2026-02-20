@@ -1,0 +1,20 @@
+version: v2
+steps:
+  screening_intro:
+    require_qa_clearance: true
+    qa_allow_auto_advance: false
+  company_intro:
+    require_qa_clearance: true
+    qa_allow_auto_advance: false
+  schedule_block:
+    require_qa_clearance: true
+    qa_allow_auto_advance: false
+  proof_forward:
+    require_qa_clearance: true
+    qa_allow_auto_advance: false
+  test_review:
+    require_qa_clearance: true
+    qa_allow_auto_advance: false
+  form_forward:
+    require_qa_clearance: true
+    qa_allow_auto_advance: false

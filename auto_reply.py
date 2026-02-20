@@ -92,6 +92,29 @@ from registration_ingest import (
     parse_registration_message,
 )
 from sheets_queue import SheetsQueueStore, calculate_backoff_sec
+from flow_engine import (
+    PeerRuntimeState,
+    STEP_AGE_REJECTED,
+    STEP_COMPANY_INTRO,
+    STEP_FORM_FORWARD,
+    STEP_HANDOFF,
+    STEP_PROOF_FORWARD,
+    STEP_SCHEDULE_BLOCK,
+    STEP_SCHEDULE_CONFIRM,
+    STEP_SCREENING_WAIT,
+    STEP_TEST_REVIEW,
+    STEP_VOICE_WAIT,
+    VOICE_AUTO_ADVANCED,
+    VOICE_FALLBACK_SENT,
+    VOICE_SENT,
+    advance_flow as advance_flow_v2,
+)
+from intent_router import detect_intent as detect_intent_v2
+from faq_service import answer_from_faq, build_cluster_key, normalize_question
+from content_dispatcher import dispatch_content, validate_content_env
+from candidate_notes import append_candidate_answers, format_note_entry
+from faq_learning import build_question_log
+from v2_state import V2EnrollmentStore, V2RuntimeStore
 
 load_dotenv("/opt/tg_leads/.env")
 
@@ -116,6 +139,7 @@ BOT_REPLY_DELAY_SEC = float(os.environ.get("BOT_REPLY_DELAY_SEC", "5"))
 QUESTION_GAP_SEC = float(os.environ.get("QUESTION_GAP_SEC", "5"))
 QUESTION_RESPONSE_DELAY_SEC = float(os.environ.get("QUESTION_RESPONSE_DELAY_SEC", "10"))
 QUESTION_RESUME_DELAY_SEC = float(os.environ.get("QUESTION_RESUME_DELAY_SEC", "300"))
+QA_GATE_REMINDER_DELAY_SEC = float(os.environ.get("QA_GATE_REMINDER_DELAY_SEC", "300"))
 TRAINING_TO_FORM_DELAY_SEC = float(os.environ.get("TRAINING_TO_FORM_DELAY_SEC", "30"))
 SENT_MESSAGE_CACHE_LIMIT = int(os.environ.get("SENT_MESSAGE_CACHE_LIMIT", "200"))
 JOURNAL_MAX_LINES_PER_CHAT = int(os.environ.get("JOURNAL_MAX_LINES_PER_CHAT", "500"))
@@ -137,6 +161,7 @@ TODAY_HEADERS = [
     "Username",
     "Возраст",
     "Наличие ПК/ноутбука",
+    "Відповіді кандидата",
     "Ссылка на чат",
     "Ссылка на заявку",
     "Ссылка на журнал",
@@ -192,6 +217,18 @@ SHEETS_QUEUE_FLUSH_SEC = float(os.environ.get("AUTO_REPLY_SHEETS_QUEUE_FLUSH_SEC
 SHEETS_QUEUE_BATCH_SIZE = int(os.environ.get("AUTO_REPLY_SHEETS_QUEUE_BATCH_SIZE", "20"))
 SHEETS_QUEUE_LOG_SEC = int(os.environ.get("AUTO_REPLY_SHEETS_QUEUE_LOG_SEC", "30"))
 CONTINUE_DELAY_SEC = float(os.environ.get("AUTO_REPLY_CONTINUE_DELAY_SEC", "0"))
+FLOW_V2_ENABLED = os.environ.get("FLOW_V2_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+V2_ENROLLMENT_PATH = os.environ.get("AUTO_REPLY_V2_ENROLLMENT_PATH", "/opt/tg_leads/.auto_reply.v2_enrolled.json")
+V2_RUNTIME_PATH = os.environ.get("AUTO_REPLY_V2_RUNTIME_PATH", "/opt/tg_leads/.auto_reply.v2_runtime.json")
+VOICE_MESSAGE_LINK = os.environ.get("VOICE_MESSAGE_LINK", "").strip()
+PHOTO_1_MESSAGE_LINK = os.environ.get("PHOTO_1_MESSAGE_LINK", "").strip()
+PHOTO_2_MESSAGE_LINK = os.environ.get("PHOTO_2_MESSAGE_LINK", "").strip()
+TEST_TASK_MESSAGE_LINK = os.environ.get("TEST_TASK_MESSAGE_LINK", "").strip()
+FORM_MESSAGE_LINK = os.environ.get("FORM_MESSAGE_LINK", "").strip()
+VOICE_FALLBACK_DELAY_SEC = float(os.environ.get("VOICE_FALLBACK_DELAY_SEC", "300"))
+VOICE_AUTO_CONTINUE_DELAY_SEC = float(os.environ.get("VOICE_AUTO_CONTINUE_DELAY_SEC", "600"))
+FAQ_QUESTIONS_WORKSHEET = os.environ.get("FAQ_QUESTIONS_WORKSHEET", "FAQ_Questions")
+FAQ_SUGGESTIONS_WORKSHEET = os.environ.get("FAQ_SUGGESTIONS_WORKSHEET", "FAQ_Suggestions")
 CONFIRM_STATUS = "✅ Погодився"
 REFERRAL_STATUS = "🎁 Реферал"
 IMMUTABLE_STATUSES = {CONFIRM_STATUS, REFERRAL_STATUS}
@@ -218,6 +255,59 @@ CLARIFY_NEGATIVE_FOLLOWUP_TEXT = (
     "Розумію 🙌\n"
     "Підкажіть, будь ласка, що саме залишилось незрозумілим?\n"
     "Я коротко поясню."
+)
+QA_GATE_CONFIRM_TEXT = "Чи залишилися ще питання? Якщо все зрозуміло — можемо йти далі 🙂"
+QA_GATE_REMINDER_TEXT = "Якщо зʼявилися ще питання — із радістю відповім. Коли будете готові, підемо далі 🙂"
+VOICE_FALLBACK_TEXT = "Якщо зʼявилися питання по голосовому — із радістю поясню. Коли будете готові, підемо далі 🙂"
+V2_GATE_CONFIRM_TEXT = "Чи залишилися ще питання? Якщо все зрозуміло — можемо йти далі 🙂"
+V2_GATE_REMINDER_TEXT = "Якщо зʼявилися ще питання — із радістю відповім. Коли будете готові, підемо далі 🙂"
+SCREENING_INTRO_TEXT = (
+    "Привіт) Ви залишали відгук на вакансію менеджера чату. "
+    "Зараз я розповім детальніше про вакансію, але спершу дайте, будь ласка, відповіді на кілька запитань:\n\n"
+    "Чи є у Вас зараз якась зайнятість? (навчання / робота / декретна відпустка)\n"
+    "Чи мали Ви раніше справу зі сферою дейтингу? (чули про неї або працювали)\n"
+    "Скільки Вам років?\n"
+    "Ваші відповіді потрібні, щоб я розумів, наскільки детально варто розповідати про вакансію 🙂."
+)
+AGE_UNDER18_TEXT = (
+    "На жаль, на цьому етапі ми не можемо продовжити оформлення, оскільки компанія розглядає кандидатів лише з 18 років. "
+    "Це пов’язано з внутрішніми правилами, юридичними вимогами та особливостями роботи на міжнародних платформах."
+)
+AGE_OVER40_TEXT = (
+    "Дякую Вам за відповіді 🙂 На жаль, на цьому етапі ми не зможемо продовжити співпрацю, "
+    "оскільки за внутрішніми критеріями проєкту ми розглядаємо кандидатів у межах іншого вікового діапазону.\n"
+    "Дякую за інтерес до вакансії та бажаю Вам успіхів у пошуку роботи!"
+)
+REFERRAL_AFTER_REJECT_TEXT = (
+    "Також хочу повідомити, що в нашій компанії діє реферальна програма 💰\n"
+    "Ви можете отримати 100 $ бонусу за кожного запрошеного друга,\n"
+    "який:\n"
+    "- раніше не працював у нашій компанії;\n"
+    "- після старту відпрацює щонайменше 14 днів;\n"
+    "- за перші 30 днів заробить мінімум 200 $ балансу.\n\n"
+    "Якщо серед ваших знайомих є люди,\n"
+    "яким може бути цікава така робота — сміливо рекомендуйте 🙂"
+)
+COMPANY_INTRO_TEXT = (
+    "Дякую за відповіді)\n"
+    "Наша компанія Furioza Company працює в сфері дейтингу з 2014 року. "
+    "Робота повністю віддалена в повну зайнятість (8-годинний робочий графік), тільки через ПК або ноутбук.\n\n"
+    "В обов'язки чат-менеджера входить комунікація з клієнтами в режимі онлайн чату, "
+    "відповіді на листи, створення інвайтів та просування анкети, без дзвінків та відеодзвінків.\n\n"
+    "Вам буде зручно прослухати голосове повідомлення, щоб я детальніше розповіла всі умови роботи?"
+)
+SCHEDULE_BLOCK_TEXT = (
+    "Ми пропонує 2 зміни на вибір — ви обираєте одну і працюєте за цим графіком на постійній основі:\n"
+    "- Денна 14:00–23:00\n"
+    "- Нічна 23:00–08:00\n"
+    "На кожній зміні передбачено:\n"
+    "- 1 година основної перерви\n"
+    "- Короткі міні-перерви по 5 хвилин\n"
+    "Щодо вихідних: у вас є 8 вихідних днів на місяць, брати їх можна коли зручно, будні це дні чи вихідні - не важливо)\n\n"
+    "Робота на сайті відбувається одночасно на декількох анкет.\n"
+    "Ви працюєте у парі з напарниками: Ви — 8 годин у своїй зміні, а 2 напарника — у своїй.\n"
+    "Щоб мати уявлення, як виглядає інтерфейс сайту і що на тебе чекає — переглянь навчальний сайт: https://alpha-mini.pp.ua/\n\n"
+    "Чи зрозумілий вам графік і як рахується робочий час? Можемо йти далі? 😊"
 )
 
 FOLLOWUP_TEMPLATES = [
@@ -324,6 +414,28 @@ REGISTRATION_HEADERS = [
     "Группа-источник",
     "ID сообщения",
     "Получено",
+]
+
+FAQ_QUESTIONS_HEADERS = [
+    "created_at",
+    "peer_id",
+    "step",
+    "question_raw",
+    "question_norm",
+    "cluster_key",
+    "count",
+    "last_seen_at",
+    "answer_preview",
+    "resolved_status",
+]
+
+FAQ_SUGGESTIONS_HEADERS = [
+    "question_cluster",
+    "suggested_answer",
+    "source_examples",
+    "review_status",
+    "reviewed_at",
+    "reviewed_by",
 ]
 
 GROUP_KEY_MAP = {
@@ -1101,6 +1213,7 @@ class SheetWriter:
         followup_stage: Optional[str] = None,
         followup_next_at: Optional[str] = None,
         followup_last_sent_at: Optional[str] = None,
+        candidate_note_append: Optional[str] = None,
     ):
         del followup_stage, followup_next_at, followup_last_sent_at
         ws = self._ensure_today_ws(tz)
@@ -1156,6 +1269,12 @@ class SheetWriter:
         set_value("Тех. шаг", tech_step or step_snapshot)
         set_value("Обновлено", now_iso)
         set_value("Аккаунт", ACCOUNT_KEY)
+        if candidate_note_append:
+            notes_idx = col_idx("Відповіді кандидата")
+            if notes_idx is not None:
+                current_notes = existing[notes_idx] if notes_idx < len(existing) else ""
+                merged = candidate_note_append if not current_notes else f"{current_notes}\n---\n{candidate_note_append}"
+                existing[notes_idx] = merged
 
         event_type = self._event_type(status, auto_reply_enabled, last_in, last_out, event_type_override)
         history_link = self.append_history_event(
@@ -1419,6 +1538,110 @@ class RegistrationSheet:
         self.ws.update(
             f"A{next_row}:{end_col}{next_row}",
             [row],
+            value_input_option="USER_ENTERED",
+        )
+
+
+class FAQQuestionsSheet:
+    def __init__(self):
+        self.gc = sheets_client(GOOGLE_CREDS)
+        self.sh = self.gc.open(SHEET_NAME)
+        self.ws = get_or_create_worksheet(self.sh, FAQ_QUESTIONS_WORKSHEET, rows=1000, cols=len(FAQ_QUESTIONS_HEADERS))
+        self._ensure_headers()
+
+    def _ensure_headers(self):
+        try:
+            current = self.ws.row_values(1)
+        except Exception:
+            current = []
+        if current[: len(FAQ_QUESTIONS_HEADERS)] != FAQ_QUESTIONS_HEADERS:
+            self.ws.update(
+                range_name=f"A1:{col_letter(len(FAQ_QUESTIONS_HEADERS))}1",
+                values=[FAQ_QUESTIONS_HEADERS],
+                value_input_option="USER_ENTERED",
+            )
+
+    def upsert_question(self, row: dict):
+        values = self.ws.get_all_values()
+        if not values:
+            self._ensure_headers()
+            values = self.ws.get_all_values()
+        headers = [h.strip() for h in values[0]]
+        try:
+            cluster_idx = headers.index("cluster_key")
+            count_idx = headers.index("count")
+            last_seen_idx = headers.index("last_seen_at")
+            answer_idx = headers.index("answer_preview")
+        except ValueError:
+            return
+        target_row = None
+        for idx, existing in enumerate(values[1:], start=2):
+            key = existing[cluster_idx].strip() if cluster_idx < len(existing) else ""
+            if key == row.get("cluster_key", ""):
+                target_row = (idx, existing)
+                break
+        end_col = col_letter(len(FAQ_QUESTIONS_HEADERS))
+        if target_row:
+            row_idx, existing = target_row
+            current_count = 0
+            if count_idx < len(existing):
+                try:
+                    current_count = int(existing[count_idx] or 0)
+                except ValueError:
+                    current_count = 0
+            merged = [row.get(h, "") for h in FAQ_QUESTIONS_HEADERS]
+            merged[count_idx] = str(max(1, current_count + 1))
+            merged[last_seen_idx] = row.get("last_seen_at", row.get("created_at", ""))
+            if answer_idx < len(existing) and existing[answer_idx].strip():
+                merged[answer_idx] = existing[answer_idx]
+            self.ws.update(
+                range_name=f"A{row_idx}:{end_col}{row_idx}",
+                values=[merged],
+                value_input_option="USER_ENTERED",
+            )
+            return
+        next_row = len(values) + 1
+        out = [row.get(h, "") for h in FAQ_QUESTIONS_HEADERS]
+        self.ws.update(
+            range_name=f"A{next_row}:{end_col}{next_row}",
+            values=[out],
+            value_input_option="USER_ENTERED",
+        )
+
+
+class FAQSuggestionsSheet:
+    def __init__(self):
+        self.gc = sheets_client(GOOGLE_CREDS)
+        self.sh = self.gc.open(SHEET_NAME)
+        self.ws = get_or_create_worksheet(self.sh, FAQ_SUGGESTIONS_WORKSHEET, rows=1000, cols=len(FAQ_SUGGESTIONS_HEADERS))
+        self._ensure_headers()
+
+    def _ensure_headers(self):
+        try:
+            current = self.ws.row_values(1)
+        except Exception:
+            current = []
+        if current[: len(FAQ_SUGGESTIONS_HEADERS)] != FAQ_SUGGESTIONS_HEADERS:
+            self.ws.update(
+                range_name=f"A1:{col_letter(len(FAQ_SUGGESTIONS_HEADERS))}1",
+                values=[FAQ_SUGGESTIONS_HEADERS],
+                value_input_option="USER_ENTERED",
+            )
+
+    def append_if_missing(self, row: dict):
+        values = self.ws.get_all_values()
+        key = str(row.get("question_cluster", "")).strip()
+        if not key:
+            return
+        for existing in values[1:]:
+            if existing and existing[0].strip() == key:
+                return
+        next_row = len(values) + 1
+        end_col = col_letter(len(FAQ_SUGGESTIONS_HEADERS))
+        out = [row.get(h, "") for h in FAQ_SUGGESTIONS_HEADERS]
+        self.ws.update(
+            range_name=f"A{next_row}:{end_col}{next_row}",
+            values=[out],
             value_input_option="USER_ENTERED",
         )
 
@@ -1887,6 +2110,25 @@ async def main():
     sheet = SheetWriter()
     pause_store = LocalPauseStore(PAUSED_STATE_PATH)
     group_leads_sheet = GroupLeadsSheet()
+    faq_questions_sheet = None
+    faq_suggestions_sheet = None
+    try:
+        faq_questions_sheet = FAQQuestionsSheet()
+        faq_suggestions_sheet = FAQSuggestionsSheet()
+    except Exception as err:
+        print(f"⚠️ Не вдалося підготувати FAQ-листи: {err}")
+    v2_enrollment = V2EnrollmentStore(V2_ENROLLMENT_PATH)
+    v2_runtime = V2RuntimeStore(V2_RUNTIME_PATH)
+    content_env_map = {
+        "VOICE_MESSAGE_LINK": VOICE_MESSAGE_LINK,
+        "PHOTO_1_MESSAGE_LINK": PHOTO_1_MESSAGE_LINK,
+        "PHOTO_2_MESSAGE_LINK": PHOTO_2_MESSAGE_LINK,
+        "TEST_TASK_MESSAGE_LINK": TEST_TASK_MESSAGE_LINK,
+        "FORM_MESSAGE_LINK": FORM_MESSAGE_LINK,
+    }
+    v2_content_validation = validate_content_env(content_env_map)
+    if v2_content_validation.get("missing"):
+        print(f"⚠️ V2 content env missing: {v2_content_validation.get('missing')}")
     registration_sheet = None
     try:
         registration_sheet = RegistrationSheet()
@@ -1919,6 +2161,7 @@ async def main():
     format_delivery_state = {}
     step_state = StepState(STEP_STATE_PATH)
     followup_state = FollowupState(FOLLOWUP_STATE_PATH)
+    qa_gate_state = {}
     sheets_queue = None
     try:
         sheets_queue = SheetsQueueStore(SHEETS_QUEUE_PATH)
@@ -2081,6 +2324,59 @@ async def main():
         )
         return True
 
+    def set_qa_gate(peer_id: int, step: Optional[str]):
+        qa_gate_state[peer_id] = {
+            "qa_gate_active": True,
+            "qa_gate_step": step or "",
+            "qa_gate_reminder_sent": False,
+            "qa_gate_opened_at": time.time(),
+        }
+
+    def clear_qa_gate(peer_id: int):
+        qa_gate_state.pop(peer_id, None)
+
+    async def send_ai_detailed_answer(entity: User, history_override: Optional[list] = None, step_name: Optional[str] = None) -> bool:
+        if is_paused(entity):
+            return False
+        history = history_override or await build_ai_history(client, entity, limit=10)
+        draft = (
+            "Дай розгорнуту, але структуровану відповідь у межах FAQ і політик.\n"
+            "Поясни по суті простими словами, без зайвої води.\n"
+            "Не став запитань у цьому повідомленні."
+        )
+        ai_text = await dialog_suggest(history, draft, no_questions=True)
+        if not ai_text:
+            return False
+        await send_and_update(
+            client,
+            sheet,
+            tz,
+            entity,
+            ai_text.strip(),
+            "знак питання",
+            use_ai=False,
+            delay_before=QUESTION_RESPONSE_DELAY_SEC,
+            step_state=step_state,
+            step_name=step_name,
+            followup_state=followup_state,
+        )
+        return True
+
+    async def send_qa_gate_confirm(entity: User, step_name: Optional[str]):
+        await send_and_update(
+            client,
+            sheet,
+            tz,
+            entity,
+            QA_GATE_CONFIRM_TEXT,
+            "знак питання",
+            use_ai=False,
+            delay_before=QUESTION_GAP_SEC,
+            step_state=step_state,
+            step_name=step_name,
+            followup_state=followup_state,
+        )
+
     def peer_format_state(peer_id: int) -> dict:
         state = format_delivery_state.get(peer_id)
         if state is None:
@@ -2190,6 +2486,222 @@ async def main():
             return "none"
 
         return "unknown"
+
+    def parse_age_bucket(text: str) -> str:
+        t = normalize_text(text)
+        if not t:
+            return "unknown"
+        m = re.search(r"(\\d{2})", t)
+        if not m:
+            return "unknown"
+        age = int(m.group(1))
+        if age < 18:
+            return "under18"
+        if age > 40:
+            return "over40"
+        return "ok"
+
+    async def send_v2_message(entity: User, text: str, step_name: str, status: Optional[str] = None, delay_before: Optional[float] = None):
+        await send_and_update(
+            client,
+            sheet,
+            tz,
+            entity,
+            text,
+            status or status_for_text(text) or "V2",
+            use_ai=False,
+            no_questions=False,
+            draft=text,
+            delay_before=delay_before,
+            step_state=step_state,
+            step_name=step_name,
+            followup_state=followup_state,
+        )
+
+    def enqueue_candidate_note(entity: User, tag: str, text: str):
+        note = format_note_entry(tz, tag, text)
+        append_candidate_answers(
+            lambda event_type, payload: enqueue_sheet_event(event_type, payload),
+            peer_id=entity.id,
+            name=getattr(entity, "first_name", "") or "Unknown",
+            username=getattr(entity, "username", "") or "",
+            chat_link=build_chat_link_app(entity, entity.id),
+            note_entry=note,
+        )
+
+    def enqueue_faq_question(peer_id: int, step: str, question_raw: str, answer_preview: str):
+        q_norm = normalize_question(question_raw)
+        cluster_key = build_cluster_key(q_norm)
+        qlog = build_question_log(
+            tz=tz,
+            peer_id=peer_id,
+            step=step,
+            question_raw=question_raw,
+            question_norm=q_norm,
+            cluster_key=cluster_key,
+            answer_preview=answer_preview,
+        )
+        enqueue_sheet_event("faq_question_log", qlog.__dict__)
+
+    async def handle_v2_message(sender: User, text: str, intent_name: str) -> bool:
+        if not FLOW_V2_ENABLED or not v2_enrollment.has(sender.id):
+            return False
+        state = v2_runtime.get(sender.id)
+        step_name = state.flow_step or STEP_SCREENING_WAIT
+
+        if state.rejected_by_age in {"under18", "over40"}:
+            if not state.referral_after_reject_sent:
+                await send_v2_message(sender, REFERRAL_AFTER_REJECT_TEXT, STEP_AGE_REJECTED, status=REFERRAL_STATUS)
+                state.referral_after_reject_sent = True
+                state.auto_mode = "OFF"
+                state.paused = True
+                paused_peers.add(sender.id)
+                enabled_peers.discard(sender.id)
+                v2_runtime.set(state)
+            return True
+
+        if state.qa_gate_active:
+            if intent_name == "question":
+                history = await build_ai_history(client, sender, limit=12)
+                ans = await answer_from_faq(text, state.qa_gate_step or step_name, history, dialog_suggest, mode="detailed")
+                answer_text = ans.text if ans else "Уточню деталі по вашому питанню і повернуся з точною відповіддю."
+                await send_v2_message(sender, answer_text, state.qa_gate_step or step_name, status="знак питання")
+                await send_v2_message(sender, V2_GATE_CONFIRM_TEXT, state.qa_gate_step or step_name, status="знак питання", delay_before=QUESTION_GAP_SEC)
+                state.qa_gate_opened_at = time.time()
+                state.qa_gate_reminder_sent = False
+                v2_runtime.set(state)
+                enqueue_faq_question(sender.id, state.qa_gate_step or step_name, text, answer_text)
+                return True
+            if intent_name == "ack_continue":
+                state.qa_gate_active = False
+                state.qa_gate_step = ""
+                state.qa_gate_reminder_sent = False
+                state.qa_gate_opened_at = 0.0
+                v2_runtime.set(state)
+                intent_name = "ack_continue"
+            elif intent_name == "stop":
+                await send_v2_message(sender, STOP_REPLY_TEXT, step_name, status=AUTO_STOP_STATUS)
+                state.auto_mode = "OFF"
+                state.paused = True
+                paused_peers.add(sender.id)
+                enabled_peers.discard(sender.id)
+                v2_runtime.set(state)
+                return True
+            else:
+                await send_v2_message(sender, V2_GATE_CONFIRM_TEXT, state.qa_gate_step or step_name, status="знак питання")
+                return True
+
+        if intent_name == "question":
+            history = await build_ai_history(client, sender, limit=12)
+            ans = await answer_from_faq(text, step_name, history, dialog_suggest, mode="detailed")
+            answer_text = ans.text if ans else "Уточню деталі по вашому питанню і повернуся з точною відповіддю."
+            await send_v2_message(sender, answer_text, step_name, status="знак питання", delay_before=QUESTION_RESPONSE_DELAY_SEC)
+            await send_v2_message(sender, V2_GATE_CONFIRM_TEXT, step_name, status="знак питання", delay_before=QUESTION_GAP_SEC)
+            state.qa_gate_active = True
+            state.qa_gate_step = step_name
+            state.qa_gate_opened_at = time.time()
+            state.qa_gate_reminder_sent = False
+            v2_runtime.set(state)
+            enqueue_faq_question(sender.id, step_name, text, answer_text)
+            return True
+
+        if intent_name == "stop":
+            await send_v2_message(sender, STOP_REPLY_TEXT, step_name, status=AUTO_STOP_STATUS)
+            state.auto_mode = "OFF"
+            state.paused = True
+            paused_peers.add(sender.id)
+            enabled_peers.discard(sender.id)
+            v2_runtime.set(state)
+            return True
+
+        if step_name == STEP_SCREENING_WAIT:
+            enqueue_candidate_note(sender, "screening_answers", text)
+            age_bucket = parse_age_bucket(text)
+            actions = advance_flow_v2(state, intent_name, {"age_bucket": age_bucket})
+            if actions.route == "age_reject":
+                reject_text = AGE_UNDER18_TEXT if age_bucket == "under18" else AGE_OVER40_TEXT
+                await send_v2_message(sender, reject_text, STEP_AGE_REJECTED, status=AUTO_STOP_STATUS)
+                state.flow_step = STEP_AGE_REJECTED
+                state.rejected_by_age = age_bucket
+                state.auto_mode = "OFF"
+                state.paused = True
+                paused_peers.add(sender.id)
+                enabled_peers.discard(sender.id)
+                v2_runtime.set(state)
+                return True
+            await send_v2_message(sender, COMPANY_INTRO_TEXT, STEP_COMPANY_INTRO, status="🏢 Знайомство з компанією")
+            state.flow_step = STEP_COMPANY_INTRO
+            v2_runtime.set(state)
+            return True
+
+        if step_name == STEP_COMPANY_INTRO:
+            low = normalize_text(text)
+            if any(k in low for k in ("так", "зручно", "удобно", "yes")) and VOICE_MESSAGE_LINK:
+                res = await dispatch_content(client, sender, VOICE_MESSAGE_LINK)
+                if not res.ok:
+                    await send_v2_message(sender, "Зараз не вдалося надіслати голосове. Коротко поясню далі в чаті.", STEP_COMPANY_INTRO)
+                state.flow_step = STEP_VOICE_WAIT
+                state.voice_stage = VOICE_SENT
+                state.voice_sent_at = time.time()
+                v2_runtime.set(state)
+                return True
+            await send_v2_message(sender, SCHEDULE_BLOCK_TEXT, STEP_SCHEDULE_BLOCK, status="🕒 Графік")
+            state.flow_step = STEP_SCHEDULE_CONFIRM
+            v2_runtime.set(state)
+            return True
+
+        if step_name == STEP_VOICE_WAIT:
+            await send_v2_message(sender, SCHEDULE_BLOCK_TEXT, STEP_SCHEDULE_BLOCK, status="🕒 Графік")
+            state.flow_step = STEP_SCHEDULE_CONFIRM
+            v2_runtime.set(state)
+            return True
+
+        if step_name == STEP_SCHEDULE_CONFIRM:
+            if intent_name != "ack_continue":
+                await send_v2_message(sender, "Якщо з графіком усе зрозуміло — напишіть, і перейдемо до наступного етапу 🙂", STEP_SCHEDULE_CONFIRM)
+                return True
+            links = [PHOTO_1_MESSAGE_LINK, PHOTO_2_MESSAGE_LINK, TEST_TASK_MESSAGE_LINK]
+            missing = [l for l in links if not l]
+            if missing:
+                await send_v2_message(sender, "Контент для наступного етапу тимчасово недоступний. Зараз уточню і повернусь до вас.", STEP_PROOF_FORWARD)
+                return True
+            for link in links:
+                res = await dispatch_content(client, sender, link)
+                if not res.ok:
+                    await send_v2_message(sender, "Не вдалося надіслати один із матеріалів. Повторю трохи пізніше.", STEP_PROOF_FORWARD)
+                    break
+                await asyncio.sleep(1)
+            state.flow_step = STEP_TEST_REVIEW
+            v2_runtime.set(state)
+            return True
+
+        if step_name == STEP_TEST_REVIEW:
+            enqueue_candidate_note(sender, "test_answers", text)
+            review_prompt = (
+                "Оціни відповіді кандидата на 3 тестові питання. "
+                "Якщо є помилки, коротко дай правильні пункти і поясни чому. "
+                "Пиши українською, дружньо, до 6 речень."
+            )
+            history = await build_ai_history(client, sender, limit=12)
+            ai_review = await dialog_suggest(history, review_prompt, no_questions=True)
+            if ai_review:
+                await send_v2_message(sender, ai_review, STEP_TEST_REVIEW, status="🎓 Навчання")
+            if FORM_MESSAGE_LINK:
+                await dispatch_content(client, sender, FORM_MESSAGE_LINK)
+            else:
+                await send_v2_message(sender, FORM_TEXT, STEP_FORM_FORWARD, status="📝 Анкета")
+            state.flow_step = STEP_FORM_FORWARD
+            v2_runtime.set(state)
+            return True
+
+        if step_name == STEP_FORM_FORWARD:
+            enqueue_candidate_note(sender, "form_payload", text)
+            await send_v2_message(sender, "Дякую! Передаю вашу анкету тімліду, далі звʼяжемось по старту 🙌", STEP_HANDOFF, status=CONFIRM_STATUS)
+            state.flow_step = STEP_HANDOFF
+            v2_runtime.set(state)
+            return True
+
+        return True
 
     async def continue_flow(entity: User, last_step: str, text: str):
         if is_paused(entity):
@@ -2476,6 +2988,16 @@ async def main():
             return
 
         enabled_peers.add(entity.id)
+        if FLOW_V2_ENABLED:
+            v2_enrollment.add(entity.id)
+            v2_state = v2_runtime.get(entity.id)
+            v2_state.flow_step = STEP_SCREENING_WAIT
+            v2_state.auto_mode = "ON"
+            v2_state.paused = False
+            v2_runtime.set(v2_state)
+            await send_v2_message(entity, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
+            print(f"✅ V2 onboarding message sent: {entity.id}")
+            return
         await send_and_update(
             client,
             sheet,
@@ -2578,6 +3100,21 @@ async def main():
             if registration_sheet:
                 await asyncio.to_thread(registration_sheet.upsert, tz, payload)
             return
+        if event.event_type == "faq_question_log":
+            if faq_questions_sheet:
+                await asyncio.to_thread(faq_questions_sheet.upsert_question, payload)
+                count = int(payload.get("count", 1) or 1)
+                if count >= 3 and faq_suggestions_sheet:
+                    suggestion = {
+                        "question_cluster": payload.get("cluster_key", ""),
+                        "suggested_answer": payload.get("answer_preview", ""),
+                        "source_examples": payload.get("question_raw", ""),
+                        "review_status": "new",
+                        "reviewed_at": "",
+                        "reviewed_by": "",
+                    }
+                    await asyncio.to_thread(faq_suggestions_sheet.append_if_missing, suggestion)
+            return
         raise ValueError(f"Unknown sheet event type: {event.event_type}")
 
     def extract_status_code(err: Exception) -> Optional[int]:
@@ -2661,6 +3198,7 @@ async def main():
         if is_test_restart(sender, text):
             paused_peers.discard(peer_id)
             enabled_peers.add(peer_id)
+            clear_qa_gate(peer_id)
             step_state.delete(peer_id)
             last_reply_at.pop(peer_id, None)
             last_incoming_at.pop(peer_id, None)
@@ -2724,9 +3262,20 @@ async def main():
                 followup_last_sent_at="",
             )
 
+            if FLOW_V2_ENABLED and v2_enrollment.has(peer_id):
+                v2_state = v2_runtime.get(peer_id)
+                v2_intent = detect_intent_v2(text, v2_state.flow_step).intent
+                handled_v2 = await handle_v2_message(sender, text, v2_intent)
+                if handled_v2:
+                    last_reply_at[peer_id] = time.time()
+                    return
+
             history = await build_ai_history(client, sender, limit=10)
             last_step_hint = step_state.get(peer_id)
             intent = await classify_candidate_intent(history, text, last_step_hint)
+            gate = qa_gate_state.get(peer_id, {})
+            gate_active = bool(gate.get("qa_gate_active"))
+            gate_step = (gate.get("qa_gate_step") or last_step_hint or "").strip() or None
 
             if last_step_hint == STEP_CLARIFY and intent == Intent.STOP and is_clarify_uncertain_reply(text):
                 await send_and_update(
@@ -2745,6 +3294,45 @@ async def main():
                 last_reply_at[peer_id] = time.time()
                 print(f"ℹ️ Clarify override peer={peer_id}: short negative treated as request to clarify")
                 return
+
+            if gate_active:
+                if intent == Intent.QUESTION:
+                    sent = await send_ai_detailed_answer(sender, history_override=history, step_name=gate_step)
+                    if not sent:
+                        await send_and_update(
+                            client,
+                            sheet,
+                            tz,
+                            sender,
+                            "Дякую за запитання. Уточню деталі коротко нижче 👇",
+                            "знак питання",
+                            use_ai=False,
+                            delay_before=QUESTION_RESPONSE_DELAY_SEC,
+                            step_state=step_state,
+                            step_name=gate_step,
+                            followup_state=followup_state,
+                        )
+                    await send_qa_gate_confirm(sender, gate_step)
+                    set_qa_gate(peer_id, gate_step)
+                    last_reply_at[peer_id] = time.time()
+                    return
+                if intent == Intent.ACK_CONTINUE:
+                    clear_qa_gate(peer_id)
+                    resolved_step = gate_step or await get_last_step(client, sender, step_state)
+                    if not resolved_step:
+                        resolved_step = STEP_SHIFT_QUESTION
+                        step_state.set(peer_id, resolved_step)
+                    if CONTINUE_DELAY_SEC > 0:
+                        await asyncio.sleep(CONTINUE_DELAY_SEC)
+                        if is_paused(sender):
+                            return
+                    await continue_flow(sender, resolved_step, text)
+                    return
+                if intent == Intent.OTHER:
+                    await send_qa_gate_confirm(sender, gate_step)
+                    set_qa_gate(peer_id, gate_step)
+                    last_reply_at[peer_id] = time.time()
+                    return
 
             skip_stop_for_this_message = peer_id in skip_stop_check_once
             if skip_stop_for_this_message:
@@ -2767,6 +3355,7 @@ async def main():
                 )
                 paused_peers.add(peer_id)
                 enabled_peers.discard(peer_id)
+                clear_qa_gate(peer_id)
                 pause_store.set_status(
                     sender.id,
                     username,
@@ -2836,32 +3425,25 @@ async def main():
                 return
 
             if intent == Intent.QUESTION:
-                sent = await send_ai_response(
-                    sender,
-                    status="знак питання",
-                    history_override=history,
-                    append_clarify=True,
-                )
+                sent = await send_ai_detailed_answer(sender, history_override=history, step_name=last_step)
                 if not sent:
-                    print(f"⚠️ AI question-response fallback peer={peer_id}: no combined AI answer")
+                    print(f"⚠️ AI question-response fallback peer={peer_id}: no detailed AI answer")
                     await send_and_update(
                         client,
                         sheet,
                         tz,
                         sender,
-                        CLARIFY_TEXT,
+                        "Дякую за запитання. Уточню, будь ласка, що саме цікавить найбільше?",
                         "знак питання",
                         use_ai=False,
                         delay_before=QUESTION_RESPONSE_DELAY_SEC,
+                        step_name=last_step,
                         step_state=step_state,
                         followup_state=followup_state,
                     )
-                if last_step and QUESTION_RESUME_DELAY_SEC > 0:
-                    pending_question_resume[peer_id] = {
-                        "due_at": time.time() + QUESTION_RESUME_DELAY_SEC,
-                        "last_incoming_at": last_incoming_at.get(peer_id, time.time()),
-                        "step": last_step,
-                    }
+                await send_qa_gate_confirm(sender, last_step)
+                set_qa_gate(peer_id, last_step)
+                last_reply_at[peer_id] = time.time()
                 return
 
             if intent == Intent.ACK_CONTINUE and is_short_neutral_ack(text):
@@ -2887,6 +3469,66 @@ async def main():
         while not stop_event.is_set():
             try:
                 now = datetime.now(tz)
+                for peer_id, state in list(qa_gate_state.items()):
+                    if not state.get("qa_gate_active"):
+                        continue
+                    opened_at = float(state.get("qa_gate_opened_at", 0) or 0)
+                    reminder_sent = bool(state.get("qa_gate_reminder_sent"))
+                    if reminder_sent:
+                        continue
+                    if now.timestamp() < opened_at + QA_GATE_REMINDER_DELAY_SEC:
+                        continue
+                    if peer_id not in enabled_peers:
+                        continue
+                    try:
+                        entity = await client.get_entity(peer_id)
+                    except Exception:
+                        continue
+                    if is_paused(entity):
+                        continue
+                    gate_step = (state.get("qa_gate_step") or "").strip() or None
+                    await send_and_update(
+                        client,
+                        sheet,
+                        tz,
+                        entity,
+                        QA_GATE_REMINDER_TEXT,
+                        "знак питання",
+                        use_ai=False,
+                        schedule_followup=False,
+                        step_state=step_state,
+                        step_name=gate_step,
+                        followup_state=followup_state,
+                    )
+                    state["qa_gate_reminder_sent"] = True
+                    qa_gate_state[peer_id] = state
+
+                if FLOW_V2_ENABLED:
+                    for peer_id in list(v2_enrollment.data):
+                        v2s = v2_runtime.get(peer_id)
+                        if v2s.paused:
+                            continue
+                        try:
+                            entity = await client.get_entity(peer_id)
+                        except Exception:
+                            continue
+                        if v2s.qa_gate_active and not v2s.qa_gate_reminder_sent:
+                            if time.time() >= float(v2s.qa_gate_opened_at or 0) + QA_GATE_REMINDER_DELAY_SEC:
+                                await send_v2_message(entity, V2_GATE_REMINDER_TEXT, v2s.qa_gate_step or v2s.flow_step, status="знак питання")
+                                v2s.qa_gate_reminder_sent = True
+                                v2_runtime.set(v2s)
+                        if v2s.flow_step == STEP_VOICE_WAIT and v2s.voice_stage in {VOICE_SENT, VOICE_FALLBACK_SENT}:
+                            elapsed = time.time() - float(v2s.voice_sent_at or 0)
+                            if v2s.voice_stage == VOICE_SENT and elapsed >= VOICE_FALLBACK_DELAY_SEC:
+                                await send_v2_message(entity, VOICE_FALLBACK_TEXT, STEP_VOICE_WAIT, status="🎧 Голосове")
+                                v2s.voice_stage = VOICE_FALLBACK_SENT
+                                v2_runtime.set(v2s)
+                            elif elapsed >= (VOICE_FALLBACK_DELAY_SEC + VOICE_AUTO_CONTINUE_DELAY_SEC):
+                                await send_v2_message(entity, SCHEDULE_BLOCK_TEXT, STEP_SCHEDULE_BLOCK, status="🕒 Графік")
+                                v2s.voice_stage = VOICE_AUTO_ADVANCED
+                                v2s.flow_step = STEP_SCHEDULE_CONFIRM
+                                v2_runtime.set(v2s)
+
                 for key, state in list(followup_state.data.items()):
                     try:
                         peer_id = int(key)
