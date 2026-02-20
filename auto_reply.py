@@ -2972,50 +2972,15 @@ async def main():
             return True
 
         if step_name == STEP_TEST_REVIEW:
-            answers = state.test_answers or ["", "", ""]
-            candidate_lines = split_answer_lines(text)
-            for line in candidate_lines:
-                line_l = normalize_text(line)
-                idx = None
-                m = re.match(r"^\s*([123])[.):\-]?\s*(.+)$", line, flags=re.IGNORECASE)
-                if m:
-                    idx = int(m.group(1)) - 1
-                    line = m.group(2).strip()
-                    line_l = normalize_text(line)
-                elif "%" in line_l:
-                    idx = 1
-                elif "год" in line_l or "8" in line_l:
-                    idx = 0
-                elif any(k in line_l for k in ("hr", "ейчар", "рішен", "решен", "перев", "звіль", "увільн", "звiль")):
-                    idx = 2
-                if idx is None:
-                    for i in range(3):
-                        if not answers[i]:
-                            idx = i
-                            break
-                if idx is not None:
-                    answers[idx] = line
+            state.test_message_count = int(state.test_message_count or 0) + 1
+            state.test_last_message = (text or "").strip()
+            state.test_prompted_at = state.test_prompted_at or time.time()
+            answers = merge_test_answers(state.test_answers or ["", "", ""], text)
             state.test_answers = answers
             if not all((x or "").strip() for x in answers):
                 v2_runtime.set(state)
                 return True
-            enqueue_candidate_note(sender, format_numbered_answers(answers))
-            ok, review_text = evaluate_test_answers(answers)
-            await send_v2_message(
-                sender,
-                review_text,
-                STEP_TEST_REVIEW,
-                status="🎓 Навчання",
-                delay_before=QUESTION_RESPONSE_DELAY_SEC,
-            )
-            if FORM_MESSAGE_LINK:
-                ok = await dispatch_v2_content(sender, FORM_MESSAGE_LINK, STEP_FORM_FORWARD, "📝 Анкета")
-                if not ok:
-                    await send_v2_message(sender, FORM_TEXT, STEP_FORM_FORWARD, status="📝 Анкета")
-            else:
-                await send_v2_message(sender, FORM_TEXT, STEP_FORM_FORWARD, status="📝 Анкета")
-            state.flow_step = STEP_FORM_FORWARD
-            v2_runtime.set(state)
+            await finalize_test_review(sender, state, answers)
             return True
 
         if step_name == STEP_FORM_FORWARD:
@@ -3876,6 +3841,24 @@ async def main():
                                     v2s.screening_last_at = 0.0
                                     v2_runtime.set(v2s)
                                     continue
+                        if v2s.flow_step == STEP_TEST_REVIEW and not v2s.test_help_sent:
+                            prompted_at = float(v2s.test_prompted_at or 0)
+                            if prompted_at > 0 and (time.time() - prompted_at) >= 300:
+                                msg_count = int(v2s.test_message_count or 0)
+                                if msg_count == 1 and (v2s.test_last_message or "").strip():
+                                    merged = merge_test_answers(v2s.test_answers or ["", "", ""], v2s.test_last_message or "")
+                                    if all((x or "").strip() for x in merged):
+                                        v2s.test_answers = merged
+                                        await finalize_test_review(entity, v2s, merged)
+                                        continue
+                                await send_v2_message(
+                                    entity,
+                                    "Підкажи, будь ласка, чи потрібна допомога з тестовим завданням? Я можу коротко підказати.",
+                                    STEP_TEST_REVIEW,
+                                    status="🎓 Навчання",
+                                )
+                                v2s.test_help_sent = True
+                                v2_runtime.set(v2s)
                         if v2s.flow_step == STEP_VOICE_WAIT and v2s.voice_stage in {VOICE_SENT, VOICE_FALLBACK_SENT}:
                             elapsed = time.time() - float(v2s.voice_sent_at or 0)
                             if v2s.voice_stage == VOICE_SENT and elapsed >= VOICE_FALLBACK_DELAY_SEC:

@@ -46,6 +46,10 @@ class PeerRuntimeState:
     shift_prompted_at: float = 0.0
     shift_choice: str = ""
     test_answers: List[str] = field(default_factory=list)
+    test_prompted_at: float = 0.0
+    test_help_sent: bool = False
+    test_message_count: int = 0
+    test_last_message: str = ""
 
 
 @dataclass
