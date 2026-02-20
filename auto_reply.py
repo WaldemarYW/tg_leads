@@ -630,6 +630,21 @@ def split_answer_lines(text: str) -> List[str]:
     raw = (text or "").strip()
     if not raw:
         return []
+    # Try to parse compact one-line formats like:
+    # "1 ... 2 ... 3 ..." or "1) ... 2) ... 3) ..."
+    if "\n" not in raw and "\r" not in raw:
+        marker_re = re.compile(r"(1️⃣|2️⃣|3️⃣|(?:^|\s)([1-3])[\)\.\-:]\s*)", flags=re.IGNORECASE)
+        matches = list(marker_re.finditer(raw))
+        if len(matches) >= 3:
+            chunks: List[str] = []
+            for idx, m in enumerate(matches):
+                start = m.end()
+                end = matches[idx + 1].start() if idx + 1 < len(matches) else len(raw)
+                part = raw[start:end].strip(" \t,;|")
+                if part:
+                    chunks.append(part)
+            if len(chunks) >= 3:
+                return chunks[:3]
     lines = []
     for part in re.split(r"[\n\r]+", raw):
         item = re.sub(r"^\s*(?:\d+[.)]|[•\-])\s*", "", part).strip()
@@ -641,6 +656,75 @@ def split_answer_lines(text: str) -> List[str]:
 def format_numbered_answers(items: List[str]) -> str:
     clean = [x.strip() for x in items if x and x.strip()]
     return "\n".join(f"{idx}. {val}" for idx, val in enumerate(clean, start=1))
+
+
+def _contains_any(text: str, needles: Tuple[str, ...]) -> bool:
+    return any(n in text for n in needles)
+
+
+def evaluate_test_answers(answers: List[str]) -> Tuple[bool, str]:
+    a1 = normalize_text((answers[0] if len(answers) > 0 else "") or "")
+    a2 = normalize_text((answers[1] if len(answers) > 1 else "") or "")
+    a3 = normalize_text((answers[2] if len(answers) > 2 else "") or "")
+
+    q1_ok = ("8" in a1 and _contains_any(a1, ("год", "годин", "година", "hours"))) or _contains_any(a1, ("вісім", "восем"))
+    q2_ok = "48" in a2 and "%" in a2
+    q3_ok = _contains_any(
+        a3,
+        (
+            "перевед",
+            "зміна команди",
+            "змiна команди",
+            "зміна адміністратора",
+            "змiна адміністратора",
+            "зміна тімліда",
+            "припинення співпраці",
+            "припинити співпрацю",
+            "звіль",
+            "звiль",
+            "завершення співпраці",
+        ),
+    )
+
+    if q1_ok and q2_ok and q3_ok:
+        return True, "Дякую, відповіді вірні ✅ Можемо переходити до наступного етапу."
+
+    return (
+        False,
+        "Є неточності. Правильні відповіді:\n"
+        "1) Мінімум — 8 годин на день.\n"
+        "2) Гарантований відсоток у перший місяць — 48%.\n"
+        "3) HR може ухвалити рішення про переведення в іншу команду/до іншого адміністратора або про припинення співпраці.",
+    )
+
+
+def merge_test_answers(existing: List[str], text: str) -> List[str]:
+    answers = list(existing or ["", "", ""])
+    if len(answers) < 3:
+        answers = answers + [""] * (3 - len(answers))
+    candidate_lines = split_answer_lines(text)
+    for line in candidate_lines:
+        line_l = normalize_text(line)
+        idx = None
+        m = re.match(r"^\s*([123])[.):\-]?\s*(.+)$", line, flags=re.IGNORECASE)
+        if m:
+            idx = int(m.group(1)) - 1
+            line = m.group(2).strip()
+            line_l = normalize_text(line)
+        elif "%" in line_l:
+            idx = 1
+        elif "год" in line_l or "8" in line_l:
+            idx = 0
+        elif any(k in line_l for k in ("hr", "ейчар", "рішен", "решен", "перев", "звіль", "увільн", "звiль")):
+            idx = 2
+        if idx is None:
+            for i in range(3):
+                if not answers[i]:
+                    idx = i
+                    break
+        if idx is not None:
+            answers[idx] = line
+    return answers[:3]
 
 
 def mark_step_without_send(
@@ -2634,6 +2718,31 @@ async def main():
         )
         return True
 
+    async def finalize_test_review(sender: User, state: PeerRuntimeState, answers: List[str]) -> bool:
+        enqueue_candidate_note(sender, format_numbered_answers(answers))
+        ok_answers, review_text = evaluate_test_answers(answers)
+        await send_v2_message(
+            sender,
+            review_text,
+            STEP_TEST_REVIEW,
+            status="🎓 Навчання",
+            delay_before=QUESTION_RESPONSE_DELAY_SEC,
+        )
+        if FORM_MESSAGE_LINK:
+            ok = await dispatch_v2_content(sender, FORM_MESSAGE_LINK, STEP_FORM_FORWARD, "📝 Анкета")
+            if not ok:
+                await send_v2_message(sender, FORM_TEXT, STEP_FORM_FORWARD, status="📝 Анкета")
+        else:
+            await send_v2_message(sender, FORM_TEXT, STEP_FORM_FORWARD, status="📝 Анкета")
+        state.flow_step = STEP_FORM_FORWARD
+        state.test_answers = answers[:3]
+        state.test_help_sent = False
+        state.test_prompted_at = 0.0
+        state.test_message_count = 0
+        state.test_last_message = ""
+        v2_runtime.set(state)
+        return ok_answers
+
     def enqueue_faq_question(peer_id: int, step: str, question_raw: str, answer_preview: str):
         q_norm = normalize_question(question_raw)
         cluster_key = build_cluster_key(q_norm)
@@ -2790,7 +2899,8 @@ async def main():
                 enabled_peers.discard(sender.id)
                 v2_runtime.set(state)
                 return True
-            await send_v2_message(sender, COMPANY_INTRO_TEXT, STEP_COMPANY_INTRO, status="🏢 Знайомство з компанією")
+            # For screening transition use intro without "Дякую за відповіді" to keep wording consistent.
+            await send_v2_message(sender, COMPANY_INTRO_TIMEOUT_TEXT, STEP_COMPANY_INTRO, status="🏢 Знайомство з компанією")
             state.flow_step = STEP_COMPANY_INTRO
             state.screening_answers = screened
             state.screening_started_at = 0.0
@@ -2854,6 +2964,10 @@ async def main():
                 await asyncio.sleep(BOT_REPLY_DELAY_SEC)
             state.flow_step = STEP_TEST_REVIEW
             state.test_answers = []
+            state.test_prompted_at = time.time()
+            state.test_help_sent = False
+            state.test_message_count = 0
+            state.test_last_message = ""
             v2_runtime.set(state)
             return True
 
@@ -2886,23 +3000,14 @@ async def main():
                 v2_runtime.set(state)
                 return True
             enqueue_candidate_note(sender, format_numbered_answers(answers))
-            review_prompt = (
-                "Оціни відповіді кандидата на 3 тестові питання. "
-                "Якщо є помилки, коротко дай правильні пункти і поясни чому. "
-                "Пиши українською, дружньо, до 6 речень.\n\n"
-                "Відповіді кандидата:\n"
-                f"1. {answers[0]}\n2. {answers[1]}\n3. {answers[2]}"
+            ok, review_text = evaluate_test_answers(answers)
+            await send_v2_message(
+                sender,
+                review_text,
+                STEP_TEST_REVIEW,
+                status="🎓 Навчання",
+                delay_before=QUESTION_RESPONSE_DELAY_SEC,
             )
-            history = await build_ai_history(client, sender, limit=12)
-            ai_review = await dialog_suggest(history, review_prompt, no_questions=True)
-            if ai_review:
-                await send_v2_message(
-                    sender,
-                    ai_review,
-                    STEP_TEST_REVIEW,
-                    status="🎓 Навчання",
-                    delay_before=QUESTION_RESPONSE_DELAY_SEC,
-                )
             if FORM_MESSAGE_LINK:
                 ok = await dispatch_v2_content(sender, FORM_MESSAGE_LINK, STEP_FORM_FORWARD, "📝 Анкета")
                 if not ok:
@@ -3762,7 +3867,8 @@ async def main():
                                 v2_runtime.set(v2s)
                         if v2s.flow_step == STEP_SCREENING_WAIT:
                             started = float(v2s.screening_started_at or 0)
-                            if started > 0 and not (v2s.screening_answers or []):
+                            answers = v2s.screening_answers or []
+                            if started > 0 and len(answers) < 3:
                                 if (time.time() - started) >= SCREENING_WAIT_SEC:
                                     await send_v2_message(entity, COMPANY_INTRO_TIMEOUT_TEXT, STEP_COMPANY_INTRO, status="🏢 Знайомство з компанією")
                                     v2s.flow_step = STEP_COMPANY_INTRO
