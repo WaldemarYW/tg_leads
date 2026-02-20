@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
 MESSAGE_LINK_RE = re.compile(r"https?://t\.me/(c/)?([A-Za-z0-9_]+)/([0-9]+)")
 
@@ -12,6 +12,8 @@ class SendResult:
     ok: bool
     message: str = ""
     error: str = ""
+    message_ids: List[int] = field(default_factory=list)
+    preview: str = ""
 
 
 def parse_message_link(link: str) -> Optional[Tuple[object, int]]:
@@ -49,6 +51,20 @@ async def dispatch_content(client, entity, content_link: str) -> SendResult:
         sent = await client.forward_messages(entity, msg, drop_author=True)
         if not sent:
             return SendResult(ok=False, error="forward_failed")
-        return SendResult(ok=True, message="forwarded")
+        if isinstance(sent, list):
+            ids = [int(getattr(item, "id", 0)) for item in sent if getattr(item, "id", None)]
+        else:
+            ids = [int(getattr(sent, "id", 0))] if getattr(sent, "id", None) else []
+        preview = (getattr(msg, "message", None) or "").strip()
+        if not preview:
+            if getattr(msg, "photo", None):
+                preview = "[forwarded photo]"
+            elif getattr(msg, "video", None):
+                preview = "[forwarded video]"
+            elif getattr(msg, "media", None):
+                preview = "[forwarded media]"
+            else:
+                preview = "[forwarded message]"
+        return SendResult(ok=True, message="forwarded", message_ids=ids, preview=preview)
     except Exception as err:
         return SendResult(ok=False, error=f"{type(err).__name__}: {err}")

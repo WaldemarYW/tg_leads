@@ -12,6 +12,7 @@ STEP_AGE_REJECTED = "age_rejected"
 STEP_COMPANY_INTRO = "company_intro"
 STEP_VOICE_WAIT = "voice_wait"
 STEP_SCHEDULE_BLOCK = "schedule_block"
+STEP_SCHEDULE_SHIFT_WAIT = "schedule_shift_wait"
 STEP_SCHEDULE_CONFIRM = "schedule_confirm"
 STEP_PROOF_FORWARD = "proof_forward"
 STEP_TEST_REVIEW = "test_review"
@@ -39,6 +40,12 @@ class PeerRuntimeState:
     referral_after_reject_sent: bool = False
     auto_mode: str = "ON"
     paused: bool = False
+    screening_answers: List[str] = field(default_factory=list)
+    screening_started_at: float = 0.0
+    screening_last_at: float = 0.0
+    shift_prompted_at: float = 0.0
+    shift_choice: str = ""
+    test_answers: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -74,17 +81,17 @@ def advance_flow(peer_state: PeerRuntimeState, intent: str, context: Optional[Di
 
     if step == STEP_COMPANY_INTRO:
         if intent == "ack_continue":
-            return FlowActions(route="schedule_block", set_state={"flow_step": STEP_SCHEDULE_BLOCK})
+            return FlowActions(route="schedule_shift_wait", set_state={"flow_step": STEP_SCHEDULE_SHIFT_WAIT})
         if intent == "other":
             return FlowActions(route="voice_branch_wait")
         return FlowActions(route="voice_branch")
 
     if step == STEP_VOICE_WAIT:
         if intent == "ack_continue":
-            return FlowActions(route="schedule_block", set_state={"flow_step": STEP_SCHEDULE_BLOCK})
+            return FlowActions(route="schedule_shift_wait", set_state={"flow_step": STEP_SCHEDULE_SHIFT_WAIT})
         return FlowActions(route="voice_wait")
 
-    if step == STEP_SCHEDULE_BLOCK:
+    if step == STEP_SCHEDULE_SHIFT_WAIT:
         return FlowActions(route="schedule_confirm", set_state={"flow_step": STEP_SCHEDULE_CONFIRM}, await_confirmation=True)
 
     if step == STEP_SCHEDULE_CONFIRM:

@@ -6,7 +6,7 @@ import asyncio
 import signal
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from collections import deque
 import urllib.request
 import urllib.error
@@ -100,6 +100,7 @@ from flow_engine import (
     STEP_HANDOFF,
     STEP_PROOF_FORWARD,
     STEP_SCHEDULE_BLOCK,
+    STEP_SCHEDULE_SHIFT_WAIT,
     STEP_SCHEDULE_CONFIRM,
     STEP_SCREENING_WAIT,
     STEP_TEST_REVIEW,
@@ -112,7 +113,7 @@ from flow_engine import (
 from intent_router import detect_intent as detect_intent_v2
 from faq_service import answer_from_faq, build_cluster_key, normalize_question
 from content_dispatcher import dispatch_content, validate_content_env
-from candidate_notes import append_candidate_answers, format_note_entry
+from candidate_notes import append_candidate_answers
 from faq_learning import build_question_log
 from v2_state import V2EnrollmentStore, V2RuntimeStore
 
@@ -227,6 +228,8 @@ TEST_TASK_MESSAGE_LINK = os.environ.get("TEST_TASK_MESSAGE_LINK", "").strip()
 FORM_MESSAGE_LINK = os.environ.get("FORM_MESSAGE_LINK", "").strip()
 VOICE_FALLBACK_DELAY_SEC = float(os.environ.get("VOICE_FALLBACK_DELAY_SEC", "300"))
 VOICE_AUTO_CONTINUE_DELAY_SEC = float(os.environ.get("VOICE_AUTO_CONTINUE_DELAY_SEC", "600"))
+SCREENING_WAIT_SEC = float(os.environ.get("SCREENING_WAIT_SEC", "300"))
+SCHEDULE_SHIFT_WAIT_SEC = float(os.environ.get("SCHEDULE_SHIFT_WAIT_SEC", "300"))
 FAQ_QUESTIONS_WORKSHEET = os.environ.get("FAQ_QUESTIONS_WORKSHEET", "FAQ_Questions")
 FAQ_SUGGESTIONS_WORKSHEET = os.environ.get("FAQ_SUGGESTIONS_WORKSHEET", "FAQ_Suggestions")
 CONFIRM_STATUS = "✅ Погодився"
@@ -296,19 +299,35 @@ COMPANY_INTRO_TEXT = (
     "відповіді на листи, створення інвайтів та просування анкети, без дзвінків та відеодзвінків.\n\n"
     "Вам буде зручно прослухати голосове повідомлення, щоб я детальніше розповіла всі умови роботи?"
 )
-SCHEDULE_BLOCK_TEXT = (
+COMPANY_INTRO_TIMEOUT_TEXT = (
+    "Наша компанія Furioza Company працює в сфері дейтингу з 2014 року. "
+    "Робота повністю віддалена в повну зайнятість (8-годинний робочий графік), тільки через ПК або ноутбук.\n\n"
+    "В обов'язки чат-менеджера входить комунікація з клієнтами в режимі онлайн чату, "
+    "відповіді на листи, створення інвайтів та просування анкети, без дзвінків та відеодзвінків.\n\n"
+    "Вам буде зручно прослухати голосове повідомлення, щоб я детальніше розповіла всі умови роботи?"
+)
+SCHEDULE_SHIFT_TEXT = (
     "Ми пропонує 2 зміни на вибір — ви обираєте одну і працюєте за цим графіком на постійній основі:\n"
     "- Денна 14:00–23:00\n"
     "- Нічна 23:00–08:00\n"
     "На кожній зміні передбачено:\n"
     "- 1 година основної перерви\n"
     "- Короткі міні-перерви по 5 хвилин\n"
-    "Щодо вихідних: у вас є 8 вихідних днів на місяць, брати їх можна коли зручно, будні це дні чи вихідні - не важливо)\n\n"
-    "Робота на сайті відбувається одночасно на декількох анкет.\n"
-    "Ви працюєте у парі з напарниками: Ви — 8 годин у своїй зміні, а 2 напарника — у своїй.\n"
-    "Щоб мати уявлення, як виглядає інтерфейс сайту і що на тебе чекає — переглянь навчальний сайт: https://alpha-mini.pp.ua/\n\n"
-    "Чи зрозумілий вам графік і як рахується робочий час? Можемо йти далі? 😊"
+    "Щодо вихідних: у вас є 8 вихідних днів на місяць, брати їх можна коли зручно, будні це дні чи вихідні - не важливо)\n"
+    "Який графік роботи тобі підходить?"
 )
+SCHEDULE_DETAILS_TEXT = (
+    "Робота на сайті відбувається одночасно на декількох анкет.\n"
+    "Працювати потрібно у парі з напарниками — 8 годин у своїй зміні, та 2 напарника — у своїй. "
+    "Ваша комунікація буде в Telegram, де створиться спільний чат. Там ви зможете обговорювати робочі моменти по анкетах, ділитись думками та допомагати одне одному.\n"
+    "Щоб мати уявлення, як виглядає інтерфейс сайту і що на тебе чекає — переглянь навчальний [сайт](https://alpha-mini.pp.ua/) приклад робочого процесу!\n\n"
+    "Підсумуємо головне:\n"
+    "Графік — 8 годин на день біля ПК. У вас буде особистий кабінет, де фіксується робочий час. "
+    "Робота інтенсивна: в середньому одна дія має бути кожні 5 хвилин. Тобто ти реально працюєш увесь час, а не просто \"в онлайні\".\n"
+    "Навчання триває 8 днів.\n"
+    "Зарплата в кінці місяця — 48% від суми на балансі профілю."
+)
+SCHEDULE_CONFIRM_TEXT = "Чи зрозумілий тобі графік і як рахується робочий час? Можемо йти далі? 😊"
 
 FOLLOWUP_TEMPLATES = [
     (
@@ -590,6 +609,38 @@ def is_test_user(sender: User) -> bool:
     if not sender:
         return False
     return str(getattr(sender, "id", "")) == TEST_USER_ID
+
+
+def parse_shift_choice(text: str) -> Optional[str]:
+    t = normalize_text(text)
+    if not t:
+        return None
+    day_markers = ("день", "ден", "денна", "14:00", "14 00", "14-23", "14 до 23")
+    night_markers = ("ніч", "ноч", "нічна", "23:00", "23 00", "23-08", "23 до 08")
+    day = any(m in t for m in day_markers)
+    night = any(m in t for m in night_markers)
+    if day and not night:
+        return "денна"
+    if night and not day:
+        return "нічна"
+    return None
+
+
+def split_answer_lines(text: str) -> List[str]:
+    raw = (text or "").strip()
+    if not raw:
+        return []
+    lines = []
+    for part in re.split(r"[\n\r]+", raw):
+        item = re.sub(r"^\s*(?:\d+[.)]|[•\-])\s*", "", part).strip()
+        if item:
+            lines.append(item)
+    return lines
+
+
+def format_numbered_answers(items: List[str]) -> str:
+    clean = [x.strip() for x in items if x and x.strip()]
+    return "\n".join(f"{idx}. {val}" for idx, val in enumerate(clean, start=1))
 
 
 def mark_step_without_send(
@@ -1826,13 +1877,17 @@ async def send_and_update(
     step_name: Optional[str] = None,
     auto_reply_enabled: Optional[bool] = None,
     followup_state: Optional["FollowupState"] = None,
+    parse_mode: Optional[str] = None,
 ):
     history = []
     if use_ai:
         history = await build_ai_history(client, entity, limit=10)
     if PAUSE_CHECKER and PAUSE_CHECKER(entity):
         return text
-    effective_delay = BOT_REPLY_DELAY_SEC if delay_before is None else delay_before
+    if delay_before is None:
+        effective_delay = QUESTION_RESPONSE_DELAY_SEC if use_ai else BOT_REPLY_DELAY_SEC
+    else:
+        effective_delay = delay_before
     if effective_delay and effective_delay > 0:
         await asyncio.sleep(effective_delay)
     if PAUSE_CHECKER and PAUSE_CHECKER(entity):
@@ -1846,7 +1901,8 @@ async def send_and_update(
     sent_payload = {}
 
     async def _sender(message_text: str):
-        sent_message = await client.send_message(entity, message_text)
+        kwargs = {"parse_mode": parse_mode} if parse_mode else {}
+        sent_message = await client.send_message(entity, message_text, **kwargs)
         sent_payload["message"] = sent_message
 
     result = await send_message_with_fallback(
@@ -2152,6 +2208,7 @@ async def main():
         print("⚠️ REGISTRATION_DRIVE_FOLDER_ID не задано: документи не будуть завантажуватись у Drive")
     client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
     processing_peers = set()
+    buffered_incoming: Dict[int, deque] = {}
     paused_peers = set()
     enabled_peers = set()
     last_reply_at = {}
@@ -2501,7 +2558,14 @@ async def main():
             return "over40"
         return "ok"
 
-    async def send_v2_message(entity: User, text: str, step_name: str, status: Optional[str] = None, delay_before: Optional[float] = None):
+    async def send_v2_message(
+        entity: User,
+        text: str,
+        step_name: str,
+        status: Optional[str] = None,
+        delay_before: Optional[float] = None,
+    ):
+        parse_mode = "md" if "[сайт](" in (text or "") else None
         await send_and_update(
             client,
             sheet,
@@ -2516,10 +2580,13 @@ async def main():
             step_state=step_state,
             step_name=step_name,
             followup_state=followup_state,
+            parse_mode=parse_mode,
         )
 
-    def enqueue_candidate_note(entity: User, tag: str, text: str):
-        note = format_note_entry(tz, tag, text)
+    def enqueue_candidate_note(entity: User, text: str):
+        note = (text or "").strip()
+        if not note:
+            return
         append_candidate_answers(
             lambda event_type, payload: enqueue_sheet_event(event_type, payload),
             peer_id=entity.id,
@@ -2528,6 +2595,44 @@ async def main():
             chat_link=build_chat_link_app(entity, entity.id),
             note_entry=note,
         )
+
+    async def resolve_v2_intent(sender: User, text: str, step_name: str) -> str:
+        local = detect_intent_v2(text, step_name).intent
+        if local in {"question", "stop"}:
+            return local
+        critical_steps = {
+            STEP_COMPANY_INTRO,
+            STEP_SCHEDULE_SHIFT_WAIT,
+            STEP_SCHEDULE_CONFIRM,
+            STEP_TEST_REVIEW,
+            STEP_VOICE_WAIT,
+        }
+        if local == "ack_continue" and step_name not in critical_steps:
+            return local
+        history = await build_ai_history(client, sender, limit=8)
+        ai_intent = (await classify_candidate_intent(history, text, step_name)).value
+        if ai_intent in {"question", "ack_continue", "stop"}:
+            return ai_intent
+        return local
+
+    async def dispatch_v2_content(sender: User, content_link: str, step_name: str, status: str) -> bool:
+        res = await dispatch_content(client, sender, content_link)
+        if not res.ok:
+            return False
+        queue_today_upsert(
+            peer_id=sender.id,
+            name=getattr(sender, "first_name", "") or "Unknown",
+            username=getattr(sender, "username", "") or "",
+            chat_link=build_chat_link_app(sender, sender.id),
+            status=status,
+            sender_role="bot",
+            dialog_mode="ON",
+            step_snapshot=step_name,
+            tech_step=step_name,
+            full_text=(res.preview or "forwarded").strip()[:2000],
+            last_out=(res.preview or "forwarded").strip()[:200],
+        )
+        return True
 
     def enqueue_faq_question(peer_id: int, step: str, question_raw: str, answer_preview: str):
         q_norm = normalize_question(question_raw)
@@ -2561,11 +2666,37 @@ async def main():
             return True
 
         if state.qa_gate_active:
+            if (state.qa_gate_step or step_name) == STEP_SCHEDULE_SHIFT_WAIT and intent_name == "question":
+                history = await build_ai_history(client, sender, limit=12)
+                ans = await answer_from_faq(text, STEP_SCHEDULE_SHIFT_WAIT, history, dialog_suggest, mode="detailed")
+                answer_text = ans.text if ans else "Уточню коротко: у нас доступні денна або нічна зміна."
+                await send_v2_message(
+                    sender,
+                    answer_text,
+                    STEP_SCHEDULE_SHIFT_WAIT,
+                    status="знак питання",
+                    delay_before=QUESTION_RESPONSE_DELAY_SEC,
+                )
+                await send_v2_message(sender, "Підкажи, будь ласка, яку зміну обираєш: денну чи нічну?", STEP_SCHEDULE_SHIFT_WAIT)
+                state.qa_gate_active = False
+                state.qa_gate_step = ""
+                state.qa_gate_reminder_sent = False
+                state.qa_gate_opened_at = 0.0
+                state.shift_prompted_at = time.time()
+                v2_runtime.set(state)
+                enqueue_faq_question(sender.id, STEP_SCHEDULE_SHIFT_WAIT, text, answer_text)
+                return True
             if intent_name == "question":
                 history = await build_ai_history(client, sender, limit=12)
                 ans = await answer_from_faq(text, state.qa_gate_step or step_name, history, dialog_suggest, mode="detailed")
                 answer_text = ans.text if ans else "Уточню деталі по вашому питанню і повернуся з точною відповіддю."
-                await send_v2_message(sender, answer_text, state.qa_gate_step or step_name, status="знак питання")
+                await send_v2_message(
+                    sender,
+                    answer_text,
+                    state.qa_gate_step or step_name,
+                    status="знак питання",
+                    delay_before=QUESTION_RESPONSE_DELAY_SEC,
+                )
                 await send_v2_message(sender, V2_GATE_CONFIRM_TEXT, state.qa_gate_step or step_name, status="знак питання", delay_before=QUESTION_GAP_SEC)
                 state.qa_gate_opened_at = time.time()
                 state.qa_gate_reminder_sent = False
@@ -2591,6 +2722,23 @@ async def main():
                 await send_v2_message(sender, V2_GATE_CONFIRM_TEXT, state.qa_gate_step or step_name, status="знак питання")
                 return True
 
+        if step_name == STEP_SCHEDULE_SHIFT_WAIT and intent_name == "question":
+            history = await build_ai_history(client, sender, limit=12)
+            ans = await answer_from_faq(text, STEP_SCHEDULE_SHIFT_WAIT, history, dialog_suggest, mode="detailed")
+            answer_text = ans.text if ans else "Уточню коротко: у нас доступні денна або нічна зміна."
+            await send_v2_message(
+                sender,
+                answer_text,
+                STEP_SCHEDULE_SHIFT_WAIT,
+                status="знак питання",
+                delay_before=QUESTION_RESPONSE_DELAY_SEC,
+            )
+            await send_v2_message(sender, "Підкажи, будь ласка, яку зміну обираєш: денну чи нічну?", STEP_SCHEDULE_SHIFT_WAIT)
+            state.shift_prompted_at = time.time()
+            v2_runtime.set(state)
+            enqueue_faq_question(sender.id, STEP_SCHEDULE_SHIFT_WAIT, text, answer_text)
+            return True
+
         if intent_name == "question":
             history = await build_ai_history(client, sender, limit=12)
             ans = await answer_from_faq(text, step_name, history, dialog_suggest, mode="detailed")
@@ -2615,8 +2763,21 @@ async def main():
             return True
 
         if step_name == STEP_SCREENING_WAIT:
-            enqueue_candidate_note(sender, "screening_answers", text)
-            age_bucket = parse_age_bucket(text)
+            chunks = split_answer_lines(text)
+            if chunks:
+                state.screening_answers = (state.screening_answers or []) + chunks
+                state.screening_answers = state.screening_answers[:3]
+                now_ts = time.time()
+                if not state.screening_started_at:
+                    state.screening_started_at = now_ts
+                state.screening_last_at = now_ts
+            if len(state.screening_answers or []) < 3:
+                v2_runtime.set(state)
+                return True
+
+            screened = (state.screening_answers or [])[:3]
+            enqueue_candidate_note(sender, format_numbered_answers(screened))
+            age_bucket = parse_age_bucket("\n".join(screened))
             actions = advance_flow_v2(state, intent_name, {"age_bucket": age_bucket})
             if actions.route == "age_reject":
                 reject_text = AGE_UNDER18_TEXT if age_bucket == "under18" else AGE_OVER40_TEXT
@@ -2631,34 +2792,54 @@ async def main():
                 return True
             await send_v2_message(sender, COMPANY_INTRO_TEXT, STEP_COMPANY_INTRO, status="🏢 Знайомство з компанією")
             state.flow_step = STEP_COMPANY_INTRO
+            state.screening_answers = screened
+            state.screening_started_at = 0.0
+            state.screening_last_at = 0.0
             v2_runtime.set(state)
             return True
 
         if step_name == STEP_COMPANY_INTRO:
-            low = normalize_text(text)
-            if any(k in low for k in ("так", "зручно", "удобно", "yes")) and VOICE_MESSAGE_LINK:
-                res = await dispatch_content(client, sender, VOICE_MESSAGE_LINK)
-                if not res.ok:
+            if intent_name == "ack_continue" and VOICE_MESSAGE_LINK:
+                ok = await dispatch_v2_content(sender, VOICE_MESSAGE_LINK, STEP_COMPANY_INTRO, "🎧 Голосове")
+                if not ok:
                     await send_v2_message(sender, "Зараз не вдалося надіслати голосове. Коротко поясню далі в чаті.", STEP_COMPANY_INTRO)
-                state.flow_step = STEP_VOICE_WAIT
-                state.voice_stage = VOICE_SENT
-                state.voice_sent_at = time.time()
-                v2_runtime.set(state)
-                return True
-            await send_v2_message(sender, SCHEDULE_BLOCK_TEXT, STEP_SCHEDULE_BLOCK, status="🕒 Графік")
-            state.flow_step = STEP_SCHEDULE_CONFIRM
+                else:
+                    state.flow_step = STEP_VOICE_WAIT
+                    state.voice_stage = VOICE_SENT
+                    state.voice_sent_at = time.time()
+                    v2_runtime.set(state)
+                    return True
+            await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status="🕒 Графік")
+            state.flow_step = STEP_SCHEDULE_SHIFT_WAIT
+            state.shift_prompted_at = time.time()
             v2_runtime.set(state)
             return True
 
         if step_name == STEP_VOICE_WAIT:
-            await send_v2_message(sender, SCHEDULE_BLOCK_TEXT, STEP_SCHEDULE_BLOCK, status="🕒 Графік")
+            await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status="🕒 Графік")
+            state.flow_step = STEP_SCHEDULE_SHIFT_WAIT
+            state.shift_prompted_at = time.time()
+            v2_runtime.set(state)
+            return True
+
+        if step_name == STEP_SCHEDULE_SHIFT_WAIT:
+            choice = parse_shift_choice(text)
+            if not choice:
+                await send_v2_message(sender, "Підкажи, будь ласка, яку зміну обираєш: денну чи нічну?", STEP_SCHEDULE_SHIFT_WAIT)
+                state.shift_prompted_at = time.time()
+                v2_runtime.set(state)
+                return True
+            enqueue_candidate_note(sender, f"Графік: {choice}")
+            await send_v2_message(sender, SCHEDULE_DETAILS_TEXT, STEP_SCHEDULE_BLOCK, status="🕒 Графік")
+            await send_v2_message(sender, SCHEDULE_CONFIRM_TEXT, STEP_SCHEDULE_CONFIRM, status="🕒 Графік")
             state.flow_step = STEP_SCHEDULE_CONFIRM
+            state.shift_choice = choice
             v2_runtime.set(state)
             return True
 
         if step_name == STEP_SCHEDULE_CONFIRM:
             if intent_name != "ack_continue":
-                await send_v2_message(sender, "Якщо з графіком усе зрозуміло — напишіть, і перейдемо до наступного етапу 🙂", STEP_SCHEDULE_CONFIRM)
+                await send_v2_message(sender, SCHEDULE_CONFIRM_TEXT, STEP_SCHEDULE_CONFIRM)
                 return True
             links = [PHOTO_1_MESSAGE_LINK, PHOTO_2_MESSAGE_LINK, TEST_TASK_MESSAGE_LINK]
             missing = [l for l in links if not l]
@@ -2666,28 +2847,66 @@ async def main():
                 await send_v2_message(sender, "Контент для наступного етапу тимчасово недоступний. Зараз уточню і повернусь до вас.", STEP_PROOF_FORWARD)
                 return True
             for link in links:
-                res = await dispatch_content(client, sender, link)
-                if not res.ok:
+                ok = await dispatch_v2_content(sender, link, STEP_PROOF_FORWARD, "🎥 Більше інформації")
+                if not ok:
                     await send_v2_message(sender, "Не вдалося надіслати один із матеріалів. Повторю трохи пізніше.", STEP_PROOF_FORWARD)
                     break
-                await asyncio.sleep(1)
+                await asyncio.sleep(BOT_REPLY_DELAY_SEC)
             state.flow_step = STEP_TEST_REVIEW
+            state.test_answers = []
             v2_runtime.set(state)
             return True
 
         if step_name == STEP_TEST_REVIEW:
-            enqueue_candidate_note(sender, "test_answers", text)
+            answers = state.test_answers or ["", "", ""]
+            candidate_lines = split_answer_lines(text)
+            for line in candidate_lines:
+                line_l = normalize_text(line)
+                idx = None
+                m = re.match(r"^\s*([123])[.):\-]?\s*(.+)$", line, flags=re.IGNORECASE)
+                if m:
+                    idx = int(m.group(1)) - 1
+                    line = m.group(2).strip()
+                    line_l = normalize_text(line)
+                elif "%" in line_l:
+                    idx = 1
+                elif "год" in line_l or "8" in line_l:
+                    idx = 0
+                elif any(k in line_l for k in ("hr", "ейчар", "рішен", "решен", "перев", "звіль", "увільн", "звiль")):
+                    idx = 2
+                if idx is None:
+                    for i in range(3):
+                        if not answers[i]:
+                            idx = i
+                            break
+                if idx is not None:
+                    answers[idx] = line
+            state.test_answers = answers
+            if not all((x or "").strip() for x in answers):
+                v2_runtime.set(state)
+                return True
+            enqueue_candidate_note(sender, format_numbered_answers(answers))
             review_prompt = (
                 "Оціни відповіді кандидата на 3 тестові питання. "
                 "Якщо є помилки, коротко дай правильні пункти і поясни чому. "
-                "Пиши українською, дружньо, до 6 речень."
+                "Пиши українською, дружньо, до 6 речень.\n\n"
+                "Відповіді кандидата:\n"
+                f"1. {answers[0]}\n2. {answers[1]}\n3. {answers[2]}"
             )
             history = await build_ai_history(client, sender, limit=12)
             ai_review = await dialog_suggest(history, review_prompt, no_questions=True)
             if ai_review:
-                await send_v2_message(sender, ai_review, STEP_TEST_REVIEW, status="🎓 Навчання")
+                await send_v2_message(
+                    sender,
+                    ai_review,
+                    STEP_TEST_REVIEW,
+                    status="🎓 Навчання",
+                    delay_before=QUESTION_RESPONSE_DELAY_SEC,
+                )
             if FORM_MESSAGE_LINK:
-                await dispatch_content(client, sender, FORM_MESSAGE_LINK)
+                ok = await dispatch_v2_content(sender, FORM_MESSAGE_LINK, STEP_FORM_FORWARD, "📝 Анкета")
+                if not ok:
+                    await send_v2_message(sender, FORM_TEXT, STEP_FORM_FORWARD, status="📝 Анкета")
             else:
                 await send_v2_message(sender, FORM_TEXT, STEP_FORM_FORWARD, status="📝 Анкета")
             state.flow_step = STEP_FORM_FORWARD
@@ -2695,13 +2914,35 @@ async def main():
             return True
 
         if step_name == STEP_FORM_FORWARD:
-            enqueue_candidate_note(sender, "form_payload", text)
+            enqueue_candidate_note(sender, text)
             await send_v2_message(sender, "Дякую! Передаю вашу анкету тімліду, далі звʼяжемось по старту 🙌", STEP_HANDOFF, status=CONFIRM_STATUS)
             state.flow_step = STEP_HANDOFF
             v2_runtime.set(state)
             return True
 
         return True
+
+    async def process_v2_turn(sender: User, text: str) -> bool:
+        peer_id = sender.id
+        if not v2_enrollment.has(peer_id):
+            v2_enrollment.add(peer_id)
+            seeded_state = PeerRuntimeState(
+                peer_id=peer_id,
+                flow_step=STEP_SCREENING_WAIT,
+                auto_mode="ON",
+                paused=False,
+                screening_started_at=time.time(),
+            )
+            v2_runtime.set(seeded_state)
+            await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
+            print(f"✅ V2 auto-enrolled peer={peer_id}")
+            return True
+        v2_state = v2_runtime.get(peer_id)
+        v2_intent = await resolve_v2_intent(sender, text, v2_state.flow_step)
+        handled_v2 = await handle_v2_message(sender, text, v2_intent)
+        if not handled_v2:
+            print(f"⚠️ V2 handler returned no-op peer={peer_id} step={v2_state.flow_step}")
+        return handled_v2
 
     async def continue_flow(entity: User, last_step: str, text: str):
         if is_paused(entity):
@@ -3154,7 +3395,8 @@ async def main():
         name = getattr(sender, "first_name", "") or "Unknown"
         username = getattr(sender, "username", "") or ""
         chat_link = build_chat_link_app(sender, sender.id)
-        current_step_snapshot = step_state.get(peer_id) or ""
+        v2_step_snapshot = v2_runtime.get(peer_id).flow_step if FLOW_V2_ENABLED else ""
+        current_step_snapshot = v2_step_snapshot or step_state.get(peer_id) or ""
         pause_status = pause_store.get_status(peer_id, username)
         if pause_status == "PAUSED" or peer_id in paused_peers:
             incoming_mode = "OFF"
@@ -3188,7 +3430,13 @@ async def main():
             processing_peers.discard(peer_id)
             pause_store.set_status(sender.id, username, name, chat_link, "ACTIVE", updated_by="test")
             v2_enrollment.add(peer_id)
-            v2_state = PeerRuntimeState(peer_id=peer_id, flow_step=STEP_SCREENING_WAIT, auto_mode="ON", paused=False)
+            v2_state = PeerRuntimeState(
+                peer_id=peer_id,
+                flow_step=STEP_SCREENING_WAIT,
+                auto_mode="ON",
+                paused=False,
+                screening_started_at=time.time(),
+            )
             v2_runtime.set(v2_state)
             await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
             print(f"✅ START8 switched to V2 flow peer={peer_id}")
@@ -3209,6 +3457,11 @@ async def main():
                     return
                 print(f"✅ Test user bypassed enabled check: {peer_id}")
         if peer_id in processing_peers:
+            if FLOW_V2_ENABLED:
+                bucket = buffered_incoming.setdefault(peer_id, deque())
+                bucket.append(text)
+                print(f"ℹ️ Buffered incoming peer={peer_id} size={len(bucket)}")
+                return
             if not is_test:
                 print(f"⚠️ Filtered already processing: {peer_id}")
                 return
@@ -3237,21 +3490,10 @@ async def main():
             )
 
             if FLOW_V2_ENABLED:
-                if not v2_enrollment.has(peer_id):
-                    v2_enrollment.add(peer_id)
-                    seeded_state = PeerRuntimeState(peer_id=peer_id, flow_step=STEP_SCREENING_WAIT, auto_mode="ON", paused=False)
-                    v2_runtime.set(seeded_state)
-                    await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
-                    print(f"✅ V2 auto-enrolled peer={peer_id}")
-                    last_reply_at[peer_id] = time.time()
-                    return
-                v2_state = v2_runtime.get(peer_id)
-                v2_intent = detect_intent_v2(text, v2_state.flow_step).intent
-                handled_v2 = await handle_v2_message(sender, text, v2_intent)
+                handled_v2 = await process_v2_turn(sender, text)
                 if handled_v2:
                     last_reply_at[peer_id] = time.time()
                     return
-                print(f"⚠️ V2 handler returned no-op peer={peer_id} step={v2_state.flow_step}")
                 return
 
             history = await build_ai_history(client, sender, limit=10)
@@ -3447,6 +3689,22 @@ async def main():
             await continue_flow(sender, last_step, text)
         finally:
             processing_peers.discard(peer_id)
+            if FLOW_V2_ENABLED:
+                while True:
+                    queued = buffered_incoming.get(peer_id)
+                    if not queued:
+                        break
+                    next_text = queued.popleft()
+                    if not queued:
+                        buffered_incoming.pop(peer_id, None)
+                    processing_peers.add(peer_id)
+                    try:
+                        await process_v2_turn(sender, next_text)
+                        last_reply_at[peer_id] = time.time()
+                    except Exception as err:
+                        print(f"⚠️ Buffered V2 process error peer={peer_id}: {type(err).__name__}: {err}")
+                    finally:
+                        processing_peers.discard(peer_id)
 
     print("🤖 Автовідповідач запущено")
     async def followup_loop():
@@ -3502,6 +3760,16 @@ async def main():
                                 await send_v2_message(entity, V2_GATE_REMINDER_TEXT, v2s.qa_gate_step or v2s.flow_step, status="знак питання")
                                 v2s.qa_gate_reminder_sent = True
                                 v2_runtime.set(v2s)
+                        if v2s.flow_step == STEP_SCREENING_WAIT:
+                            started = float(v2s.screening_started_at or 0)
+                            if started > 0 and not (v2s.screening_answers or []):
+                                if (time.time() - started) >= SCREENING_WAIT_SEC:
+                                    await send_v2_message(entity, COMPANY_INTRO_TIMEOUT_TEXT, STEP_COMPANY_INTRO, status="🏢 Знайомство з компанією")
+                                    v2s.flow_step = STEP_COMPANY_INTRO
+                                    v2s.screening_started_at = 0.0
+                                    v2s.screening_last_at = 0.0
+                                    v2_runtime.set(v2s)
+                                    continue
                         if v2s.flow_step == STEP_VOICE_WAIT and v2s.voice_stage in {VOICE_SENT, VOICE_FALLBACK_SENT}:
                             elapsed = time.time() - float(v2s.voice_sent_at or 0)
                             if v2s.voice_stage == VOICE_SENT and elapsed >= VOICE_FALLBACK_DELAY_SEC:
@@ -3509,9 +3777,17 @@ async def main():
                                 v2s.voice_stage = VOICE_FALLBACK_SENT
                                 v2_runtime.set(v2s)
                             elif elapsed >= (VOICE_FALLBACK_DELAY_SEC + VOICE_AUTO_CONTINUE_DELAY_SEC):
-                                await send_v2_message(entity, SCHEDULE_BLOCK_TEXT, STEP_SCHEDULE_BLOCK, status="🕒 Графік")
+                                await send_v2_message(entity, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status="🕒 Графік")
                                 v2s.voice_stage = VOICE_AUTO_ADVANCED
+                                v2s.flow_step = STEP_SCHEDULE_SHIFT_WAIT
+                                v2s.shift_prompted_at = time.time()
+                                v2_runtime.set(v2s)
+                        if v2s.flow_step == STEP_SCHEDULE_SHIFT_WAIT and float(v2s.shift_prompted_at or 0) > 0:
+                            if (time.time() - float(v2s.shift_prompted_at or 0)) >= SCHEDULE_SHIFT_WAIT_SEC:
+                                await send_v2_message(entity, SCHEDULE_DETAILS_TEXT, STEP_SCHEDULE_BLOCK, status="🕒 Графік")
+                                await send_v2_message(entity, SCHEDULE_CONFIRM_TEXT, STEP_SCHEDULE_CONFIRM, status="🕒 Графік")
                                 v2s.flow_step = STEP_SCHEDULE_CONFIRM
+                                v2s.shift_prompted_at = 0.0
                                 v2_runtime.set(v2s)
 
                 if not FLOW_V2_ENABLED:
