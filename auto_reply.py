@@ -217,7 +217,7 @@ SHEETS_QUEUE_FLUSH_SEC = float(os.environ.get("AUTO_REPLY_SHEETS_QUEUE_FLUSH_SEC
 SHEETS_QUEUE_BATCH_SIZE = int(os.environ.get("AUTO_REPLY_SHEETS_QUEUE_BATCH_SIZE", "20"))
 SHEETS_QUEUE_LOG_SEC = int(os.environ.get("AUTO_REPLY_SHEETS_QUEUE_LOG_SEC", "30"))
 CONTINUE_DELAY_SEC = float(os.environ.get("AUTO_REPLY_CONTINUE_DELAY_SEC", "0"))
-FLOW_V2_ENABLED = os.environ.get("FLOW_V2_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+FLOW_V2_ENABLED = True
 V2_ENROLLMENT_PATH = os.environ.get("AUTO_REPLY_V2_ENROLLMENT_PATH", "/opt/tg_leads/.auto_reply.v2_enrolled.json")
 V2_RUNTIME_PATH = os.environ.get("AUTO_REPLY_V2_RUNTIME_PATH", "/opt/tg_leads/.auto_reply.v2_runtime.json")
 VOICE_MESSAGE_LINK = os.environ.get("VOICE_MESSAGE_LINK", "").strip()
@@ -2929,23 +2929,25 @@ async def main():
                 auto_toggle_value = False
             pause_store.set_status(entity.id, username, name, chat_link, status, updated_by="manual")
             if text_lower in START_COMMANDS:
-                reconciled_step, recover_source = await reconcile_dialog_step(entity, use_cache=False)
-                if not reconciled_step:
-                    reconciled_step = STEP_SHIFT_QUESTION
-                    recover_source = "fallback"
-                    step_state.set(entity.id, reconciled_step)
-                    print(f"MISSING_STEP_FALLBACK peer={entity.id} chosen={STEP_SHIFT_QUESTION}")
-                print(f"START1_RECOVER peer={entity.id} source={recover_source} step={reconciled_step}")
+                recover_source = "v2"
+                v2_enrollment.add(entity.id)
+                current_v2 = v2_runtime.get(entity.id)
+                if not current_v2.flow_step:
+                    current_v2 = PeerRuntimeState(peer_id=entity.id, flow_step=STEP_SCREENING_WAIT, auto_mode="ON", paused=False)
+                current_v2.auto_mode = "ON"
+                current_v2.paused = False
+                v2_runtime.set(current_v2)
+                print(f"START1_RECOVER peer={entity.id} source=v2 step={current_v2.flow_step}")
             queue_today_upsert(
                 peer_id=entity.id,
                 name=name,
                 username=username,
                 chat_link=chat_link,
                 auto_reply_enabled=auto_toggle_value,
-                tech_step=(step_state.get(entity.id) if text_lower in START_COMMANDS else None),
+                tech_step=(v2_runtime.get(entity.id).flow_step if text_lower in START_COMMANDS else None),
                 sender_role="operator",
                 dialog_mode=("ON" if text_lower in START_COMMANDS else "OFF"),
-                step_snapshot=step_state.get(entity.id) or "",
+                step_snapshot=(v2_runtime.get(entity.id).flow_step if text_lower in START_COMMANDS else ""),
                 full_text=text,
                 event_type_override=(
                     f"START1_RECOVER ({recover_source})" if text_lower in START_COMMANDS else None
@@ -2983,36 +2985,15 @@ async def main():
             print(f"⏭️ Призупинено для користувача: {entity.id}")
             return
 
-        if await has_outgoing_template(client, entity, step_state):
-            print(f"ℹ️ Вже контактували: {entity.id}")
-            return
-
         enabled_peers.add(entity.id)
-        if FLOW_V2_ENABLED:
-            v2_enrollment.add(entity.id)
-            v2_state = v2_runtime.get(entity.id)
-            v2_state.flow_step = STEP_SCREENING_WAIT
-            v2_state.auto_mode = "ON"
-            v2_state.paused = False
-            v2_runtime.set(v2_state)
-            await send_v2_message(entity, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
-            print(f"✅ V2 onboarding message sent: {entity.id}")
-            return
-        await send_and_update(
-            client,
-            sheet,
-            tz,
-            entity,
-            CONTACT_TEXT,
-            status_for_text(CONTACT_TEXT),
-            use_ai=True,
-            draft=CONTACT_TEXT,
-            step_state=step_state,
-            step_name=STEP_CONTACT,
-            auto_reply_enabled=True,
-            followup_state=followup_state,
-        )
-        print(f"✅ Надіслано перше повідомлення: {entity.id}")
+        v2_enrollment.add(entity.id)
+        v2_state = v2_runtime.get(entity.id)
+        v2_state.flow_step = STEP_SCREENING_WAIT
+        v2_state.auto_mode = "ON"
+        v2_state.paused = False
+        v2_runtime.set(v2_state)
+        await send_v2_message(entity, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
+        print(f"✅ V2 onboarding message sent: {entity.id}")
 
     if traffic_group:
         async def process_traffic_registration(chat_id: int, message_id: int):
@@ -3200,24 +3181,17 @@ async def main():
             enabled_peers.add(peer_id)
             clear_qa_gate(peer_id)
             step_state.delete(peer_id)
+            v2_runtime.delete(peer_id)
             last_reply_at.pop(peer_id, None)
             last_incoming_at.pop(peer_id, None)
             pending_question_resume.pop(peer_id, None)
             processing_peers.discard(peer_id)
             pause_store.set_status(sender.id, username, name, chat_link, "ACTIVE", updated_by="test")
-            await send_and_update(
-                client,
-                sheet,
-                tz,
-                sender,
-                CONTACT_TEXT,
-                status_for_text(CONTACT_TEXT),
-                use_ai=True,
-                draft=CONTACT_TEXT,
-                step_state=step_state,
-                step_name=STEP_CONTACT,
-                auto_reply_enabled=True,
-            )
+            v2_enrollment.add(peer_id)
+            v2_state = PeerRuntimeState(peer_id=peer_id, flow_step=STEP_SCREENING_WAIT, auto_mode="ON", paused=False)
+            v2_runtime.set(v2_state)
+            await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
+            print(f"✅ START8 switched to V2 flow peer={peer_id}")
             return
         is_test = is_test_user(sender)
         if is_paused(sender):
@@ -3262,13 +3236,23 @@ async def main():
                 followup_last_sent_at="",
             )
 
-            if FLOW_V2_ENABLED and v2_enrollment.has(peer_id):
+            if FLOW_V2_ENABLED:
+                if not v2_enrollment.has(peer_id):
+                    v2_enrollment.add(peer_id)
+                    seeded_state = PeerRuntimeState(peer_id=peer_id, flow_step=STEP_SCREENING_WAIT, auto_mode="ON", paused=False)
+                    v2_runtime.set(seeded_state)
+                    await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
+                    print(f"✅ V2 auto-enrolled peer={peer_id}")
+                    last_reply_at[peer_id] = time.time()
+                    return
                 v2_state = v2_runtime.get(peer_id)
                 v2_intent = detect_intent_v2(text, v2_state.flow_step).intent
                 handled_v2 = await handle_v2_message(sender, text, v2_intent)
                 if handled_v2:
                     last_reply_at[peer_id] = time.time()
                     return
+                print(f"⚠️ V2 handler returned no-op peer={peer_id} step={v2_state.flow_step}")
+                return
 
             history = await build_ai_history(client, sender, limit=10)
             last_step_hint = step_state.get(peer_id)
@@ -3469,39 +3453,40 @@ async def main():
         while not stop_event.is_set():
             try:
                 now = datetime.now(tz)
-                for peer_id, state in list(qa_gate_state.items()):
-                    if not state.get("qa_gate_active"):
-                        continue
-                    opened_at = float(state.get("qa_gate_opened_at", 0) or 0)
-                    reminder_sent = bool(state.get("qa_gate_reminder_sent"))
-                    if reminder_sent:
-                        continue
-                    if now.timestamp() < opened_at + QA_GATE_REMINDER_DELAY_SEC:
-                        continue
-                    if peer_id not in enabled_peers:
-                        continue
-                    try:
-                        entity = await client.get_entity(peer_id)
-                    except Exception:
-                        continue
-                    if is_paused(entity):
-                        continue
-                    gate_step = (state.get("qa_gate_step") or "").strip() or None
-                    await send_and_update(
-                        client,
-                        sheet,
-                        tz,
-                        entity,
-                        QA_GATE_REMINDER_TEXT,
-                        "знак питання",
-                        use_ai=False,
-                        schedule_followup=False,
-                        step_state=step_state,
-                        step_name=gate_step,
-                        followup_state=followup_state,
-                    )
-                    state["qa_gate_reminder_sent"] = True
-                    qa_gate_state[peer_id] = state
+                if not FLOW_V2_ENABLED:
+                    for peer_id, state in list(qa_gate_state.items()):
+                        if not state.get("qa_gate_active"):
+                            continue
+                        opened_at = float(state.get("qa_gate_opened_at", 0) or 0)
+                        reminder_sent = bool(state.get("qa_gate_reminder_sent"))
+                        if reminder_sent:
+                            continue
+                        if now.timestamp() < opened_at + QA_GATE_REMINDER_DELAY_SEC:
+                            continue
+                        if peer_id not in enabled_peers:
+                            continue
+                        try:
+                            entity = await client.get_entity(peer_id)
+                        except Exception:
+                            continue
+                        if is_paused(entity):
+                            continue
+                        gate_step = (state.get("qa_gate_step") or "").strip() or None
+                        await send_and_update(
+                            client,
+                            sheet,
+                            tz,
+                            entity,
+                            QA_GATE_REMINDER_TEXT,
+                            "знак питання",
+                            use_ai=False,
+                            schedule_followup=False,
+                            step_state=step_state,
+                            step_name=gate_step,
+                            followup_state=followup_state,
+                        )
+                        state["qa_gate_reminder_sent"] = True
+                        qa_gate_state[peer_id] = state
 
                 if FLOW_V2_ENABLED:
                     for peer_id in list(v2_enrollment.data):
@@ -3529,86 +3514,87 @@ async def main():
                                 v2s.flow_step = STEP_SCHEDULE_CONFIRM
                                 v2_runtime.set(v2s)
 
-                for key, state in list(followup_state.data.items()):
-                    try:
-                        peer_id = int(key)
-                    except ValueError:
-                        continue
-                    if str(peer_id) == TEST_USER_ID:
-                        continue
-                    next_at = state.get("next_at")
-                    stage = state.get("stage")
-                    if next_at is None or stage is None:
-                        continue
-                    if now.timestamp() < float(next_at):
-                        continue
-                    delay_sec, text = FOLLOWUP_TEMPLATES[int(stage)]
-                    if not within_followup_window(now):
-                        adjusted = adjust_to_followup_window(now)
-                        state["next_at"] = adjusted.timestamp()
-                        followup_state.data[key] = state
-                        followup_state._save()
-                        continue
-                    try:
-                        entity = await client.get_entity(peer_id)
-                    except Exception:
-                        continue
-                    await send_and_update(
-                        client,
-                        sheet,
-                        tz,
-                        entity,
-                        text,
-                        status_for_text(text),
-                        use_ai=False,
-                        schedule_followup=False,
-                        followup_state=followup_state,
-                    )
-                    next_stage, next_dt = followup_state.mark_sent_and_advance(peer_id, tz)
-                    stage_value = str(next_stage + 1) if next_stage is not None else ""
-                    next_value = next_dt.isoformat(timespec="seconds") if next_dt else ""
-                    queue_today_upsert(
-                        peer_id=peer_id,
-                        name=getattr(entity, "first_name", "") or "Unknown",
-                        username=getattr(entity, "username", "") or "",
-                        chat_link=build_chat_link_app(entity, peer_id),
-                        followup_stage=stage_value,
-                        followup_next_at=next_value,
-                        followup_last_sent_at=datetime.now(tz).isoformat(timespec="seconds"),
-                    )
+                if not FLOW_V2_ENABLED:
+                    for key, state in list(followup_state.data.items()):
+                        try:
+                            peer_id = int(key)
+                        except ValueError:
+                            continue
+                        if str(peer_id) == TEST_USER_ID:
+                            continue
+                        next_at = state.get("next_at")
+                        stage = state.get("stage")
+                        if next_at is None or stage is None:
+                            continue
+                        if now.timestamp() < float(next_at):
+                            continue
+                        delay_sec, text = FOLLOWUP_TEMPLATES[int(stage)]
+                        if not within_followup_window(now):
+                            adjusted = adjust_to_followup_window(now)
+                            state["next_at"] = adjusted.timestamp()
+                            followup_state.data[key] = state
+                            followup_state._save()
+                            continue
+                        try:
+                            entity = await client.get_entity(peer_id)
+                        except Exception:
+                            continue
+                        await send_and_update(
+                            client,
+                            sheet,
+                            tz,
+                            entity,
+                            text,
+                            status_for_text(text),
+                            use_ai=False,
+                            schedule_followup=False,
+                            followup_state=followup_state,
+                        )
+                        next_stage, next_dt = followup_state.mark_sent_and_advance(peer_id, tz)
+                        stage_value = str(next_stage + 1) if next_stage is not None else ""
+                        next_value = next_dt.isoformat(timespec="seconds") if next_dt else ""
+                        queue_today_upsert(
+                            peer_id=peer_id,
+                            name=getattr(entity, "first_name", "") or "Unknown",
+                            username=getattr(entity, "username", "") or "",
+                            chat_link=build_chat_link_app(entity, peer_id),
+                            followup_stage=stage_value,
+                            followup_next_at=next_value,
+                            followup_last_sent_at=datetime.now(tz).isoformat(timespec="seconds"),
+                        )
 
-                for peer_id, state in list(pending_question_resume.items()):
-                    if now.timestamp() < float(state.get("due_at", 0)):
-                        continue
-                    if peer_id in processing_peers:
-                        continue
-                    if peer_id not in enabled_peers:
-                        pending_question_resume.pop(peer_id, None)
-                        continue
-                    baseline_in = float(state.get("last_incoming_at", 0))
-                    latest_in = float(last_incoming_at.get(peer_id, 0))
-                    if latest_in > baseline_in:
-                        pending_question_resume.pop(peer_id, None)
-                        continue
-                    try:
-                        entity = await client.get_entity(peer_id)
-                    except Exception:
-                        continue
-                    if is_paused(entity):
-                        pending_question_resume.pop(peer_id, None)
-                        continue
-                    step_name = state.get("step")
-                    if not step_name:
-                        pending_question_resume.pop(peer_id, None)
-                        continue
-                    processing_peers.add(peer_id)
-                    try:
-                        await continue_flow(entity, step_name, "")
-                    except Exception as err:
-                        print(f"⚠️ Question-resume error: {err}")
-                    finally:
-                        processing_peers.discard(peer_id)
-                        pending_question_resume.pop(peer_id, None)
+                    for peer_id, state in list(pending_question_resume.items()):
+                        if now.timestamp() < float(state.get("due_at", 0)):
+                            continue
+                        if peer_id in processing_peers:
+                            continue
+                        if peer_id not in enabled_peers:
+                            pending_question_resume.pop(peer_id, None)
+                            continue
+                        baseline_in = float(state.get("last_incoming_at", 0))
+                        latest_in = float(last_incoming_at.get(peer_id, 0))
+                        if latest_in > baseline_in:
+                            pending_question_resume.pop(peer_id, None)
+                            continue
+                        try:
+                            entity = await client.get_entity(peer_id)
+                        except Exception:
+                            continue
+                        if is_paused(entity):
+                            pending_question_resume.pop(peer_id, None)
+                            continue
+                        step_name = state.get("step")
+                        if not step_name:
+                            pending_question_resume.pop(peer_id, None)
+                            continue
+                        processing_peers.add(peer_id)
+                        try:
+                            await continue_flow(entity, step_name, "")
+                        except Exception as err:
+                            print(f"⚠️ Question-resume error: {err}")
+                        finally:
+                            processing_peers.discard(peer_id)
+                            pending_question_resume.pop(peer_id, None)
             except Exception as err:
                 print(f"⚠️ Followup loop error: {err}")
             await asyncio.sleep(FOLLOWUP_CHECK_SEC)
