@@ -626,6 +626,26 @@ def parse_shift_choice(text: str) -> Optional[str]:
     return None
 
 
+def is_voice_decline(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    if t in {"ні", "нет", "не", "нi", "no"}:
+        return True
+    return any(
+        phrase in t
+        for phrase in (
+            "не зручно",
+            "незручно",
+            "без голосового",
+            "без аудіо",
+            "без аудио",
+            "не треба голосове",
+            "не нужно голосовое",
+        )
+    )
+
+
 def split_answer_lines(text: str) -> List[str]:
     raw = (text or "").strip()
     if not raw:
@@ -2762,6 +2782,7 @@ async def main():
             return False
         state = v2_runtime.get(sender.id)
         step_name = state.flow_step or STEP_SCREENING_WAIT
+        voice_decline = step_name == STEP_COMPANY_INTRO and is_voice_decline(text)
 
         if state.rejected_by_age in {"under18", "over40"}:
             if not state.referral_after_reject_sent:
@@ -2862,7 +2883,7 @@ async def main():
             enqueue_faq_question(sender.id, step_name, text, answer_text)
             return True
 
-        if intent_name == "stop":
+        if intent_name == "stop" and not voice_decline:
             await send_v2_message(sender, STOP_REPLY_TEXT, step_name, status=AUTO_STOP_STATUS)
             state.auto_mode = "OFF"
             state.paused = True
