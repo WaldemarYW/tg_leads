@@ -229,7 +229,7 @@ def ensure_headers(ws, headers: List[str], strict: bool = True):
         for h in headers:
             if h not in existing:
                 new_headers.append(h)
-        ws.update("1:1", [new_headers])
+        ws.update(range_name="1:1", values=[new_headers])
 
 
 def get_or_create_worksheet(sh, title: str, rows: int, cols: int):

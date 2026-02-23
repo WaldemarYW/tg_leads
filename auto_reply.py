@@ -1604,10 +1604,18 @@ class GroupLeadsSheet:
             take("raw_text", 9),
         ]
         if row_idx:
-            self.ws.update(f"A{row_idx}:J{row_idx}", [row], value_input_option="USER_ENTERED")
+            self.ws.update(
+                range_name=f"A{row_idx}:J{row_idx}",
+                values=[row],
+                value_input_option="USER_ENTERED",
+            )
         else:
             next_row = len(values) + 1
-            self.ws.update(f"A{next_row}:J{next_row}", [row], value_input_option="USER_ENTERED")
+            self.ws.update(
+                range_name=f"A{next_row}:J{next_row}",
+                values=[row],
+                value_input_option="USER_ENTERED",
+            )
 
 
 class RegistrationSheet:
@@ -1622,22 +1630,22 @@ class RegistrationSheet:
             current = self.ws.row_values(1)
             if not current:
                 self.ws.update(
-                    f"A1:{col_letter(len(REGISTRATION_HEADERS))}1",
-                    [REGISTRATION_HEADERS],
+                    range_name=f"A1:{col_letter(len(REGISTRATION_HEADERS))}1",
+                    values=[REGISTRATION_HEADERS],
                     value_input_option="USER_ENTERED",
                 )
                 return
             if current[: len(REGISTRATION_HEADERS)] != REGISTRATION_HEADERS:
                 self.ws.update(
-                    f"A1:{col_letter(len(REGISTRATION_HEADERS))}1",
-                    [REGISTRATION_HEADERS],
+                    range_name=f"A1:{col_letter(len(REGISTRATION_HEADERS))}1",
+                    values=[REGISTRATION_HEADERS],
                     value_input_option="USER_ENTERED",
                 )
             if len(current) > len(REGISTRATION_HEADERS):
                 extra = len(current) - len(REGISTRATION_HEADERS)
                 self.ws.update(
-                    f"{col_letter(len(REGISTRATION_HEADERS) + 1)}1:{col_letter(len(current))}1",
-                    [[""] * extra],
+                    range_name=f"{col_letter(len(REGISTRATION_HEADERS) + 1)}1:{col_letter(len(current))}1",
+                    values=[[""] * extra],
                     value_input_option="USER_ENTERED",
                 )
         except Exception as err:
@@ -1684,15 +1692,15 @@ class RegistrationSheet:
         end_col = col_letter(len(REGISTRATION_HEADERS))
         if row_idx:
             self.ws.update(
-                f"A{row_idx}:{end_col}{row_idx}",
-                [row],
+                range_name=f"A{row_idx}:{end_col}{row_idx}",
+                values=[row],
                 value_input_option="USER_ENTERED",
             )
             return
         next_row = len(values) + 1
         self.ws.update(
-            f"A{next_row}:{end_col}{next_row}",
-            [row],
+            range_name=f"A{next_row}:{end_col}{next_row}",
+            values=[row],
             value_input_option="USER_ENTERED",
         )
 
