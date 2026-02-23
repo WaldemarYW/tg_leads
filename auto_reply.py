@@ -2321,6 +2321,7 @@ async def main():
     client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
     processing_peers = set()
     buffered_incoming: Dict[int, deque] = {}
+    restart_generation: Dict[int, int] = {}
     paused_peers = set()
     enabled_peers = set()
     last_reply_at = {}
@@ -3493,6 +3494,7 @@ async def main():
             return
         peer_id = sender.id
         text = event.raw_text or ""
+        local_generation = int(restart_generation.get(peer_id, 0))
         name = getattr(sender, "first_name", "") or "Unknown"
         username = getattr(sender, "username", "") or ""
         chat_link = build_chat_link_app(sender, sender.id)
@@ -3520,6 +3522,7 @@ async def main():
         )
 
         if is_test_restart(sender, text):
+            restart_generation[peer_id] = int(restart_generation.get(peer_id, 0)) + 1
             paused_peers.discard(peer_id)
             enabled_peers.add(peer_id)
             clear_qa_gate(peer_id)
@@ -3529,6 +3532,7 @@ async def main():
             last_incoming_at.pop(peer_id, None)
             pending_question_resume.pop(peer_id, None)
             processing_peers.discard(peer_id)
+            buffered_incoming.pop(peer_id, None)
             pause_store.set_status(sender.id, username, name, chat_link, "ACTIVE", updated_by="test")
             v2_enrollment.add(peer_id)
             v2_state = PeerRuntimeState(
@@ -3560,7 +3564,7 @@ async def main():
         if peer_id in processing_peers:
             if FLOW_V2_ENABLED:
                 bucket = buffered_incoming.setdefault(peer_id, deque())
-                bucket.append(text)
+                bucket.append((int(restart_generation.get(peer_id, 0)), text))
                 print(f"ℹ️ Buffered incoming peer={peer_id} size={len(bucket)}")
                 return
             if not is_test:
@@ -3577,6 +3581,8 @@ async def main():
         processing_peers.add(peer_id)
 
         try:
+            if FLOW_V2_ENABLED and local_generation != int(restart_generation.get(peer_id, 0)):
+                return
             last_incoming_at[peer_id] = time.time()
             pending_question_resume.pop(peer_id, None)
             followup_state.clear(peer_id)
@@ -3795,9 +3801,15 @@ async def main():
                     queued = buffered_incoming.get(peer_id)
                     if not queued:
                         break
-                    next_text = queued.popleft()
+                    item = queued.popleft()
+                    if isinstance(item, tuple):
+                        msg_generation, next_text = item
+                    else:
+                        msg_generation, next_text = int(restart_generation.get(peer_id, 0)), str(item)
                     if not queued:
                         buffered_incoming.pop(peer_id, None)
+                    if int(msg_generation) != int(restart_generation.get(peer_id, 0)):
+                        continue
                     processing_peers.add(peer_id)
                     try:
                         await process_v2_turn(sender, next_text)
