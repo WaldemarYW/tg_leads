@@ -409,9 +409,11 @@ GROUP_LEADS_HEADERS = [
     "Статус",
     "ФИО",
     "Возраст",
+    "Желаемый доход",
     "Телефон",
     "Telegram",
     "ПК/ноутбук",
+    "Примечание",
     "ID источника",
     "Источник",
     "Сырой текст",
@@ -463,8 +465,12 @@ GROUP_KEY_MAP = {
     "імя": "full_name",
     "ім'я": "full_name",
     "имя": "full_name",
+    "користувач": "tg",
+    "пользователь": "tg",
     "вік": "age",
     "возраст": "age",
+    "бажаний дохід": "desired_income",
+    "желаемый доход": "desired_income",
     "номер телефону": "phone",
     "номер телефона": "phone",
     "телефон": "phone",
@@ -472,9 +478,16 @@ GROUP_KEY_MAP = {
     "тг": "tg",
     "tg": "tg",
     "telegram": "tg",
+    "ноутбук": "pc",
     "чи є пк": "pc",
     "є пк": "pc",
     "pc": "pc",
+    "примітка": "note",
+    "примечание": "note",
+    "профіль користувача": "profile_link",
+    "профиль пользователя": "profile_link",
+    "реферал від": "source_name",
+    "реферал от": "source_name",
     "id": "source_id",
     "name": "source_name",
 }
@@ -609,6 +622,13 @@ def is_test_user(sender: User) -> bool:
     if not sender:
         return False
     return str(getattr(sender, "id", "")) == TEST_USER_ID
+
+
+def is_plus_chat_start(text: str) -> bool:
+    t = normalize_text(text or "")
+    if not t:
+        return False
+    return t == "+"
 
 
 def parse_shift_choice(text: str) -> Optional[str]:
@@ -848,24 +868,56 @@ def parse_group_message(text: str) -> dict:
         line = line.strip()
         if not line:
             continue
-        match = re.match(r"^[🔹•\-\*]\s*(.+?)\s*:\s*(.+)$", line)
-        if not match:
-            match = re.match(r"^(ID|Name)\s*:\s*(.+)$", line, flags=re.IGNORECASE)
-        if not match:
+        if ":" not in line:
             continue
-        key_raw, value = match.group(1), match.group(2)
+        key_raw, value = line.split(":", 1)
+        key_raw = key_raw.strip()
+        value = value.strip()
+        if not key_raw or not value:
+            continue
         key_norm = normalize_key(key_raw)
         field = GROUP_KEY_MAP.get(key_norm)
         if field:
-            data[field] = value.strip()
+            data[field] = value
 
     username, phone = extract_contact(text or "")
+    profile_link = (data.get("profile_link") or "").strip()
+    if profile_link and not username:
+        profile_match = USERNAME_RE.search(profile_link)
+        if profile_match:
+            username = profile_match.group(1)
     if username and not data.get("tg"):
         data["tg"] = f"@{username}"
+    tg_value = (data.get("tg") or "").strip()
+    if tg_value and not tg_value.startswith("@"):
+        tg_match = USERNAME_RE.search(tg_value)
+        if tg_match:
+            data["tg"] = f"@{tg_match.group(1)}"
     if phone and not data.get("phone"):
         data["phone"] = phone
     data["raw_text"] = (text or "").strip()
     return data
+
+
+def is_no_laptop_value(value: str) -> bool:
+    t = normalize_text(value or "")
+    if not t:
+        return False
+    if "так" in t or "є" in t:
+        return False
+    return any(
+        marker in t
+        for marker in (
+            "ні",
+            "нет",
+            "немає",
+            "нема",
+            "відсут",
+            "без ноут",
+            "без пк",
+            "нету",
+        )
+    )
 
 
 class SheetWriter:
@@ -1596,23 +1648,26 @@ class GroupLeadsSheet:
             status or take("status", 1),
             take("full_name", 2),
             take("age", 3),
-            take("phone", 4),
-            take("tg", 5),
-            take("pc", 6),
-            take("source_id", 7),
-            take("source_name", 8),
-            take("raw_text", 9),
+            take("desired_income", 4),
+            take("phone", 5),
+            take("tg", 6),
+            take("pc", 7),
+            take("note", 8),
+            take("source_id", 9),
+            take("source_name", 10),
+            take("raw_text", 11),
         ]
+        end_col = col_letter(len(GROUP_LEADS_HEADERS))
         if row_idx:
             self.ws.update(
-                range_name=f"A{row_idx}:J{row_idx}",
+                range_name=f"A{row_idx}:{end_col}{row_idx}",
                 values=[row],
                 value_input_option="USER_ENTERED",
             )
         else:
             next_row = len(values) + 1
             self.ws.update(
-                range_name=f"A{next_row}:J{next_row}",
+                range_name=f"A{next_row}:{end_col}{next_row}",
                 values=[row],
                 value_input_option="USER_ENTERED",
             )
@@ -3303,9 +3358,10 @@ async def main():
     @client.on(events.NewMessage(chats=leads_group))
     async def on_lead_message(event):
         text = event.raw_text or ""
+        group_data = {}
+        group_status = status_for_text(CONTACT_TEXT)
         try:
             group_data = parse_group_message(text)
-            group_status = status_for_text(CONTACT_TEXT)
             if not enqueue_sheet_event("group_leads_upsert", {"data": group_data, "status": group_status}):
                 try:
                     group_leads_sheet.upsert(tz, group_data, group_status)
@@ -3314,6 +3370,17 @@ async def main():
                     print(f"⚠️ SHEETS_DIRECT_WRITE_FAIL group_leads: {type(err).__name__}: {err}")
         except Exception:
             pass
+        if is_no_laptop_value(group_data.get("pc", "")):
+            print("⏭️ Пропускаю контакт: в анкеті немає ПК/ноутбука")
+            if group_data:
+                skip_status = "⛔ Без ПК/ноутбука"
+                if not enqueue_sheet_event("group_leads_upsert", {"data": group_data, "status": skip_status}):
+                    try:
+                        group_leads_sheet.upsert(tz, group_data, skip_status)
+                        print("AUTO_REPLY_CONTINUE despite_sheet_error peer=group_lead")
+                    except Exception as err:
+                        print(f"⚠️ SHEETS_DIRECT_WRITE_FAIL group_leads: {type(err).__name__}: {err}")
+            return
         username, phone = extract_contact(text)
         if not username and not phone:
             return
@@ -3520,6 +3587,32 @@ async def main():
             step_snapshot=current_step_snapshot,
             full_text=text,
         )
+
+        plus_start = is_plus_chat_start(text)
+        if plus_start and (pause_status == "PAUSED" or peer_id in paused_peers or peer_id not in enabled_peers):
+            paused_peers.discard(peer_id)
+            enabled_peers.add(peer_id)
+            clear_qa_gate(peer_id)
+            step_state.delete(peer_id)
+            v2_runtime.delete(peer_id)
+            last_reply_at.pop(peer_id, None)
+            last_incoming_at.pop(peer_id, None)
+            pending_question_resume.pop(peer_id, None)
+            processing_peers.discard(peer_id)
+            buffered_incoming.pop(peer_id, None)
+            pause_store.set_status(sender.id, username, name, chat_link, "ACTIVE", updated_by="plus_start")
+            v2_enrollment.add(peer_id)
+            v2_state = PeerRuntimeState(
+                peer_id=peer_id,
+                flow_step=STEP_SCREENING_WAIT,
+                auto_mode="ON",
+                paused=False,
+                screening_started_at=time.time(),
+            )
+            v2_runtime.set(v2_state)
+            await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
+            print(f"✅ PLUS start switched to V2 flow peer={peer_id}")
+            return
 
         if is_test_restart(sender, text):
             restart_generation[peer_id] = int(restart_generation.get(peer_id, 0)) + 1
