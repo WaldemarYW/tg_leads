@@ -259,10 +259,8 @@ CLARIFY_NEGATIVE_FOLLOWUP_TEXT = (
     "Підкажіть, будь ласка, що саме залишилось незрозумілим?\n"
     "Я коротко поясню."
 )
-QA_GATE_CONFIRM_TEXT = "Чи залишилися ще питання? Якщо все зрозуміло — можемо йти далі 🙂"
 QA_GATE_REMINDER_TEXT = "Якщо зʼявилися ще питання — із радістю відповім. Коли будете готові, підемо далі 🙂"
 VOICE_FALLBACK_TEXT = "Якщо зʼявилися питання по голосовому — із радістю поясню. Коли будете готові, підемо далі 🙂"
-V2_GATE_CONFIRM_TEXT = "Чи залишилися ще питання? Якщо все зрозуміло — можемо йти далі 🙂"
 V2_GATE_REMINDER_TEXT = "Якщо зʼявилися ще питання — із радістю відповім. Коли будете готові, підемо далі 🙂"
 SCREENING_INTRO_TEXT = (
     "Привіт) Ви залишали відгук на вакансію менеджера чату. "
@@ -2553,21 +2551,6 @@ async def main():
         )
         return True
 
-    async def send_qa_gate_confirm(entity: User, step_name: Optional[str]):
-        await send_and_update(
-            client,
-            sheet,
-            tz,
-            entity,
-            QA_GATE_CONFIRM_TEXT,
-            "знак питання",
-            use_ai=False,
-            delay_before=QUESTION_GAP_SEC,
-            step_state=step_state,
-            step_name=step_name,
-            followup_state=followup_state,
-        )
-
     def peer_format_state(peer_id: int) -> dict:
         state = format_delivery_state.get(peer_id)
         if state is None:
@@ -2857,7 +2840,6 @@ async def main():
                     status="знак питання",
                     delay_before=QUESTION_RESPONSE_DELAY_SEC,
                 )
-                await send_v2_message(sender, V2_GATE_CONFIRM_TEXT, state.qa_gate_step or step_name, status="знак питання", delay_before=QUESTION_GAP_SEC)
                 state.qa_gate_opened_at = time.time()
                 state.qa_gate_reminder_sent = False
                 v2_runtime.set(state)
@@ -2879,7 +2861,9 @@ async def main():
                 v2_runtime.set(state)
                 return True
             else:
-                await send_v2_message(sender, V2_GATE_CONFIRM_TEXT, state.qa_gate_step or step_name, status="знак питання")
+                state.qa_gate_opened_at = time.time()
+                state.qa_gate_reminder_sent = False
+                v2_runtime.set(state)
                 return True
 
         if step_name == STEP_SCHEDULE_SHIFT_WAIT and intent_name == "question":
@@ -2904,7 +2888,6 @@ async def main():
             ans = await answer_from_faq(text, step_name, history, dialog_suggest, mode="detailed")
             answer_text = ans.text if ans else "Уточню деталі по вашому питанню і повернуся з точною відповіддю."
             await send_v2_message(sender, answer_text, step_name, status="знак питання", delay_before=QUESTION_RESPONSE_DELAY_SEC)
-            await send_v2_message(sender, V2_GATE_CONFIRM_TEXT, step_name, status="знак питання", delay_before=QUESTION_GAP_SEC)
             state.qa_gate_active = True
             state.qa_gate_step = step_name
             state.qa_gate_opened_at = time.time()
@@ -3707,7 +3690,6 @@ async def main():
                             step_name=gate_step,
                             followup_state=followup_state,
                         )
-                    await send_qa_gate_confirm(sender, gate_step)
                     set_qa_gate(peer_id, gate_step)
                     last_reply_at[peer_id] = time.time()
                     return
@@ -3724,7 +3706,6 @@ async def main():
                     await continue_flow(sender, resolved_step, text)
                     return
                 if intent == Intent.OTHER:
-                    await send_qa_gate_confirm(sender, gate_step)
                     set_qa_gate(peer_id, gate_step)
                     last_reply_at[peer_id] = time.time()
                     return
@@ -3836,7 +3817,6 @@ async def main():
                         step_state=step_state,
                         followup_state=followup_state,
                     )
-                await send_qa_gate_confirm(sender, last_step)
                 set_qa_gate(peer_id, last_step)
                 last_reply_at[peer_id] = time.time()
                 return
