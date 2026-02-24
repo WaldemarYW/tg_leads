@@ -3367,6 +3367,9 @@ async def main():
         v2_state.flow_step = STEP_SCREENING_WAIT
         v2_state.auto_mode = "ON"
         v2_state.paused = False
+        v2_state.screening_started_at = time.time()
+        v2_state.screening_last_at = 0.0
+        v2_state.screening_answers = []
         v2_runtime.set(v2_state)
         await send_v2_message(entity, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
         print(f"✅ V2 onboarding message sent: {entity.id}")
@@ -3981,54 +3984,53 @@ async def main():
                                 v2s.shift_prompted_at = 0.0
                                 v2_runtime.set(v2s)
 
-                if not FLOW_V2_ENABLED:
-                    for key, state in list(followup_state.data.items()):
-                        try:
-                            peer_id = int(key)
-                        except ValueError:
-                            continue
-                        if str(peer_id) == TEST_USER_ID:
-                            continue
-                        next_at = state.get("next_at")
-                        stage = state.get("stage")
-                        if next_at is None or stage is None:
-                            continue
-                        if now.timestamp() < float(next_at):
-                            continue
-                        delay_sec, text = FOLLOWUP_TEMPLATES[int(stage)]
-                        if not within_followup_window(now):
-                            adjusted = adjust_to_followup_window(now)
-                            state["next_at"] = adjusted.timestamp()
-                            followup_state.data[key] = state
-                            followup_state._save()
-                            continue
-                        try:
-                            entity = await client.get_entity(peer_id)
-                        except Exception:
-                            continue
-                        await send_and_update(
-                            client,
-                            sheet,
-                            tz,
-                            entity,
-                            text,
-                            status_for_text(text),
-                            use_ai=False,
-                            schedule_followup=False,
-                            followup_state=followup_state,
-                        )
-                        next_stage, next_dt = followup_state.mark_sent_and_advance(peer_id, tz)
-                        stage_value = str(next_stage + 1) if next_stage is not None else ""
-                        next_value = next_dt.isoformat(timespec="seconds") if next_dt else ""
-                        queue_today_upsert(
-                            peer_id=peer_id,
-                            name=getattr(entity, "first_name", "") or "Unknown",
-                            username=getattr(entity, "username", "") or "",
-                            chat_link=build_chat_link_app(entity, peer_id),
-                            followup_stage=stage_value,
-                            followup_next_at=next_value,
-                            followup_last_sent_at=datetime.now(tz).isoformat(timespec="seconds"),
-                        )
+                for key, state in list(followup_state.data.items()):
+                    try:
+                        peer_id = int(key)
+                    except ValueError:
+                        continue
+                    if str(peer_id) == TEST_USER_ID:
+                        continue
+                    next_at = state.get("next_at")
+                    stage = state.get("stage")
+                    if next_at is None or stage is None:
+                        continue
+                    if now.timestamp() < float(next_at):
+                        continue
+                    delay_sec, text = FOLLOWUP_TEMPLATES[int(stage)]
+                    if not within_followup_window(now):
+                        adjusted = adjust_to_followup_window(now)
+                        state["next_at"] = adjusted.timestamp()
+                        followup_state.data[key] = state
+                        followup_state._save()
+                        continue
+                    try:
+                        entity = await client.get_entity(peer_id)
+                    except Exception:
+                        continue
+                    await send_and_update(
+                        client,
+                        sheet,
+                        tz,
+                        entity,
+                        text,
+                        status_for_text(text),
+                        use_ai=False,
+                        schedule_followup=False,
+                        followup_state=followup_state,
+                    )
+                    next_stage, next_dt = followup_state.mark_sent_and_advance(peer_id, tz)
+                    stage_value = str(next_stage + 1) if next_stage is not None else ""
+                    next_value = next_dt.isoformat(timespec="seconds") if next_dt else ""
+                    queue_today_upsert(
+                        peer_id=peer_id,
+                        name=getattr(entity, "first_name", "") or "Unknown",
+                        username=getattr(entity, "username", "") or "",
+                        chat_link=build_chat_link_app(entity, peer_id),
+                        followup_stage=stage_value,
+                        followup_next_at=next_value,
+                        followup_last_sent_at=datetime.now(tz).isoformat(timespec="seconds"),
+                    )
 
                     for peer_id, state in list(pending_question_resume.items()):
                         if now.timestamp() < float(state.get("due_at", 0)):
