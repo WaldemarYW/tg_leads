@@ -704,67 +704,33 @@ def _contains_any(text: str, needles: Tuple[str, ...]) -> bool:
 
 def evaluate_test_answers(answers: List[str]) -> Tuple[bool, str]:
     a1 = normalize_text((answers[0] if len(answers) > 0 else "") or "")
-    a2 = normalize_text((answers[1] if len(answers) > 1 else "") or "")
-    a3 = normalize_text((answers[2] if len(answers) > 2 else "") or "")
-
     q1_ok = ("8" in a1 and _contains_any(a1, ("год", "годин", "година", "hours"))) or _contains_any(a1, ("вісім", "восем"))
-    q2_ok = "48" in a2 and "%" in a2
-    q3_ok = _contains_any(
-        a3,
-        (
-            "перевед",
-            "зміна команди",
-            "змiна команди",
-            "зміна адміністратора",
-            "змiна адміністратора",
-            "зміна тімліда",
-            "припинення співпраці",
-            "припинити співпрацю",
-            "звіль",
-            "звiль",
-            "завершення співпраці",
-        ),
-    )
-
-    if q1_ok and q2_ok and q3_ok:
+    if q1_ok:
         return True, "Дякую, відповіді вірні ✅ Можемо переходити до наступного етапу."
 
     return (
         False,
-        "Є неточності. Правильні відповіді:\n"
-        "1) Мінімум — 8 годин на день.\n"
-        "2) Гарантований відсоток у перший місяць — 48%.\n"
-        "3) HR може ухвалити рішення про переведення в іншу команду/до іншого адміністратора або про припинення співпраці.",
+        "Є неточність. Правильна відповідь: мінімум — 8 годин на день.",
     )
 
 
 def merge_test_answers(existing: List[str], text: str) -> List[str]:
-    answers = list(existing or ["", "", ""])
-    if len(answers) < 3:
-        answers = answers + [""] * (3 - len(answers))
+    answers = list(existing or [""])
+    if len(answers) < 1:
+        answers = answers + [""] * (1 - len(answers))
     candidate_lines = split_answer_lines(text)
     for line in candidate_lines:
         line_l = normalize_text(line)
-        idx = None
-        m = re.match(r"^\s*([123])[.):\-]?\s*(.+)$", line, flags=re.IGNORECASE)
+        m = re.match(r"^\s*[1][.):\-]?\s*(.+)$", line, flags=re.IGNORECASE)
         if m:
-            idx = int(m.group(1)) - 1
-            line = m.group(2).strip()
+            line = m.group(1).strip()
             line_l = normalize_text(line)
-        elif "%" in line_l:
-            idx = 1
-        elif "год" in line_l or "8" in line_l:
-            idx = 0
-        elif any(k in line_l for k in ("hr", "ейчар", "рішен", "решен", "перев", "звіль", "увільн", "звiль")):
-            idx = 2
-        if idx is None:
-            for i in range(3):
-                if not answers[i]:
-                    idx = i
-                    break
-        if idx is not None:
-            answers[idx] = line
-    return answers[:3]
+        if "год" in line_l or "8" in line_l or _contains_any(line_l, ("вісім", "восем")):
+            answers[0] = line
+            break
+        if not answers[0]:
+            answers[0] = line
+    return answers[:1]
 
 
 def mark_step_without_send(
@@ -3062,9 +3028,9 @@ async def main():
             state.test_message_count = int(state.test_message_count or 0) + 1
             state.test_last_message = (text or "").strip()
             state.test_prompted_at = state.test_prompted_at or time.time()
-            answers = merge_test_answers(state.test_answers or ["", "", ""], text)
+            answers = merge_test_answers(state.test_answers or [""], text)
             state.test_answers = answers
-            if not all((x or "").strip() for x in answers):
+            if not (answers and (answers[0] or "").strip()):
                 v2_runtime.set(state)
                 return True
             await finalize_test_review(sender, state, answers)
@@ -3982,8 +3948,8 @@ async def main():
                             if prompted_at > 0 and (time.time() - prompted_at) >= 300:
                                 msg_count = int(v2s.test_message_count or 0)
                                 if msg_count == 1 and (v2s.test_last_message or "").strip():
-                                    merged = merge_test_answers(v2s.test_answers or ["", "", ""], v2s.test_last_message or "")
-                                    if all((x or "").strip() for x in merged):
+                                    merged = merge_test_answers(v2s.test_answers or [""], v2s.test_last_message or "")
+                                    if merged and (merged[0] or "").strip():
                                         v2s.test_answers = merged
                                         await finalize_test_review(entity, v2s, merged)
                                         continue
