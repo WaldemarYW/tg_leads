@@ -25,6 +25,7 @@ class ClassifierTests(unittest.TestCase):
 
     def test_stop_phrase(self):
         self.assertTrue(is_stop_phrase("мені не цікаво"))
+        self.assertTrue(is_stop_phrase("Доброго дня, зрозуміло,не цікаво"))
         self.assertFalse(is_stop_phrase("все зрозуміло, дякую"))
 
     def test_continue_and_ack(self):

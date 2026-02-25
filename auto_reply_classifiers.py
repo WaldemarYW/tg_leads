@@ -155,6 +155,9 @@ def is_stop_phrase(text: str) -> bool:
         return False
     if message_has_question(text):
         return False
+    has_stop = any(phrase in t for phrase in STOP_PHRASES)
+    if has_stop:
+        return True
     if any(
         phrase in t
         for phrase in (
@@ -172,7 +175,7 @@ def is_stop_phrase(text: str) -> bool:
         )
     ):
         return False
-    return any(phrase in t for phrase in STOP_PHRASES)
+    return False
 
 
 def is_continue_phrase(text: str) -> bool:

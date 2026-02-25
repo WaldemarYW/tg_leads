@@ -3728,6 +3728,23 @@ async def main():
                 print(f"⚠️ SHEETS_QUEUE_LOOP_ERROR: {type(err).__name__}: {err}")
             await asyncio.sleep(max(0.2, SHEETS_QUEUE_FLUSH_SEC))
 
+    async def is_first_lead_message_in_dialog(entity: User, current_msg_id: int) -> bool:
+        lead_peer_id = int(getattr(entity, "id", 0) or 0)
+        if not lead_peer_id:
+            return False
+        try:
+            async for msg in client.iter_messages(entity, limit=50):
+                if int(getattr(msg, "id", 0) or 0) == int(current_msg_id or 0):
+                    continue
+                if bool(getattr(msg, "out", False)):
+                    continue
+                sender_id = int(getattr(msg, "sender_id", 0) or 0)
+                if sender_id == lead_peer_id:
+                    return False
+        except Exception:
+            return False
+        return True
+
     @client.on(events.NewMessage(incoming=True))
     async def on_private_message(event):
         if not event.is_private:
@@ -3765,7 +3782,8 @@ async def main():
         )
 
         plus_start = is_plus_chat_start(text)
-        if plus_start and (pause_status == "PAUSED" or peer_id in paused_peers or peer_id not in enabled_peers):
+        plus_start_first_message = plus_start and await is_first_lead_message_in_dialog(sender, event.id)
+        if plus_start_first_message or (plus_start and (pause_status == "PAUSED" or peer_id in paused_peers or peer_id not in enabled_peers)):
             paused_peers.discard(peer_id)
             enabled_peers.add(peer_id)
             clear_qa_gate(peer_id)
