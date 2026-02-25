@@ -741,9 +741,9 @@ def is_test_ready_confirmation(text: str) -> bool:
         return False
     if re.search(r"\bне\s+готов", t):
         return False
-    if "готов" not in t:
-        return False
-    return ("продовж" in t) or ("продолж" in t)
+    if ("готов" in t) and (("продовж" in t) or ("продолж" in t)):
+        return True
+    return is_continue_phrase(t) or is_neutral_ack(t) or is_short_neutral_ack(t)
 
 
 def is_voice_decline(text: str) -> bool:
