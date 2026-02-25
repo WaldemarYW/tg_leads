@@ -653,6 +653,29 @@ def parse_shift_choice(text: str) -> Optional[str]:
     return None
 
 
+def is_schedule_question_text(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    if parse_shift_choice(t):
+        return True
+    schedule_keywords = (
+        "графік",
+        "график",
+        "зміна",
+        "смена",
+        "денна",
+        "нічна",
+        "день",
+        "ніч",
+        "14:00",
+        "23:00",
+        "14-23",
+        "23-08",
+    )
+    return any(k in t for k in schedule_keywords)
+
+
 def is_voice_decline(text: str) -> bool:
     t = normalize_text(text)
     if not t:
@@ -2852,6 +2875,7 @@ async def main():
         state = v2_runtime.get(sender.id)
         step_name = state.flow_step or STEP_SCREENING_WAIT
         voice_decline = step_name == STEP_COMPANY_INTRO and is_voice_decline(text)
+        shift_selected = bool((state.shift_choice or "").strip())
 
         if state.rejected_by_age in {"under18", "over40"}:
             if not state.referral_after_reject_sent:
@@ -2862,6 +2886,21 @@ async def main():
                 paused_peers.add(sender.id)
                 enabled_peers.discard(sender.id)
                 v2_runtime.set(state)
+            return True
+
+        if (
+            not shift_selected
+            and step_name not in {STEP_SCHEDULE_SHIFT_WAIT, STEP_SCHEDULE_CONFIRM}
+            and is_schedule_question_text(text)
+        ):
+            await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status="🕒 Графік")
+            state.flow_step = STEP_SCHEDULE_SHIFT_WAIT
+            state.shift_prompted_at = time.time()
+            state.qa_gate_active = False
+            state.qa_gate_step = ""
+            state.qa_gate_opened_at = 0.0
+            state.qa_gate_reminder_sent = False
+            v2_runtime.set(state)
             return True
 
         if state.qa_gate_active:
