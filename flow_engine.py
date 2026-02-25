@@ -14,6 +14,7 @@ STEP_VOICE_WAIT = "voice_wait"
 STEP_SCHEDULE_BLOCK = "schedule_block"
 STEP_SCHEDULE_SHIFT_WAIT = "schedule_shift_wait"
 STEP_SCHEDULE_CONFIRM = "schedule_confirm"
+STEP_BALANCE_CONFIRM = "balance_confirm"
 STEP_PROOF_FORWARD = "proof_forward"
 STEP_TEST_REVIEW = "test_review"
 STEP_FORM_FORWARD = "form_forward"
@@ -49,6 +50,8 @@ class PeerRuntimeState:
     screening_q2_answer: str = ""
     shift_prompted_at: float = 0.0
     shift_choice: str = ""
+    schedule_confirm_clarify_count: int = 0
+    balance_confirm_clarify_count: int = 0
     test_answers: List[str] = field(default_factory=list)
     test_prompted_at: float = 0.0
     test_help_sent: bool = False
@@ -104,8 +107,13 @@ def advance_flow(peer_state: PeerRuntimeState, intent: str, context: Optional[Di
 
     if step == STEP_SCHEDULE_CONFIRM:
         if intent == "ack_continue":
-            return FlowActions(route="proof_forward", set_state={"flow_step": STEP_PROOF_FORWARD})
+            return FlowActions(route="balance_confirm", set_state={"flow_step": STEP_BALANCE_CONFIRM})
         return FlowActions(route="schedule_confirm")
+
+    if step == STEP_BALANCE_CONFIRM:
+        if intent == "ack_continue":
+            return FlowActions(route="proof_forward", set_state={"flow_step": STEP_PROOF_FORWARD})
+        return FlowActions(route="balance_confirm")
 
     if step == STEP_PROOF_FORWARD:
         return FlowActions(route="test_review", set_state={"flow_step": STEP_TEST_REVIEW})

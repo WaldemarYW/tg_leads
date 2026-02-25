@@ -28,7 +28,7 @@ class FlowEngineV2Tests(unittest.TestCase):
     def test_schedule_confirm_ack(self):
         st = PeerRuntimeState(peer_id=1, flow_step=STEP_SCHEDULE_CONFIRM)
         actions = advance_flow(st, "ack_continue", {})
-        self.assertEqual(actions.route, "proof_forward")
+        self.assertEqual(actions.route, "balance_confirm")
 
 
 if __name__ == "__main__":

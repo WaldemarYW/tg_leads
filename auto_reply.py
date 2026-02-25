@@ -95,6 +95,7 @@ from sheets_queue import SheetsQueueStore, calculate_backoff_sec
 from flow_engine import (
     PeerRuntimeState,
     STEP_AGE_REJECTED,
+    STEP_BALANCE_CONFIRM,
     STEP_COMPANY_INTRO,
     STEP_FORM_FORWARD,
     STEP_HANDOFF,
@@ -327,6 +328,18 @@ SCHEDULE_DETAILS_TEXT = (
 )
 SCHEDULE_CONFIRM_TEXT = "Чи зрозуміло вам як відбувається робочий процес на сайті?"
 SCHEDULE_CONFIRM_CLARIFY_TEXT = "Підкажіть, будь ласка, що саме незрозуміло? Я все детально поясню."
+SCHEDULE_CONFIRM_FOLLOWUP_VARIANTS = (
+    "Чи є у вас ще запитання по робочому процесу, чи можемо рухатися далі?",
+    "Підкажіть, будь ласка, чи залишилися ще питання щодо робочого процесу, чи вже переходимо далі?",
+    "Якщо ще є питання по робочому процесу — з радістю відповім. Якщо все зрозуміло, можемо йти далі.",
+)
+BALANCE_CONFIRM_TEXT = "Чи зрозуміло з чого складається баланс?"
+BALANCE_CONFIRM_CLARIFY_TEXT = "Підкажіть, будь ласка, що саме незрозуміло по балансу? Я детально поясню."
+BALANCE_CONFIRM_FOLLOWUP_VARIANTS = (
+    "Чи є у вас ще запитання щодо балансу, чи можемо йти далі?",
+    "Підкажіть, будь ласка, чи залишилися питання по балансу, чи переходимо до наступного кроку?",
+    "Якщо ще є питання по балансу — із радістю поясню. Якщо все зрозуміло, рухаємось далі.",
+)
 
 FOLLOWUP_TEMPLATES = [
     (
@@ -692,6 +705,20 @@ def is_schedule_not_clear_reply(text: str) -> bool:
     if any(k in t for k in unclear_keywords):
         return True
     return t in {"ні", "нет", "не", "нi", "неа"}
+
+
+def schedule_confirm_clarify_prompt(attempt: int) -> str:
+    if attempt <= 0:
+        return SCHEDULE_CONFIRM_CLARIFY_TEXT
+    idx = (attempt - 1) % len(SCHEDULE_CONFIRM_FOLLOWUP_VARIANTS)
+    return SCHEDULE_CONFIRM_FOLLOWUP_VARIANTS[idx]
+
+
+def balance_confirm_clarify_prompt(attempt: int) -> str:
+    if attempt <= 0:
+        return BALANCE_CONFIRM_CLARIFY_TEXT
+    idx = (attempt - 1) % len(BALANCE_CONFIRM_FOLLOWUP_VARIANTS)
+    return BALANCE_CONFIRM_FOLLOWUP_VARIANTS[idx]
 
 
 def is_voice_decline(text: str) -> bool:
@@ -2818,6 +2845,7 @@ async def main():
             STEP_COMPANY_INTRO,
             STEP_SCHEDULE_SHIFT_WAIT,
             STEP_SCHEDULE_CONFIRM,
+            STEP_BALANCE_CONFIRM,
             STEP_TEST_REVIEW,
             STEP_VOICE_WAIT,
         }
@@ -3009,7 +3037,29 @@ async def main():
                     delay_before=QUESTION_RESPONSE_DELAY_SEC,
                 )
                 enqueue_faq_question(sender.id, STEP_SCHEDULE_CONFIRM, text, answer_text)
-            await send_v2_message(sender, SCHEDULE_CONFIRM_CLARIFY_TEXT, STEP_SCHEDULE_CONFIRM)
+            attempt = int(state.schedule_confirm_clarify_count or 0)
+            await send_v2_message(sender, schedule_confirm_clarify_prompt(attempt), STEP_SCHEDULE_CONFIRM)
+            state.schedule_confirm_clarify_count = attempt + 1
+            v2_runtime.set(state)
+            return True
+
+        if step_name == STEP_BALANCE_CONFIRM and (intent_name == "question" or is_schedule_not_clear_reply(text)):
+            history = await build_ai_history(client, sender, limit=12)
+            ans = await answer_from_faq(text, STEP_BALANCE_CONFIRM, history, dialog_suggest, mode="detailed")
+            if ans and (ans.text or "").strip():
+                answer_text = ans.text.strip()
+                await send_v2_message(
+                    sender,
+                    answer_text,
+                    STEP_BALANCE_CONFIRM,
+                    status="знак питання",
+                    delay_before=QUESTION_RESPONSE_DELAY_SEC,
+                )
+                enqueue_faq_question(sender.id, STEP_BALANCE_CONFIRM, text, answer_text)
+            attempt = int(state.balance_confirm_clarify_count or 0)
+            await send_v2_message(sender, balance_confirm_clarify_prompt(attempt), STEP_BALANCE_CONFIRM)
+            state.balance_confirm_clarify_count = attempt + 1
+            v2_runtime.set(state)
             return True
 
         if intent_name == "question":
@@ -3025,7 +3075,7 @@ async def main():
             enqueue_faq_question(sender.id, step_name, text, answer_text)
             return True
 
-        if intent_name == "stop" and not voice_decline and step_name != STEP_SCHEDULE_CONFIRM:
+        if intent_name == "stop" and not voice_decline and step_name not in {STEP_SCHEDULE_CONFIRM, STEP_BALANCE_CONFIRM}:
             await send_v2_message(sender, STOP_REPLY_TEXT, step_name, status=AUTO_STOP_STATUS)
             state.auto_mode = "OFF"
             state.paused = True
@@ -3120,6 +3170,7 @@ async def main():
             await send_v2_message(sender, SCHEDULE_CONFIRM_TEXT, STEP_SCHEDULE_CONFIRM, status="🕒 Графік")
             state.flow_step = STEP_SCHEDULE_CONFIRM
             state.shift_choice = choice
+            state.schedule_confirm_clarify_count = 0
             v2_runtime.set(state)
             return True
 
@@ -3127,20 +3178,41 @@ async def main():
             if intent_name != "ack_continue":
                 await send_v2_message(sender, SCHEDULE_CONFIRM_TEXT, STEP_SCHEDULE_CONFIRM)
                 return True
-            links = [PHOTO_1_MESSAGE_LINK, PHOTO_2_MESSAGE_LINK, TEST_TASK_MESSAGE_LINK]
-            missing = [l for l in links if not l]
+            balance_links = [PHOTO_1_MESSAGE_LINK, PHOTO_2_MESSAGE_LINK]
+            missing = [l for l in balance_links if not l]
             if missing:
+                await send_v2_message(sender, "Контент для блоку балансів тимчасово недоступний. Зараз уточню і повернусь до вас.", STEP_PROOF_FORWARD)
+                return True
+            if BOT_REPLY_DELAY_SEC > 0:
+                await asyncio.sleep(BOT_REPLY_DELAY_SEC)
+            for link in balance_links:
+                ok = await dispatch_v2_content(sender, link, STEP_PROOF_FORWARD, "🎥 Більше інформації")
+                if not ok:
+                    await send_v2_message(sender, "Не вдалося надіслати один із матеріалів. Повторю трохи пізніше.", STEP_PROOF_FORWARD)
+                    return True
+                await asyncio.sleep(BOT_REPLY_DELAY_SEC)
+            await send_v2_message(sender, BALANCE_CONFIRM_TEXT, STEP_BALANCE_CONFIRM, status="💰 Баланси")
+            state.flow_step = STEP_BALANCE_CONFIRM
+            state.schedule_confirm_clarify_count = 0
+            state.balance_confirm_clarify_count = 0
+            v2_runtime.set(state)
+            return True
+
+        if step_name == STEP_BALANCE_CONFIRM:
+            if intent_name != "ack_continue":
+                await send_v2_message(sender, BALANCE_CONFIRM_TEXT, STEP_BALANCE_CONFIRM)
+                return True
+            if not TEST_TASK_MESSAGE_LINK:
                 await send_v2_message(sender, "Контент для наступного етапу тимчасово недоступний. Зараз уточню і повернусь до вас.", STEP_PROOF_FORWARD)
                 return True
             if BOT_REPLY_DELAY_SEC > 0:
                 await asyncio.sleep(BOT_REPLY_DELAY_SEC)
-            for link in links:
-                ok = await dispatch_v2_content(sender, link, STEP_PROOF_FORWARD, "🎥 Більше інформації")
-                if not ok:
-                    await send_v2_message(sender, "Не вдалося надіслати один із матеріалів. Повторю трохи пізніше.", STEP_PROOF_FORWARD)
-                    break
-                await asyncio.sleep(BOT_REPLY_DELAY_SEC)
+            ok = await dispatch_v2_content(sender, TEST_TASK_MESSAGE_LINK, STEP_PROOF_FORWARD, "🎥 Більше інформації")
+            if not ok:
+                await send_v2_message(sender, "Не вдалося надіслати матеріал тестового завдання. Повторю трохи пізніше.", STEP_PROOF_FORWARD)
+                return True
             state.flow_step = STEP_TEST_REVIEW
+            state.balance_confirm_clarify_count = 0
             state.test_answers = []
             state.test_prompted_at = time.time()
             state.test_help_sent = False
@@ -4135,6 +4207,7 @@ async def main():
                                 await send_v2_message(entity, SCHEDULE_CONFIRM_TEXT, STEP_SCHEDULE_CONFIRM, status="🕒 Графік")
                                 v2s.flow_step = STEP_SCHEDULE_CONFIRM
                                 v2s.shift_prompted_at = 0.0
+                                v2s.schedule_confirm_clarify_count = 0
                                 v2_runtime.set(v2s)
 
                 for key, state in list(followup_state.data.items()):
