@@ -137,6 +137,7 @@ VIDEO_CACHE_PATH = os.environ.get("VIDEO_CACHE_PATH", "/opt/tg_leads/.video_cach
 AUTO_REPLY_LOCK = os.environ.get("AUTO_REPLY_LOCK", "/opt/tg_leads/.auto_reply.lock")
 AUTO_REPLY_LOCK_TTL = int(os.environ.get("AUTO_REPLY_LOCK_TTL", "300"))
 REPLY_DEBOUNCE_SEC = float(os.environ.get("REPLY_DEBOUNCE_SEC", "3"))
+SCREENING_REPLY_DEBOUNCE_SEC = float(os.environ.get("SCREENING_REPLY_DEBOUNCE_SEC", "0.5"))
 BOT_REPLY_DELAY_SEC = float(os.environ.get("BOT_REPLY_DELAY_SEC", "5"))
 QUESTION_GAP_SEC = float(os.environ.get("QUESTION_GAP_SEC", "5"))
 QUESTION_RESPONSE_DELAY_SEC = float(os.environ.get("QUESTION_RESPONSE_DELAY_SEC", "10"))
@@ -3924,7 +3925,10 @@ async def main():
             print(f"✅ Test user bypassed processing check: {peer_id}")
         now_ts = time.time()
         last_ts = last_reply_at.get(peer_id)
-        if last_ts and now_ts - last_ts < REPLY_DEBOUNCE_SEC:
+        effective_debounce_sec = REPLY_DEBOUNCE_SEC
+        if current_step_snapshot == STEP_SCREENING_WAIT:
+            effective_debounce_sec = min(REPLY_DEBOUNCE_SEC, SCREENING_REPLY_DEBOUNCE_SEC)
+        if last_ts and now_ts - last_ts < effective_debounce_sec:
             if not is_test:
                 print(f"⚠️ Filtered debounce: {peer_id}")
                 return
