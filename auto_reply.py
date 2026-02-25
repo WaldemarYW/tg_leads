@@ -633,8 +633,17 @@ def parse_shift_choice(text: str) -> Optional[str]:
     t = normalize_text(text)
     if not t:
         return None
-    day_markers = ("день", "ден", "денна", "14:00", "14 00", "14-23", "14 до 23")
-    night_markers = ("ніч", "ноч", "нічна", "23:00", "23 00", "23-08", "23 до 08")
+    # First, detect explicit time ranges to avoid ambiguity like "14:00-23:00",
+    # where old marker-based matching could classify both day and night.
+    day_range_re = re.compile(r"\b14(?:[:\s.]?00)?\s*(?:-|–|—|до|to)\s*23(?:[:\s.]?00)?\b")
+    night_range_re = re.compile(r"\b23(?:[:\s.]?00)?\s*(?:-|–|—|до|to)\s*0?8(?:[:\s.]?00)?\b")
+    if day_range_re.search(t):
+        return "денна"
+    if night_range_re.search(t):
+        return "нічна"
+
+    day_markers = ("день", "ден", "денна", "денний", "14:00", "14 00", "14-23", "14 до 23")
+    night_markers = ("ніч", "ноч", "нічна", "нічний", "23 00", "23-08", "23 до 08")
     day = any(m in t for m in day_markers)
     night = any(m in t for m in night_markers)
     if day and not night:
@@ -3911,8 +3920,12 @@ async def main():
                         except Exception:
                             continue
                         if v2s.qa_gate_active and not v2s.qa_gate_reminder_sent:
-                            if time.time() >= float(v2s.qa_gate_opened_at or 0) + QA_GATE_REMINDER_DELAY_SEC:
-                                await send_v2_message(entity, V2_GATE_REMINDER_TEXT, v2s.qa_gate_step or v2s.flow_step, status="знак питання")
+                            gate_step = (v2s.qa_gate_step or v2s.flow_step or "").strip()
+                            if gate_step == STEP_VOICE_WAIT:
+                                # For voice_wait we only keep voice-specific fallback to avoid duplicate reminders.
+                                pass
+                            elif time.time() >= float(v2s.qa_gate_opened_at or 0) + QA_GATE_REMINDER_DELAY_SEC:
+                                await send_v2_message(entity, V2_GATE_REMINDER_TEXT, gate_step or v2s.flow_step, status="знак питання")
                                 v2s.qa_gate_reminder_sent = True
                                 v2_runtime.set(v2s)
                         if v2s.flow_step == STEP_SCREENING_WAIT:
