@@ -340,6 +340,13 @@ BALANCE_CONFIRM_FOLLOWUP_VARIANTS = (
     "Підкажіть, будь ласка, чи залишилися питання по балансу, чи переходимо до наступного кроку?",
     "Якщо ще є питання по балансу — із радістю поясню. Якщо все зрозуміло, рухаємось далі.",
 )
+TEST_READY_PROMPT_TEXT = "Чи все зрозуміло по умовах роботи? Чи готові продовжувати?"
+TEST_READY_CLARIFY_TEXT = "Підкажіть, будь ласка, що саме залишилось незрозумілим по умовах? Якщо все зрозуміло — напишіть «Готовий/готова продовжувати»."
+TEST_READY_FOLLOWUP_VARIANTS = (
+    "Чи залишилися ще питання по умовах роботи, чи можемо рухатися далі?",
+    "Підкажіть, будь ласка, чи все зрозуміло по правилах співпраці, чи вже готові продовжувати?",
+    "Якщо є ще питання по умовах — із радістю поясню. Якщо все ок, напишіть, що готові продовжувати.",
+)
 
 FOLLOWUP_TEMPLATES = [
     (
@@ -719,6 +726,24 @@ def balance_confirm_clarify_prompt(attempt: int) -> str:
         return BALANCE_CONFIRM_CLARIFY_TEXT
     idx = (attempt - 1) % len(BALANCE_CONFIRM_FOLLOWUP_VARIANTS)
     return BALANCE_CONFIRM_FOLLOWUP_VARIANTS[idx]
+
+
+def test_ready_clarify_prompt(attempt: int) -> str:
+    if attempt <= 0:
+        return TEST_READY_CLARIFY_TEXT
+    idx = (attempt - 1) % len(TEST_READY_FOLLOWUP_VARIANTS)
+    return TEST_READY_FOLLOWUP_VARIANTS[idx]
+
+
+def is_test_ready_confirmation(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    if re.search(r"\bне\s+готов", t):
+        return False
+    if "готов" not in t:
+        return False
+    return ("продовж" in t) or ("продолж" in t)
 
 
 def is_voice_decline(text: str) -> bool:
@@ -2876,16 +2901,8 @@ async def main():
         )
         return True
 
-    async def finalize_test_review(sender: User, state: PeerRuntimeState, answers: List[str]) -> bool:
-        enqueue_candidate_note(sender, format_numbered_answers(answers))
-        ok_answers, review_text = evaluate_test_answers(answers)
-        await send_v2_message(
-            sender,
-            review_text,
-            STEP_TEST_REVIEW,
-            status="🎓 Навчання",
-            delay_before=QUESTION_RESPONSE_DELAY_SEC,
-        )
+    async def finalize_test_ready(sender: User, state: PeerRuntimeState, confirmation_text: str) -> bool:
+        enqueue_candidate_note(sender, f"Підтвердження готовності: {confirmation_text.strip()}")
         if FORM_MESSAGE_LINK:
             ok = await dispatch_v2_content(sender, FORM_MESSAGE_LINK, STEP_FORM_FORWARD, "📝 Анкета")
             if not ok:
@@ -2893,13 +2910,14 @@ async def main():
         else:
             await send_v2_message(sender, FORM_TEXT, STEP_FORM_FORWARD, status="📝 Анкета")
         state.flow_step = STEP_FORM_FORWARD
-        state.test_answers = answers[:3]
+        state.test_answers = []
         state.test_help_sent = False
         state.test_prompted_at = 0.0
         state.test_message_count = 0
         state.test_last_message = ""
+        state.test_ready_clarify_count = 0
         v2_runtime.set(state)
-        return ok_answers
+        return True
 
     def enqueue_faq_question(peer_id: int, step: str, question_raw: str, answer_preview: str):
         q_norm = normalize_question(question_raw)
@@ -3075,7 +3093,7 @@ async def main():
             enqueue_faq_question(sender.id, step_name, text, answer_text)
             return True
 
-        if intent_name == "stop" and not voice_decline and step_name not in {STEP_SCHEDULE_CONFIRM, STEP_BALANCE_CONFIRM}:
+        if intent_name == "stop" and not voice_decline and step_name not in {STEP_SCHEDULE_CONFIRM, STEP_BALANCE_CONFIRM, STEP_TEST_REVIEW}:
             await send_v2_message(sender, STOP_REPLY_TEXT, step_name, status=AUTO_STOP_STATUS)
             state.auto_mode = "OFF"
             state.paused = True
@@ -3218,19 +3236,39 @@ async def main():
             state.test_help_sent = False
             state.test_message_count = 0
             state.test_last_message = ""
+            state.test_ready_clarify_count = 0
             v2_runtime.set(state)
             return True
 
         if step_name == STEP_TEST_REVIEW:
+            if is_test_ready_confirmation(text):
+                await finalize_test_ready(sender, state, text)
+                return True
+            if intent_name == "question" or is_schedule_not_clear_reply(text):
+                history = await build_ai_history(client, sender, limit=12)
+                ans = await answer_from_faq(text, STEP_TEST_REVIEW, history, dialog_suggest, mode="detailed")
+                if ans and (ans.text or "").strip():
+                    answer_text = ans.text.strip()
+                    await send_v2_message(
+                        sender,
+                        answer_text,
+                        STEP_TEST_REVIEW,
+                        status="знак питання",
+                        delay_before=QUESTION_RESPONSE_DELAY_SEC,
+                    )
+                    enqueue_faq_question(sender.id, STEP_TEST_REVIEW, text, answer_text)
+                attempt = int(state.test_ready_clarify_count or 0)
+                await send_v2_message(sender, test_ready_clarify_prompt(attempt), STEP_TEST_REVIEW)
+                state.test_ready_clarify_count = attempt + 1
+                state.test_prompted_at = time.time()
+                state.test_help_sent = False
+                v2_runtime.set(state)
+                return True
             state.test_message_count = int(state.test_message_count or 0) + 1
             state.test_last_message = (text or "").strip()
             state.test_prompted_at = state.test_prompted_at or time.time()
-            answers = merge_test_answers(state.test_answers or [""], text)
-            state.test_answers = answers
-            if not (answers and (answers[0] or "").strip()):
-                v2_runtime.set(state)
-                return True
-            await finalize_test_review(sender, state, answers)
+            state.test_help_sent = False
+            v2_runtime.set(state)
             return True
 
         if step_name == STEP_FORM_FORWARD:
@@ -4208,16 +4246,9 @@ async def main():
                         if v2s.flow_step == STEP_TEST_REVIEW and not v2s.test_help_sent:
                             prompted_at = float(v2s.test_prompted_at or 0)
                             if prompted_at > 0 and (time.time() - prompted_at) >= 300:
-                                msg_count = int(v2s.test_message_count or 0)
-                                if msg_count == 1 and (v2s.test_last_message or "").strip():
-                                    merged = merge_test_answers(v2s.test_answers or [""], v2s.test_last_message or "")
-                                    if merged and (merged[0] or "").strip():
-                                        v2s.test_answers = merged
-                                        await finalize_test_review(entity, v2s, merged)
-                                        continue
                                 await send_v2_message(
                                     entity,
-                                    "Підкажи, будь ласка, чи потрібна допомога з тестовим завданням? Я можу коротко підказати.",
+                                    TEST_READY_PROMPT_TEXT,
                                     STEP_TEST_REVIEW,
                                     status="🎓 Навчання",
                                 )

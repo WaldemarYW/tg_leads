@@ -57,6 +57,7 @@ class PeerRuntimeState:
     test_help_sent: bool = False
     test_message_count: int = 0
     test_last_message: str = ""
+    test_ready_clarify_count: int = 0
 
 
 @dataclass
