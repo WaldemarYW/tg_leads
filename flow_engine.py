@@ -43,6 +43,10 @@ class PeerRuntimeState:
     screening_answers: List[str] = field(default_factory=list)
     screening_started_at: float = 0.0
     screening_last_at: float = 0.0
+    screening_q1_asked: bool = False
+    screening_q2_asked: bool = False
+    screening_q1_answer: str = ""
+    screening_q2_answer: str = ""
     shift_prompted_at: float = 0.0
     shift_choice: str = ""
     test_answers: List[str] = field(default_factory=list)

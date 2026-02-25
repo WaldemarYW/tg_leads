@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from typing import Dict, Iterable, Set
 
 from flow_engine import PeerRuntimeState
@@ -60,6 +60,7 @@ class V2RuntimeStore:
     def __init__(self, path: str):
         self.path = path
         self.data: Dict[str, dict] = self._load()
+        self._state_field_names = {f.name for f in fields(PeerRuntimeState)}
 
     def _load(self) -> Dict[str, dict]:
         if not self.path or not os.path.exists(self.path):
@@ -83,7 +84,11 @@ class V2RuntimeStore:
         raw = self.data.get(key, {})
         if not isinstance(raw, dict):
             raw = {}
-        merged = {"peer_id": int(peer_id), **raw}
+        sanitized = {k: v for k, v in raw.items() if k in self._state_field_names}
+        merged = {"peer_id": int(peer_id), **sanitized}
+        if len(sanitized) != len(raw):
+            self.data[key] = sanitized
+            self._save()
         return PeerRuntimeState(**merged)
 
     def set(self, state: PeerRuntimeState):
