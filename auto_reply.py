@@ -2674,7 +2674,7 @@ async def main():
         t = normalize_text(text)
         if not t:
             return "unknown"
-        m = re.search(r"(\\d{2})", t)
+        m = re.search(r"(\d{2})", t)
         if not m:
             return "unknown"
         age = int(m.group(1))
