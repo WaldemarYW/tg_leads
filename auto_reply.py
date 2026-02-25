@@ -3783,7 +3783,19 @@ async def main():
 
         plus_start = is_plus_chat_start(text)
         plus_start_first_message = plus_start and await is_first_lead_message_in_dialog(sender, event.id)
-        if plus_start_first_message or (plus_start and (pause_status == "PAUSED" or peer_id in paused_peers or peer_id not in enabled_peers)):
+        from_group_lead = False
+        try:
+            from_group_lead = bool(sheet._find_group_lead_info(username, name))
+        except Exception:
+            from_group_lead = False
+        first_message_in_dialog = False
+        if from_group_lead and not plus_start_first_message:
+            first_message_in_dialog = await is_first_lead_message_in_dialog(sender, event.id)
+        group_incoming_autostart = from_group_lead and first_message_in_dialog and (
+            pause_status == "PAUSED" or peer_id in paused_peers or peer_id not in enabled_peers
+        )
+
+        if plus_start_first_message or (plus_start and (pause_status == "PAUSED" or peer_id in paused_peers or peer_id not in enabled_peers)) or group_incoming_autostart:
             paused_peers.discard(peer_id)
             enabled_peers.add(peer_id)
             clear_qa_gate(peer_id)
@@ -3794,7 +3806,8 @@ async def main():
             pending_question_resume.pop(peer_id, None)
             processing_peers.discard(peer_id)
             buffered_incoming.pop(peer_id, None)
-            pause_store.set_status(sender.id, username, name, chat_link, "ACTIVE", updated_by="plus_start")
+            start_source = "plus_start" if (plus_start_first_message or plus_start) else "group_incoming_start"
+            pause_store.set_status(sender.id, username, name, chat_link, "ACTIVE", updated_by=start_source)
             v2_enrollment.add(peer_id)
             v2_state = PeerRuntimeState(
                 peer_id=peer_id,
@@ -3810,7 +3823,10 @@ async def main():
             v2_runtime.set(v2_state)
             await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
             await send_v2_message(sender, SCREENING_Q1_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
-            print(f"✅ PLUS start switched to V2 flow peer={peer_id}")
+            if group_incoming_autostart:
+                print(f"✅ GROUP incoming switched to V2 flow peer={peer_id}")
+            else:
+                print(f"✅ PLUS start switched to V2 flow peer={peer_id}")
             return
 
         if is_test_restart(sender, text):
