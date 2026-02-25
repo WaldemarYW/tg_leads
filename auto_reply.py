@@ -325,7 +325,8 @@ SCHEDULE_DETAILS_TEXT = (
     "Навчання триває 8 днів.\n"
     "Зарплата в кінці місяця — 48% від суми на балансі профілю."
 )
-SCHEDULE_CONFIRM_TEXT = "Чи зрозумілий тобі графік і як рахується робочий час? Можемо йти далі? 😊"
+SCHEDULE_CONFIRM_TEXT = "Чи зрозуміло вам як відбувається робочий процес на сайті?"
+SCHEDULE_CONFIRM_CLARIFY_TEXT = "Підкажіть, будь ласка, що саме незрозуміло? Я все детально поясню."
 
 FOLLOWUP_TEMPLATES = [
     (
@@ -674,6 +675,23 @@ def is_schedule_question_text(text: str) -> bool:
         "23-08",
     )
     return any(k in t for k in schedule_keywords)
+
+
+def is_schedule_not_clear_reply(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    unclear_keywords = (
+        "не зрозум",
+        "непонят",
+        "не понятно",
+        "не ясно",
+        "незрозум",
+        "не ясно",
+    )
+    if any(k in t for k in unclear_keywords):
+        return True
+    return t in {"ні", "нет", "не", "нi", "неа"}
 
 
 def is_voice_decline(text: str) -> bool:
@@ -2978,6 +2996,22 @@ async def main():
             enqueue_faq_question(sender.id, STEP_SCHEDULE_SHIFT_WAIT, text, answer_text)
             return True
 
+        if step_name == STEP_SCHEDULE_CONFIRM and (intent_name == "question" or is_schedule_not_clear_reply(text)):
+            history = await build_ai_history(client, sender, limit=12)
+            ans = await answer_from_faq(text, STEP_SCHEDULE_CONFIRM, history, dialog_suggest, mode="detailed")
+            if ans and (ans.text or "").strip():
+                answer_text = ans.text.strip()
+                await send_v2_message(
+                    sender,
+                    answer_text,
+                    STEP_SCHEDULE_CONFIRM,
+                    status="знак питання",
+                    delay_before=QUESTION_RESPONSE_DELAY_SEC,
+                )
+                enqueue_faq_question(sender.id, STEP_SCHEDULE_CONFIRM, text, answer_text)
+            await send_v2_message(sender, SCHEDULE_CONFIRM_CLARIFY_TEXT, STEP_SCHEDULE_CONFIRM)
+            return True
+
         if intent_name == "question":
             history = await build_ai_history(client, sender, limit=12)
             ans = await answer_from_faq(text, step_name, history, dialog_suggest, mode="detailed")
@@ -2991,7 +3025,7 @@ async def main():
             enqueue_faq_question(sender.id, step_name, text, answer_text)
             return True
 
-        if intent_name == "stop" and not voice_decline:
+        if intent_name == "stop" and not voice_decline and step_name != STEP_SCHEDULE_CONFIRM:
             await send_v2_message(sender, STOP_REPLY_TEXT, step_name, status=AUTO_STOP_STATUS)
             state.auto_mode = "OFF"
             state.paused = True
