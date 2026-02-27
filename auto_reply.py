@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.errors import UsernameNotOccupiedError, PhoneNumberInvalidError
 from telethon.tl.types import User
+from telethon.tl import functions as tl_functions
 
 from tg_to_sheets import (
     sheets_client,
@@ -236,6 +237,12 @@ SCREENING_WAIT_SEC = float(os.environ.get("SCREENING_WAIT_SEC", "300"))
 SCHEDULE_SHIFT_WAIT_SEC = float(os.environ.get("SCHEDULE_SHIFT_WAIT_SEC", "300"))
 FAQ_QUESTIONS_WORKSHEET = os.environ.get("FAQ_QUESTIONS_WORKSHEET", "FAQ_Questions")
 FAQ_SUGGESTIONS_WORKSHEET = os.environ.get("FAQ_SUGGESTIONS_WORKSHEET", "FAQ_Suggestions")
+LIKE_TRAINING_ENABLED = os.environ.get("LIKE_TRAINING_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+LIKE_TRAINING_SHEET = os.environ.get("LIKE_TRAINING_SHEET", "FAQ_Likes_Train")
+LIKE_PAIR_WINDOW_SEC = float(os.environ.get("LIKE_PAIR_WINDOW_SEC", "30"))
+LIKE_TRAINING_MAX_CANDIDATES = int(os.environ.get("LIKE_TRAINING_MAX_CANDIDATES", "20"))
+LIKE_TRAINING_AI_TIMEOUT_SEC = float(os.environ.get("LIKE_TRAINING_AI_TIMEOUT_SEC", "8"))
+LIKE_TRAINING_UNREACT_OPERATOR_ONLY = os.environ.get("LIKE_TRAINING_UNREACT_OPERATOR_ONLY", "1").strip().lower() in {"1", "true", "yes", "on"}
 CONFIRM_STATUS = "✅ Погодився"
 REFERRAL_STATUS = "🎁 Реферал"
 IMMUTABLE_STATUSES = {CONFIRM_STATUS, REFERRAL_STATUS}
@@ -479,6 +486,23 @@ FAQ_SUGGESTIONS_HEADERS = [
     "review_status",
     "reviewed_at",
     "reviewed_by",
+]
+
+FAQ_LIKES_TRAIN_HEADERS = [
+    "created_at",
+    "peer_id",
+    "chat_link",
+    "candidate_msg_id",
+    "candidate_text_raw",
+    "candidate_text_norm",
+    "cluster_key",
+    "operator_msg_id",
+    "operator_answer_raw",
+    "operator_answer_norm",
+    "step_snapshot",
+    "source",
+    "active",
+    "notes",
 ]
 
 GROUP_KEY_MAP = {
@@ -1964,6 +1988,98 @@ class FAQSuggestionsSheet:
         )
 
 
+class FAQLikesTrainingSheet:
+    def __init__(self):
+        self.gc = sheets_client(GOOGLE_CREDS)
+        self.sh = self.gc.open(SHEET_NAME)
+        self.ws = get_or_create_worksheet(self.sh, LIKE_TRAINING_SHEET, rows=2000, cols=len(FAQ_LIKES_TRAIN_HEADERS))
+        self._next_row = 2
+        self._pair_keys = set()
+        self._by_cluster: Dict[str, List[dict]] = {}
+        self._ensure_headers()
+        self._load_cache()
+
+    def _ensure_headers(self):
+        try:
+            current = self.ws.row_values(1)
+        except Exception:
+            current = []
+        if current[: len(FAQ_LIKES_TRAIN_HEADERS)] != FAQ_LIKES_TRAIN_HEADERS:
+            self.ws.update(
+                range_name=f"A1:{col_letter(len(FAQ_LIKES_TRAIN_HEADERS))}1",
+                values=[FAQ_LIKES_TRAIN_HEADERS],
+                value_input_option="USER_ENTERED",
+            )
+
+    def _load_cache(self):
+        try:
+            values = self.ws.get_all_values()
+        except Exception:
+            return
+        if not values:
+            self._next_row = 2
+            return
+        headers = [h.strip() for h in values[0]]
+        index = {h: i for i, h in enumerate(headers)}
+        self._next_row = len(values) + 1
+        for row in values[1:]:
+            peer_id = str(row[index.get("peer_id", -1)]).strip() if index.get("peer_id", -1) < len(row) else ""
+            candidate_msg_id = str(row[index.get("candidate_msg_id", -1)]).strip() if index.get("candidate_msg_id", -1) < len(row) else ""
+            operator_msg_id = str(row[index.get("operator_msg_id", -1)]).strip() if index.get("operator_msg_id", -1) < len(row) else ""
+            active = str(row[index.get("active", -1)]).strip() if index.get("active", -1) < len(row) else "1"
+            if peer_id and candidate_msg_id and operator_msg_id:
+                self._pair_keys.add((peer_id, candidate_msg_id, operator_msg_id))
+            if active not in {"1", "true", "yes", "on"}:
+                continue
+            cluster_key = str(row[index.get("cluster_key", -1)]).strip() if index.get("cluster_key", -1) < len(row) else ""
+            if not cluster_key:
+                continue
+            item = {
+                "candidate_text_norm": str(row[index.get("candidate_text_norm", -1)]).strip() if index.get("candidate_text_norm", -1) < len(row) else "",
+                "operator_answer_raw": str(row[index.get("operator_answer_raw", -1)]).strip() if index.get("operator_answer_raw", -1) < len(row) else "",
+                "operator_answer_norm": str(row[index.get("operator_answer_norm", -1)]).strip() if index.get("operator_answer_norm", -1) < len(row) else "",
+                "step_snapshot": str(row[index.get("step_snapshot", -1)]).strip() if index.get("step_snapshot", -1) < len(row) else "",
+            }
+            self._by_cluster.setdefault(cluster_key, []).append(item)
+
+    def append_pair(self, row: dict) -> bool:
+        pair_key = (
+            str(row.get("peer_id", "")).strip(),
+            str(row.get("candidate_msg_id", "")).strip(),
+            str(row.get("operator_msg_id", "")).strip(),
+        )
+        if not all(pair_key):
+            return False
+        if pair_key in self._pair_keys:
+            return False
+        out = [str(row.get(h, "")) for h in FAQ_LIKES_TRAIN_HEADERS]
+        end_col = col_letter(len(FAQ_LIKES_TRAIN_HEADERS))
+        self.ws.update(
+            range_name=f"A{self._next_row}:{end_col}{self._next_row}",
+            values=[out],
+            value_input_option="USER_ENTERED",
+        )
+        self._next_row += 1
+        self._pair_keys.add(pair_key)
+        cluster_key = str(row.get("cluster_key", "")).strip()
+        if cluster_key:
+            self._by_cluster.setdefault(cluster_key, []).append(
+                {
+                    "candidate_text_norm": str(row.get("candidate_text_norm", "")).strip(),
+                    "operator_answer_raw": str(row.get("operator_answer_raw", "")).strip(),
+                    "operator_answer_norm": str(row.get("operator_answer_norm", "")).strip(),
+                    "step_snapshot": str(row.get("step_snapshot", "")).strip(),
+                }
+            )
+        return True
+
+    def get_candidates(self, cluster_key: str, max_items: int) -> List[dict]:
+        items = list(self._by_cluster.get(cluster_key, []))
+        if not items:
+            return []
+        return items[-max(1, int(max_items)) :]
+
+
 class GoogleDriveUploader:
     def __init__(self, creds_path: str, folder_id: str):
         self.creds_path = creds_path
@@ -2435,9 +2551,12 @@ async def main():
     group_leads_sheet = GroupLeadsSheet()
     faq_questions_sheet = None
     faq_suggestions_sheet = None
+    faq_likes_train_sheet = None
     try:
         faq_questions_sheet = FAQQuestionsSheet()
         faq_suggestions_sheet = FAQSuggestionsSheet()
+        if LIKE_TRAINING_ENABLED:
+            faq_likes_train_sheet = FAQLikesTrainingSheet()
     except Exception as err:
         print(f"⚠️ Не вдалося підготувати FAQ-листи: {err}")
     v2_enrollment = V2EnrollmentStore(V2_ENROLLMENT_PATH)
@@ -2487,6 +2606,8 @@ async def main():
     step_state = StepState(STEP_STATE_PATH)
     followup_state = FollowupState(FOLLOWUP_STATE_PATH)
     qa_gate_state = {}
+    like_train_pending: Dict[int, dict] = {}
+    like_train_seen: Dict[Tuple[int, int], bool] = {}
     sheets_queue = None
     try:
         sheets_queue = SheetsQueueStore(SHEETS_QUEUE_PATH)
@@ -2935,6 +3056,104 @@ async def main():
         )
         return True
 
+    def message_has_my_reaction(msg) -> bool:
+        reactions = getattr(msg, "reactions", None)
+        if not reactions:
+            return False
+        results = getattr(reactions, "results", None) or []
+        for res in results:
+            if bool(getattr(res, "chosen_order", None)) or bool(getattr(res, "chosen", None)):
+                return True
+        return False
+
+    async def unreact_operator_message(entity: User, msg_id: int) -> bool:
+        try:
+            if hasattr(client, "send_reaction"):
+                await client.send_reaction(entity, msg_id, None)
+            else:
+                await client(
+                    tl_functions.messages.SendReactionRequest(
+                        peer=entity,
+                        msg_id=int(msg_id),
+                        reaction=[],
+                        add_to_recent=False,
+                    )
+                )
+            return True
+        except Exception as err:
+            print(f"LIKE_TRAIN_UNREACT_FAIL peer={getattr(entity, 'id', 0)} msg={msg_id} err={type(err).__name__}: {err}")
+            return False
+
+    async def like_training_semantic_match(question_norm: str, candidate_norm: str) -> bool:
+        q = (question_norm or "").strip()
+        c = (candidate_norm or "").strip()
+        if not q or not c:
+            return False
+        if q == c:
+            return True
+        if q in c or c in q:
+            return True
+        if not DIALOG_AI_URL:
+            return False
+        draft = (
+            "Порівняй два питання і відповідай тільки YES або NO.\n"
+            "YES якщо вони про одне й те саме по суті.\n"
+            f"Q1: {q}\nQ2: {c}"
+        )
+        payload = {
+            "history": [],
+            "draft": draft,
+            "no_questions": True,
+            "combined_answer_clarify": False,
+        }
+        try:
+            data = await asyncio.to_thread(_post_json, DIALOG_AI_URL, payload, LIKE_TRAINING_AI_TIMEOUT_SEC)
+        except Exception as err:
+            print(f"LIKE_TRAIN_MISS reason=ai_error err={type(err).__name__}: {err}")
+            return False
+        if not data or not data.get("ok"):
+            return False
+        text = (str(data.get("text") or "") or "").strip().lower()
+        if not text:
+            suggestions = data.get("suggestions") or []
+            if suggestions:
+                text = str(suggestions[0]).strip().lower()
+        return text.startswith("yes") or text.startswith("так")
+
+    async def resolve_trained_answer(sender: User, step_name: str, question_raw: str) -> Optional[str]:
+        if not LIKE_TRAINING_ENABLED or not faq_likes_train_sheet:
+            return None
+        q_norm = normalize_question(question_raw)
+        cluster_key = build_cluster_key(q_norm)
+        candidates = faq_likes_train_sheet.get_candidates(cluster_key, LIKE_TRAINING_MAX_CANDIDATES)
+        if not candidates:
+            print(f"LIKE_TRAIN_MISS peer={sender.id} cluster={cluster_key} reason=no_cluster")
+            return None
+        for item in reversed(candidates):
+            candidate_norm = str(item.get("candidate_text_norm", "") or "")
+            if await like_training_semantic_match(q_norm, candidate_norm):
+                answer = str(item.get("operator_answer_raw", "") or "").strip()
+                if answer:
+                    print(f"LIKE_TRAIN_HIT peer={sender.id} cluster={cluster_key} source=sheet")
+                    return answer
+        print(f"LIKE_TRAIN_MISS peer={sender.id} cluster={cluster_key} reason=no_semantic_match")
+        return None
+
+    async def answer_with_training_or_faq(
+        sender: User,
+        step_name: str,
+        question_text: str,
+        fallback_text: str,
+    ) -> str:
+        trained = await resolve_trained_answer(sender, step_name, question_text)
+        if trained:
+            return trained
+        history = await build_ai_history(client, sender, limit=12)
+        ans = await answer_from_faq(question_text, step_name, history, dialog_suggest, mode="detailed")
+        if ans and (ans.text or "").strip():
+            return ans.text.strip()
+        return fallback_text
+
     async def finalize_test_ready(sender: User, state: PeerRuntimeState, confirmation_text: str) -> bool:
         enqueue_candidate_note(sender, f"Підтвердження готовності: {confirmation_text.strip()}")
         if FORM_MESSAGE_LINK:
@@ -3016,9 +3235,12 @@ async def main():
 
         if state.qa_gate_active:
             if (state.qa_gate_step or step_name) == STEP_SCHEDULE_SHIFT_WAIT and intent_name == "question":
-                history = await build_ai_history(client, sender, limit=12)
-                ans = await answer_from_faq(text, STEP_SCHEDULE_SHIFT_WAIT, history, dialog_suggest, mode="detailed")
-                answer_text = ans.text if ans else "Уточню коротко: у нас доступні денна або нічна зміна."
+                answer_text = await answer_with_training_or_faq(
+                    sender,
+                    STEP_SCHEDULE_SHIFT_WAIT,
+                    text,
+                    "Уточню коротко: у нас доступні денна або нічна зміна.",
+                )
                 await send_v2_message(
                     sender,
                     answer_text,
@@ -3036,9 +3258,12 @@ async def main():
                 enqueue_faq_question(sender.id, STEP_SCHEDULE_SHIFT_WAIT, text, answer_text)
                 return True
             if intent_name == "question":
-                history = await build_ai_history(client, sender, limit=12)
-                ans = await answer_from_faq(text, state.qa_gate_step or step_name, history, dialog_suggest, mode="detailed")
-                answer_text = ans.text if ans else "Уточню деталі по вашому питанню і повернуся з точною відповіддю."
+                answer_text = await answer_with_training_or_faq(
+                    sender,
+                    state.qa_gate_step or step_name,
+                    text,
+                    "Уточню деталі по вашому питанню і повернуся з точною відповіддю.",
+                )
                 await send_v2_message(
                     sender,
                     answer_text,
@@ -3073,9 +3298,12 @@ async def main():
                 return True
 
         if step_name == STEP_SCHEDULE_SHIFT_WAIT and intent_name == "question":
-            history = await build_ai_history(client, sender, limit=12)
-            ans = await answer_from_faq(text, STEP_SCHEDULE_SHIFT_WAIT, history, dialog_suggest, mode="detailed")
-            answer_text = ans.text if ans else "Уточню коротко: у нас доступні денна або нічна зміна."
+            answer_text = await answer_with_training_or_faq(
+                sender,
+                STEP_SCHEDULE_SHIFT_WAIT,
+                text,
+                "Уточню коротко: у нас доступні денна або нічна зміна.",
+            )
             await send_v2_message(
                 sender,
                 answer_text,
@@ -3090,10 +3318,8 @@ async def main():
             return True
 
         if step_name == STEP_SCHEDULE_CONFIRM and (intent_name == "question" or is_schedule_not_clear_reply(text)):
-            history = await build_ai_history(client, sender, limit=12)
-            ans = await answer_from_faq(text, STEP_SCHEDULE_CONFIRM, history, dialog_suggest, mode="detailed")
-            if ans and (ans.text or "").strip():
-                answer_text = ans.text.strip()
+            answer_text = await answer_with_training_or_faq(sender, STEP_SCHEDULE_CONFIRM, text, "")
+            if answer_text:
                 await send_v2_message(
                     sender,
                     answer_text,
@@ -3109,10 +3335,8 @@ async def main():
             return True
 
         if step_name == STEP_BALANCE_CONFIRM and (intent_name == "question" or is_schedule_not_clear_reply(text)):
-            history = await build_ai_history(client, sender, limit=12)
-            ans = await answer_from_faq(text, STEP_BALANCE_CONFIRM, history, dialog_suggest, mode="detailed")
-            if ans and (ans.text or "").strip():
-                answer_text = ans.text.strip()
+            answer_text = await answer_with_training_or_faq(sender, STEP_BALANCE_CONFIRM, text, "")
+            if answer_text:
                 await send_v2_message(
                     sender,
                     answer_text,
@@ -3128,9 +3352,12 @@ async def main():
             return True
 
         if intent_name == "question":
-            history = await build_ai_history(client, sender, limit=12)
-            ans = await answer_from_faq(text, step_name, history, dialog_suggest, mode="detailed")
-            answer_text = ans.text if ans else "Уточню деталі по вашому питанню і повернуся з точною відповіддю."
+            answer_text = await answer_with_training_or_faq(
+                sender,
+                step_name,
+                text,
+                "Уточню деталі по вашому питанню і повернуся з точною відповіддю.",
+            )
             await send_v2_message(sender, answer_text, step_name, status="знак питання", delay_before=QUESTION_RESPONSE_DELAY_SEC)
             state.qa_gate_active = True
             state.qa_gate_step = step_name
@@ -3292,10 +3519,8 @@ async def main():
                 await finalize_test_ready(sender, state, text)
                 return True
             if intent_name == "question" or is_schedule_not_clear_reply(text):
-                history = await build_ai_history(client, sender, limit=12)
-                ans = await answer_from_faq(text, STEP_TEST_REVIEW, history, dialog_suggest, mode="detailed")
-                if ans and (ans.text or "").strip():
-                    answer_text = ans.text.strip()
+                answer_text = await answer_with_training_or_faq(sender, STEP_TEST_REVIEW, text, "")
+                if answer_text:
                     await send_v2_message(
                         sender,
                         answer_text,
@@ -3767,6 +3992,25 @@ async def main():
                     }
                     await asyncio.to_thread(faq_suggestions_sheet.append_if_missing, suggestion)
             return
+        if event.event_type == "like_training_upsert":
+            if faq_likes_train_sheet:
+                saved = await asyncio.to_thread(faq_likes_train_sheet.append_pair, payload)
+                if saved:
+                    print(
+                        "LIKE_TRAIN_SAVED "
+                        f"peer={payload.get('peer_id')} "
+                        f"candidate_msg={payload.get('candidate_msg_id')} "
+                        f"operator_msg={payload.get('operator_msg_id')} "
+                        f"cluster={payload.get('cluster_key')}"
+                    )
+                else:
+                    print(
+                        "LIKE_TRAIN_SKIP_DUP "
+                        f"peer={payload.get('peer_id')} "
+                        f"candidate_msg={payload.get('candidate_msg_id')} "
+                        f"operator_msg={payload.get('operator_msg_id')}"
+                    )
+            return
         raise ValueError(f"Unknown sheet event type: {event.event_type}")
 
     def extract_status_code(err: Exception) -> Optional[int]:
@@ -3829,6 +4073,93 @@ async def main():
         except Exception:
             return False
         return True
+
+    async def handle_like_training_reaction(peer_id: int, msg_id: int):
+        if not LIKE_TRAINING_ENABLED or not faq_likes_train_sheet:
+            return
+        key = (int(peer_id), int(msg_id))
+        try:
+            entity = await client.get_entity(peer_id)
+            msg = await client.get_messages(entity, ids=msg_id)
+        except Exception as err:
+            print(f"LIKE_TRAIN_MISS reason=load_msg_failed peer={peer_id} msg={msg_id} err={type(err).__name__}: {err}")
+            return
+        if not msg or not message_has_my_reaction(msg):
+            like_train_seen.pop(key, None)
+            return
+        if like_train_seen.get(key):
+            return
+        like_train_seen[key] = True
+        now_ts = time.time()
+        step_snapshot = (v2_runtime.get(peer_id).flow_step or "").strip()
+        if not getattr(msg, "out", False):
+            text_raw = (getattr(msg, "message", "") or "").strip()
+            if len(normalize_text(text_raw)) < 3:
+                return
+            prev = like_train_pending.get(peer_id)
+            if prev and (now_ts - float(prev.get("ts", 0) or 0)) > LIKE_PAIR_WINDOW_SEC:
+                print(f"LIKE_TRAIN_PAIR_TIMEOUT peer={peer_id}")
+            like_train_pending[peer_id] = {
+                "candidate_msg_id": int(msg_id),
+                "candidate_text_raw": text_raw,
+                "candidate_text_norm": normalize_question(text_raw),
+                "cluster_key": build_cluster_key(normalize_question(text_raw)),
+                "ts": now_ts,
+                "step_snapshot": step_snapshot or STEP_SCREENING_WAIT,
+            }
+            print(f"LIKE_TRAIN_PENDING peer={peer_id} msg={msg_id}")
+            return
+
+        pending = like_train_pending.get(peer_id)
+        if not pending:
+            return
+        age_sec = now_ts - float(pending.get("ts", 0) or 0)
+        if age_sec > LIKE_PAIR_WINDOW_SEC:
+            like_train_pending.pop(peer_id, None)
+            print(f"LIKE_TRAIN_PAIR_TIMEOUT peer={peer_id}")
+            return
+        operator_text = (getattr(msg, "message", "") or "").strip()
+        if len(normalize_text(operator_text)) < 3:
+            return
+        payload = {
+            "created_at": datetime.now(tz).isoformat(timespec="seconds"),
+            "peer_id": str(peer_id),
+            "chat_link": build_chat_link_app(entity, peer_id),
+            "candidate_msg_id": str(pending.get("candidate_msg_id", "")),
+            "candidate_text_raw": pending.get("candidate_text_raw", ""),
+            "candidate_text_norm": pending.get("candidate_text_norm", ""),
+            "cluster_key": pending.get("cluster_key", ""),
+            "operator_msg_id": str(msg_id),
+            "operator_answer_raw": operator_text,
+            "operator_answer_norm": normalize_text(operator_text),
+            "step_snapshot": pending.get("step_snapshot", step_snapshot or ""),
+            "source": "like_pair",
+            "active": "1",
+            "notes": "",
+        }
+        if enqueue_sheet_event("like_training_upsert", payload):
+            like_train_pending.pop(peer_id, None)
+            if LIKE_TRAINING_UNREACT_OPERATOR_ONLY:
+                ok = await unreact_operator_message(entity, int(msg_id))
+                if ok:
+                    print(f"LIKE_TRAIN_UNREACT_OK peer={peer_id} msg={msg_id}")
+
+    @client.on(events.Raw)
+    async def on_raw_update(update):
+        if not LIKE_TRAINING_ENABLED:
+            return
+        update_name = type(update).__name__
+        if "Reaction" not in update_name:
+            return
+        peer = getattr(update, "peer", None)
+        msg_id = getattr(update, "msg_id", None)
+        user_id = getattr(peer, "user_id", None)
+        if not user_id or not msg_id:
+            return
+        try:
+            await handle_like_training_reaction(int(user_id), int(msg_id))
+        except Exception as err:
+            print(f"LIKE_TRAIN_MISS reason=raw_handler_err err={type(err).__name__}: {err}")
 
     @client.on(events.NewMessage(incoming=True))
     async def on_private_message(event):
