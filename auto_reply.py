@@ -153,6 +153,7 @@ FOLLOWUP_CHECK_SEC = int(os.environ.get("AUTO_REPLY_FOLLOWUP_CHECK_SEC", "60"))
 FOLLOWUP_WINDOW_START_HOUR = int(os.environ.get("FOLLOWUP_WINDOW_START_HOUR", "9"))
 FOLLOWUP_WINDOW_END_HOUR = int(os.environ.get("FOLLOWUP_WINDOW_END_HOUR", "18"))
 SORT_TODAY_BY_UPDATED = os.environ.get("SORT_TODAY_BY_UPDATED", "0").strip().lower() in {"1", "true", "yes", "on"}
+HISTORY_LOG_ENABLED = os.environ.get("HISTORY_LOG_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 ACCOUNT_KEY = os.environ.get("AUTO_REPLY_ACCOUNT_KEY", "default")
 TODAY_WORKSHEET = os.environ.get("TODAY_WORKSHEET", "Сегодня")
@@ -1579,24 +1580,27 @@ class SheetWriter:
                 merged = candidate_note_append if not current_notes else f"{current_notes}\n---\n{candidate_note_append}"
                 existing[notes_idx] = merged
 
-        event_type = self._event_type(status, auto_reply_enabled, last_in, last_out, event_type_override)
-        history_link = self.append_history_event(
-            tz=tz,
-            event_type=event_type,
-            peer_id=peer_id,
-            name=name,
-            username=username,
-            chat_link=chat_link,
-            status=status,
-            auto_reply_enabled=auto_reply_enabled,
-            last_in=last_in,
-            last_out=last_out,
-            sender_role=sender_role,
-            dialog_mode=dialog_mode,
-            step_snapshot=step_snapshot or tech_step,
-            full_text=full_text,
-        )
-        set_value("Ссылка на журнал", history_link or "")
+        if HISTORY_LOG_ENABLED:
+            event_type = self._event_type(status, auto_reply_enabled, last_in, last_out, event_type_override)
+            history_link = self.append_history_event(
+                tz=tz,
+                event_type=event_type,
+                peer_id=peer_id,
+                name=name,
+                username=username,
+                chat_link=chat_link,
+                status=status,
+                auto_reply_enabled=auto_reply_enabled,
+                last_in=last_in,
+                last_out=last_out,
+                sender_role=sender_role,
+                dialog_mode=dialog_mode,
+                step_snapshot=step_snapshot or tech_step,
+                full_text=full_text,
+            )
+            set_value("Ссылка на журнал", history_link or "")
+        else:
+            set_value("Ссылка на журнал", "")
 
         try:
             if row_idx:
