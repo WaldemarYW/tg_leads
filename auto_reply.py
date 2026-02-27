@@ -748,6 +748,32 @@ def is_test_ready_confirmation(text: str) -> bool:
     return is_continue_phrase(t) or is_neutral_ack(t) or is_short_neutral_ack(t)
 
 
+def is_hard_stop_message(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    if is_stop_phrase(text):
+        return True
+    if message_has_question(text):
+        return False
+    stop_markers = (
+        "не підход",
+        "не подходит",
+        "неактуаль",
+        "не актуаль",
+        "немає часу",
+        "не маю часу",
+        "нема часу",
+        "мало часу",
+        "багато часу",
+        "не зможу",
+        "не смогу",
+        "вибачте що потурбував",
+        "извините что потревожил",
+    )
+    return any(m in t for m in stop_markers)
+
+
 def is_voice_decline(text: str) -> bool:
     t = normalize_text(text)
     if not t:
@@ -2954,6 +2980,19 @@ async def main():
                 paused_peers.add(sender.id)
                 enabled_peers.discard(sender.id)
                 v2_runtime.set(state)
+            return True
+
+        if is_hard_stop_message(text):
+            await send_v2_message(sender, STOP_REPLY_TEXT, step_name, status=AUTO_STOP_STATUS)
+            state.auto_mode = "OFF"
+            state.paused = True
+            paused_peers.add(sender.id)
+            enabled_peers.discard(sender.id)
+            state.qa_gate_active = False
+            state.qa_gate_step = ""
+            state.qa_gate_opened_at = 0.0
+            state.qa_gate_reminder_sent = False
+            v2_runtime.set(state)
             return True
 
         if (
