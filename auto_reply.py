@@ -152,6 +152,7 @@ FOLLOWUP_STATE_PATH = os.environ.get("AUTO_REPLY_FOLLOWUP_STATE_PATH", "/opt/tg_
 FOLLOWUP_CHECK_SEC = int(os.environ.get("AUTO_REPLY_FOLLOWUP_CHECK_SEC", "60"))
 FOLLOWUP_WINDOW_START_HOUR = int(os.environ.get("FOLLOWUP_WINDOW_START_HOUR", "9"))
 FOLLOWUP_WINDOW_END_HOUR = int(os.environ.get("FOLLOWUP_WINDOW_END_HOUR", "18"))
+SORT_TODAY_BY_UPDATED = os.environ.get("SORT_TODAY_BY_UPDATED", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 ACCOUNT_KEY = os.environ.get("AUTO_REPLY_ACCOUNT_KEY", "default")
 TODAY_WORKSHEET = os.environ.get("TODAY_WORKSHEET", "Сегодня")
@@ -1351,6 +1352,8 @@ class SheetWriter:
         return updated
 
     def _sort_today_by_updated(self, ws, headers):
+        if not SORT_TODAY_BY_UPDATED:
+            return
         try:
             updated_idx = headers.index("Обновлено") + 1
         except ValueError:
