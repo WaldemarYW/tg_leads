@@ -166,7 +166,6 @@ def kb_account(acct: AccountConfig):
     kb.add(types.InlineKeyboardButton("▶️ Старт авто", callback_data=f"acct:{acct.key}:auto_start"))
     kb.add(types.InlineKeyboardButton("⏹ Стоп авто", callback_data=f"acct:{acct.key}:auto_stop"))
     kb.add(types.InlineKeyboardButton("📊 Статус авто", callback_data=f"acct:{acct.key}:auto_status"))
-    kb.add(types.InlineKeyboardButton("🧠 Експорт чатів (3 міс.)", callback_data=f"acct:{acct.key}:export_chats"))
     toggle_label = "⏼ Вимкнути акаунт" if is_account_enabled(acct) else "⏼ Увімкнути акаунт"
     kb.add(types.InlineKeyboardButton(toggle_label, callback_data=f"acct:{acct.key}:toggle"))
     kb.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="acct:back"))
