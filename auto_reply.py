@@ -162,10 +162,15 @@ SORT_TODAY_BY_UPDATED = os.environ.get("SORT_TODAY_BY_UPDATED", "0").strip().low
 HISTORY_LOG_ENABLED = os.environ.get("HISTORY_LOG_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 ACCOUNT_KEY = os.environ.get("AUTO_REPLY_ACCOUNT_KEY", "default")
+IS_ALT_ACCOUNT = ACCOUNT_KEY != "default"
 TODAY_WORKSHEET = os.environ.get("TODAY_WORKSHEET", "Сегодня")
 HISTORY_SHEET_PREFIX = os.environ.get("HISTORY_SHEET_PREFIX", "История")
 HISTORY_RETENTION_MONTHS = int(os.environ.get("HISTORY_RETENTION_MONTHS", "6"))
 PAUSED_STATE_PATH = os.environ.get("AUTO_REPLY_PAUSED_STATE_PATH", "/opt/tg_leads/.auto_reply.paused.json")
+CROSS_ACCOUNT_OWNER_STATE_PATH = os.environ.get("CROSS_ACCOUNT_OWNER_STATE_PATH", "/opt/tg_leads/state/lead_owner_map.json")
+ALT_GROUP_START_DELAY_SEC = float(os.environ.get("ALT_GROUP_START_DELAY_SEC", "300"))
+ALT_STRICT_GROUP_ONLY = os.environ.get("ALT_STRICT_GROUP_ONLY", "1").strip().lower() in {"1", "true", "yes", "on"}
+ALT_OWNER_CHECK_WITH_SHEET = os.environ.get("ALT_OWNER_CHECK_WITH_SHEET", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 TODAY_HEADERS = [
     "Имя",
@@ -1110,6 +1115,102 @@ def get_step_fallback_text(step_name: str, stage: int) -> str:
     return ""
 
 
+class CrossAccountOwnerStore:
+    def __init__(self, path: str):
+        self.path = path
+        self.lock_path = f"{path}.lock"
+
+    def _load(self) -> Dict[str, dict]:
+        if not self.path or not os.path.exists(self.path):
+            return {}
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return raw if isinstance(raw, dict) else {}
+
+    def _save_atomic(self, data: Dict[str, dict]):
+        base = os.path.dirname(self.path)
+        if base:
+            os.makedirs(base, exist_ok=True)
+        tmp_path = f"{self.path}.tmp.{os.getpid()}.{int(time.time() * 1000)}"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=True)
+        os.replace(tmp_path, self.path)
+
+    def get_owner(self, peer_id: int) -> Optional[str]:
+        data = self._load()
+        rec = data.get(str(int(peer_id)))
+        if not isinstance(rec, dict):
+            return None
+        owner = str(rec.get("owner", "") or "").strip()
+        return owner or None
+
+    def try_claim(self, peer_id: int, owner_key: str, source: str, tz: ZoneInfo) -> bool:
+        if not acquire_lock(self.lock_path, ttl_sec=5):
+            return False
+        try:
+            key = str(int(peer_id))
+            owner_key = str(owner_key or "").strip()
+            if not owner_key:
+                return False
+            data = self._load()
+            current = data.get(key)
+            current_owner = ""
+            if isinstance(current, dict):
+                current_owner = str(current.get("owner", "") or "").strip()
+            if current_owner and current_owner != owner_key:
+                return False
+            data[key] = {
+                "owner": owner_key,
+                "source": str(source or "").strip() or "unknown",
+                "updated_at": datetime.now(tz).isoformat(timespec="seconds"),
+            }
+            self._save_atomic(data)
+            return True
+        finally:
+            release_lock(self.lock_path)
+
+    def set_owner(self, peer_id: int, owner_key: str, source: str, tz: ZoneInfo) -> bool:
+        if not acquire_lock(self.lock_path, ttl_sec=5):
+            return False
+        try:
+            key = str(int(peer_id))
+            owner_key = str(owner_key or "").strip()
+            if not owner_key:
+                return False
+            data = self._load()
+            data[key] = {
+                "owner": owner_key,
+                "source": str(source or "").strip() or "unknown",
+                "updated_at": datetime.now(tz).isoformat(timespec="seconds"),
+            }
+            self._save_atomic(data)
+            return True
+        finally:
+            release_lock(self.lock_path)
+
+    def release_owner(self, peer_id: int, owner_key: str) -> bool:
+        if not acquire_lock(self.lock_path, ttl_sec=5):
+            return False
+        try:
+            key = str(int(peer_id))
+            owner_key = str(owner_key or "").strip()
+            data = self._load()
+            current = data.get(key)
+            current_owner = ""
+            if isinstance(current, dict):
+                current_owner = str(current.get("owner", "") or "").strip()
+            if current_owner != owner_key:
+                return False
+            data.pop(key, None)
+            self._save_atomic(data)
+            return True
+        finally:
+            release_lock(self.lock_path)
+
+
 def parse_group_message(text: str) -> dict:
     data = {}
     for line in (text or "").splitlines():
@@ -1803,6 +1904,22 @@ class SheetWriter:
             if peer_raw.isdigit() and auto_raw in {"on", "1", "yes", "true", "enabled"}:
                 enabled.add(int(peer_raw))
         return enabled
+
+    def has_peer_for_account(self, tz: ZoneInfo, peer_id: int, account_key: str, require_enabled: bool = False) -> bool:
+        ws = self._ensure_today_ws(tz)
+        headers = self._get_headers(ws)
+        row_idx, row = self._find_row(ws, peer_id, account_key)
+        if not row_idx or not row:
+            return False
+        if not require_enabled:
+            return True
+        try:
+            auto_idx = headers.index("Автоответчик")
+        except ValueError:
+            return False
+        if auto_idx >= len(row):
+            return False
+        return row[auto_idx].strip().lower() in {"on", "1", "yes", "true", "enabled"}
 
 
 class LocalPauseStore(LocalPauseStoreStore):
@@ -2676,6 +2793,7 @@ def status_for_text(text: str) -> Optional[str]:
 async def main():
     tz = ZoneInfo(TIMEZONE)
     sheet = SheetWriter()
+    owner_store = CrossAccountOwnerStore(CROSS_ACCOUNT_OWNER_STATE_PATH)
     pause_store = LocalPauseStore(PAUSED_STATE_PATH)
     group_leads_sheet = GroupLeadsSheet()
     faq_questions_sheet = None
@@ -2736,6 +2854,7 @@ async def main():
     followup_state = FollowupState(FOLLOWUP_STATE_PATH)
     fallback_quota = GlobalFallbackQuota(FALLBACK_QUOTA_PATH, GLOBAL_FALLBACK_DAILY_LIMIT)
     qa_gate_state = {}
+    pending_group_autostart: Dict[int, float] = {}
     like_train_pending: Dict[int, dict] = {}
     like_train_seen: Dict[Tuple[int, int], bool] = {}
     sheets_queue = None
@@ -3141,6 +3260,51 @@ async def main():
             followup_state=followup_state,
             parse_mode=parse_mode,
         )
+
+    def is_peer_owned_by_default(peer_id: int) -> bool:
+        owner = owner_store.get_owner(peer_id)
+        if owner == "default":
+            return True
+        if not ALT_OWNER_CHECK_WITH_SHEET:
+            return False
+        try:
+            return sheet.has_peer_for_account(tz, peer_id, "default", require_enabled=False)
+        except Exception:
+            return False
+
+    async def start_v2_onboarding(entity: User, start_source: str) -> bool:
+        peer_id = int(getattr(entity, "id", 0) or 0)
+        if not peer_id:
+            return False
+        enabled_peers.add(peer_id)
+        v2_enrollment.add(peer_id)
+        v2_state = PeerRuntimeState(
+            peer_id=peer_id,
+            flow_step=STEP_SCREENING_WAIT,
+            auto_mode="ON",
+            paused=False,
+            screening_started_at=time.time(),
+            screening_q1_asked=True,
+            screening_q2_asked=False,
+            screening_q1_answer="",
+            screening_q2_answer="",
+            step_wait_started_at=time.time(),
+            step_wait_step=STEP_SCREENING_WAIT,
+            step_followup_stage=0,
+            step_followup_last_at=0.0,
+        )
+        v2_runtime.set(v2_state)
+        try:
+            await send_v2_message(entity, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
+            await send_v2_message(entity, SCREENING_Q1_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
+        except Exception as err:
+            print(f"⚠️ ONBOARDING_SEND_FAIL peer={peer_id} source={start_source} err={type(err).__name__}: {err}")
+            return False
+        if not IS_ALT_ACCOUNT:
+            owner_store.set_owner(peer_id, "default", start_source, tz)
+        else:
+            owner_store.try_claim(peer_id, ACCOUNT_KEY, start_source, tz)
+        return True
 
     def enqueue_candidate_note(entity: User, text: str):
         note = (text or "").strip()
@@ -4000,6 +4164,8 @@ async def main():
                 if current_v2.flow_step in WAIT_STEP_SET:
                     arm_step_wait(current_v2, current_v2.flow_step, time.time())
                 v2_runtime.set(current_v2)
+                if not IS_ALT_ACCOUNT:
+                    owner_store.set_owner(entity.id, "default", "manual", tz)
                 print(f"START1_RECOVER peer={entity.id} source=v2 step={current_v2.flow_step}")
             elif text_lower in STOP_COMMANDS:
                 current_v2 = v2_runtime.get(entity.id)
@@ -4068,24 +4234,18 @@ async def main():
             print(f"⏭️ Призупинено для користувача: {entity.id}")
             return
 
-        enabled_peers.add(entity.id)
-        v2_enrollment.add(entity.id)
-        v2_state = v2_runtime.get(entity.id)
-        v2_state.flow_step = STEP_SCREENING_WAIT
-        v2_state.auto_mode = "ON"
-        v2_state.paused = False
-        v2_state.screening_started_at = time.time()
-        v2_state.screening_last_at = 0.0
-        v2_state.screening_answers = []
-        v2_state.screening_q1_asked = True
-        v2_state.screening_q2_asked = False
-        v2_state.screening_q1_answer = ""
-        v2_state.screening_q2_answer = ""
-        arm_step_wait(v2_state, STEP_SCREENING_WAIT, time.time())
-        v2_runtime.set(v2_state)
-        await send_v2_message(entity, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
-        await send_v2_message(entity, SCREENING_Q1_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
-        print(f"✅ V2 onboarding message sent: {entity.id}")
+        if IS_ALT_ACCOUNT:
+            if is_peer_owned_by_default(int(entity.id)):
+                print(f"ALT_DELAYED_START_CANCELLED owner=default peer={entity.id}")
+                return
+            due_at = time.time() + ALT_GROUP_START_DELAY_SEC
+            pending_group_autostart[int(entity.id)] = float(due_at)
+            print(f"ALT_DELAYED_START_SCHEDULED peer={entity.id} due={int(due_at)}")
+            return
+
+        ok = await start_v2_onboarding(entity, "group")
+        if ok:
+            print(f"✅ V2 onboarding message sent: {entity.id}")
 
     if traffic_group:
         async def process_traffic_registration(chat_id: int, message_id: int):
@@ -4406,10 +4566,18 @@ async def main():
         group_incoming_autostart = from_group_lead and first_message_in_dialog and (
             pause_status == "PAUSED" or peer_id in paused_peers or peer_id not in enabled_peers
         )
+        if IS_ALT_ACCOUNT:
+            group_incoming_autostart = False
+
+        if IS_ALT_ACCOUNT and ALT_STRICT_GROUP_ONLY and not is_test_restart(sender, text):
+            owner = owner_store.get_owner(peer_id)
+            if owner != ACCOUNT_KEY:
+                print(f"ALT_PRIVATE_IGNORED_NOT_GROUP peer={peer_id}")
+                return
 
         if plus_start and not plus_start_first_message:
             print(f"PLUS_IGNORED_NOT_FIRST peer={peer_id}")
-        if plus_start_first_message or group_incoming_autostart:
+        if (not IS_ALT_ACCOUNT) and (plus_start_first_message or group_incoming_autostart):
             paused_peers.discard(peer_id)
             enabled_peers.add(peer_id)
             clear_qa_gate(peer_id)
@@ -4422,25 +4590,9 @@ async def main():
             buffered_incoming.pop(peer_id, None)
             start_source = "plus_start" if (plus_start_first_message or plus_start) else "group_incoming_start"
             pause_store.set_status(sender.id, username, name, chat_link, "ACTIVE", updated_by=start_source)
-            v2_enrollment.add(peer_id)
-            v2_state = PeerRuntimeState(
-                peer_id=peer_id,
-                flow_step=STEP_SCREENING_WAIT,
-                auto_mode="ON",
-                paused=False,
-                screening_started_at=time.time(),
-                screening_q1_asked=True,
-                screening_q2_asked=False,
-                screening_q1_answer="",
-                screening_q2_answer="",
-                step_wait_started_at=time.time(),
-                step_wait_step=STEP_SCREENING_WAIT,
-                step_followup_stage=0,
-                step_followup_last_at=0.0,
-            )
-            v2_runtime.set(v2_state)
-            await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
-            await send_v2_message(sender, SCREENING_Q1_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
+            ok = await start_v2_onboarding(sender, start_source)
+            if not ok:
+                return
             if group_incoming_autostart:
                 print(f"✅ GROUP incoming switched to V2 flow peer={peer_id}")
             else:
@@ -4516,6 +4668,8 @@ async def main():
                 print(f"⚠️ Filtered debounce: {peer_id}")
                 return
             print(f"✅ Test user bypassed debounce: {peer_id}")
+        if not IS_ALT_ACCOUNT:
+            owner_store.set_owner(peer_id, "default", "incoming", tz)
         processing_peers.add(peer_id)
 
         try:
@@ -4759,6 +4913,36 @@ async def main():
         while not stop_event.is_set():
             try:
                 now = datetime.now(tz)
+                if IS_ALT_ACCOUNT and pending_group_autostart:
+                    now_ts = now.timestamp()
+                    for peer_id, due_at in list(pending_group_autostart.items()):
+                        if now_ts < float(due_at or 0):
+                            continue
+                        pending_group_autostart.pop(peer_id, None)
+                        owner = owner_store.get_owner(peer_id)
+                        if owner == "default":
+                            print(f"ALT_DELAYED_START_CANCELLED owner=default peer={peer_id}")
+                            continue
+                        if is_peer_owned_by_default(peer_id):
+                            print(f"ALT_DELAYED_START_CANCELLED owner=default peer={peer_id}")
+                            continue
+                        try:
+                            entity = await client.get_entity(peer_id)
+                        except Exception:
+                            print(f"ALT_DELAYED_START_CANCELLED reason=not_resolved peer={peer_id}")
+                            continue
+                        if is_paused(entity):
+                            print(f"ALT_DELAYED_START_CANCELLED reason=paused peer={peer_id}")
+                            continue
+                        if not owner_store.try_claim(peer_id, ACCOUNT_KEY, "group", tz):
+                            print(f"ALT_DELAYED_START_CANCELLED reason=claim_failed peer={peer_id}")
+                            continue
+                        ok = await start_v2_onboarding(entity, "group")
+                        if ok:
+                            print(f"ALT_DELAYED_START_SENT peer={peer_id}")
+                        else:
+                            owner_store.release_owner(peer_id, ACCOUNT_KEY)
+                            print(f"ALT_DELAYED_START_CANCELLED reason=send_failed peer={peer_id}")
                 if not FLOW_V2_ENABLED:
                     for peer_id, state in list(qa_gate_state.items()):
                         if not state.get("qa_gate_active"):
