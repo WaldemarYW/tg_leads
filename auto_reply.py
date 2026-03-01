@@ -145,11 +145,16 @@ QUESTION_RESPONSE_DELAY_SEC = float(os.environ.get("QUESTION_RESPONSE_DELAY_SEC"
 QUESTION_RESUME_DELAY_SEC = float(os.environ.get("QUESTION_RESUME_DELAY_SEC", "300"))
 QA_GATE_REMINDER_DELAY_SEC = float(os.environ.get("QA_GATE_REMINDER_DELAY_SEC", "300"))
 TRAINING_TO_FORM_DELAY_SEC = float(os.environ.get("TRAINING_TO_FORM_DELAY_SEC", "30"))
+STEP_CLARIFY_DELAY_SEC = float(os.environ.get("STEP_CLARIFY_DELAY_SEC", "600"))
+STEP_FALLBACK_1_DELAY_SEC = float(os.environ.get("STEP_FALLBACK_1_DELAY_SEC", "21600"))
+STEP_FALLBACK_2_DELAY_SEC = float(os.environ.get("STEP_FALLBACK_2_DELAY_SEC", "259200"))
+GLOBAL_FALLBACK_DAILY_LIMIT = int(os.environ.get("GLOBAL_FALLBACK_DAILY_LIMIT", "30"))
 SENT_MESSAGE_CACHE_LIMIT = int(os.environ.get("SENT_MESSAGE_CACHE_LIMIT", "200"))
 JOURNAL_MAX_LINES_PER_CHAT = int(os.environ.get("JOURNAL_MAX_LINES_PER_CHAT", "500"))
 SESSION_LOCK = os.environ.get("TELETHON_SESSION_LOCK", f"{SESSION_FILE}.lock")
 STATUS_PATH = os.environ.get("AUTO_REPLY_STATUS_PATH", "/opt/tg_leads/.auto_reply.status")
 FOLLOWUP_STATE_PATH = os.environ.get("AUTO_REPLY_FOLLOWUP_STATE_PATH", "/opt/tg_leads/.auto_reply.followup_state.json")
+FALLBACK_QUOTA_PATH = os.environ.get("AUTO_REPLY_FALLBACK_QUOTA_PATH", "/opt/tg_leads/.auto_reply.fallback_quota.json")
 FOLLOWUP_CHECK_SEC = int(os.environ.get("AUTO_REPLY_FOLLOWUP_CHECK_SEC", "60"))
 FOLLOWUP_WINDOW_START_HOUR = int(os.environ.get("FOLLOWUP_WINDOW_START_HOUR", "9"))
 FOLLOWUP_WINDOW_END_HOUR = int(os.environ.get("FOLLOWUP_WINDOW_END_HOUR", "18"))
@@ -273,6 +278,42 @@ CLARIFY_NEGATIVE_FOLLOWUP_TEXT = (
 QA_GATE_REMINDER_TEXT = "Якщо зʼявилися ще питання — із радістю відповім. Коли будете готові, підемо далі 🙂"
 VOICE_FALLBACK_TEXT = "Якщо зʼявилися питання по голосовому — із радістю поясню. Коли будете готові, підемо далі 🙂"
 V2_GATE_REMINDER_TEXT = "Якщо зʼявилися ще питання — із радістю відповім. Коли будете готові, підемо далі 🙂"
+WAIT_STEP_SET = {
+    STEP_SCREENING_WAIT,
+    STEP_COMPANY_INTRO,
+    STEP_VOICE_WAIT,
+    STEP_SCHEDULE_SHIFT_WAIT,
+    STEP_SCHEDULE_CONFIRM,
+    STEP_BALANCE_CONFIRM,
+    STEP_TEST_REVIEW,
+}
+STEP_CLARIFY_TEXTS = {
+    STEP_SCREENING_WAIT: "Підкажіть, будь ласка, відповідь на запитання, щоб я міг продовжити.",
+    STEP_COMPANY_INTRO: "Чи зручно продовжити далі у текстовому форматі?",
+    STEP_VOICE_WAIT: "Якщо зʼявилися питання по голосовому — із радістю поясню. Чи зручно продовжити?",
+    STEP_SCHEDULE_SHIFT_WAIT: "Підкажіть, будь ласка, чи визначилися з графіком: денна чи нічна зміна?",
+    STEP_SCHEDULE_CONFIRM: "Чи зрозуміло, як відбувається робочий процес на сайті?",
+    STEP_BALANCE_CONFIRM: "Чи зрозуміло, з чого складається баланс?",
+    STEP_TEST_REVIEW: "Чи готові продовжувати після ознайомлення з умовами?",
+}
+STEP_FALLBACK_1_TEXTS = {
+    STEP_SCREENING_WAIT: "Коли буде зручно, надішліть, будь ласка, відповідь на запитання — і я продовжу.",
+    STEP_COMPANY_INTRO: "Нагадую про діалог. Якщо актуально, можемо продовжити у зручному для вас темпі.",
+    STEP_VOICE_WAIT: "Якщо по голосовому залишилися питання — напишіть, я поясню. Коли будете готові, продовжимо.",
+    STEP_SCHEDULE_SHIFT_WAIT: "Нагадую: підкажіть, будь ласка, яку зміну обираєте — денну чи нічну.",
+    STEP_SCHEDULE_CONFIRM: "Якщо є питання по процесу роботи — напишіть, поясню. Якщо все зрозуміло, рухаємося далі.",
+    STEP_BALANCE_CONFIRM: "Якщо залишилися питання по балансу — напишіть, поясню. Якщо все зрозуміло, перейдемо далі.",
+    STEP_TEST_REVIEW: "Коли будете готові продовжити — напишіть, і я одразу надішлю наступний крок.",
+}
+STEP_FALLBACK_2_TEXTS = {
+    STEP_SCREENING_WAIT: "Повертаюся з фінальним нагадуванням. Якщо вакансія ще актуальна — надішліть, будь ласка, відповідь на запитання.",
+    STEP_COMPANY_INTRO: "Фінальне нагадування: якщо вакансія все ще актуальна, напишіть — і ми продовжимо.",
+    STEP_VOICE_WAIT: "Фінальне нагадування: якщо хочете продовжити, напишіть у будь-який момент — я на звʼязку.",
+    STEP_SCHEDULE_SHIFT_WAIT: "Фінальне нагадування: якщо вакансія актуальна, підкажіть, будь ласка, яку зміну обираєте.",
+    STEP_SCHEDULE_CONFIRM: "Фінальне нагадування: якщо є ще питання по процесу — відповім, або можемо рухатися далі.",
+    STEP_BALANCE_CONFIRM: "Фінальне нагадування: якщо щось незрозуміло по балансу — поясню, або можемо перейти далі.",
+    STEP_TEST_REVIEW: "Фінальне нагадування: якщо готові продовжувати, напишіть, і я одразу надішлю наступний етап.",
+}
 SCREENING_INTRO_TEXT = (
     "Привіт) Ви залишали відгук на вакансію менеджера чату. "
     "Зараз я розповім детальніше про вакансію, але спершу дайте, будь ласка, відповіді на кілька запитань.\n"
@@ -979,6 +1020,94 @@ class FollowupState(FollowupStateStore):
 
     def mark_sent_and_advance(self, peer_id: int, tz: ZoneInfo):
         return super().mark_sent_and_advance(peer_id, datetime.now(tz))
+
+
+class GlobalFallbackQuota:
+    def __init__(self, path: str, daily_limit: int):
+        self.path = path
+        self.daily_limit = max(0, int(daily_limit))
+        self.data = self._load()
+
+    def _load(self) -> Dict[str, int]:
+        if not self.path or not os.path.exists(self.path):
+            return {}
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        out: Dict[str, int] = {}
+        for k, v in raw.items():
+            try:
+                out[str(k)] = int(v)
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def _save(self):
+        base = os.path.dirname(self.path)
+        if base:
+            os.makedirs(base, exist_ok=True)
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(self.data, f, ensure_ascii=True)
+
+    def _today_key(self, tz: ZoneInfo) -> str:
+        return datetime.now(tz).strftime("%Y-%m-%d")
+
+    def _prune(self, keep_key: str):
+        if keep_key in self.data and len(self.data) == 1:
+            return
+        self.data = {keep_key: int(self.data.get(keep_key, 0))}
+
+    def can_send(self, tz: ZoneInfo) -> bool:
+        if self.daily_limit <= 0:
+            return False
+        key = self._today_key(tz)
+        self._prune(key)
+        return int(self.data.get(key, 0)) < self.daily_limit
+
+    def mark_sent(self, tz: ZoneInfo):
+        key = self._today_key(tz)
+        self._prune(key)
+        self.data[key] = int(self.data.get(key, 0)) + 1
+        self._save()
+
+
+def arm_step_wait(state: PeerRuntimeState, step_name: str, now_ts: float):
+    if step_name not in WAIT_STEP_SET:
+        return
+    should_log = (
+        (state.step_wait_step or "") != step_name
+        or int(state.step_followup_stage or 0) != 0
+        or float(state.step_wait_started_at or 0) <= 0
+    )
+    state.step_wait_started_at = float(now_ts or time.time())
+    state.step_wait_step = step_name
+    state.step_followup_stage = 0
+    state.step_followup_last_at = 0.0
+    if should_log:
+        print(f"STEP_WAIT_ARM peer={state.peer_id} step={step_name}")
+
+
+def clear_step_wait(state: PeerRuntimeState):
+    state.step_wait_started_at = 0.0
+    state.step_wait_step = ""
+    state.step_followup_stage = 0
+    state.step_followup_last_at = 0.0
+
+
+def get_step_clarify_text(step_name: str) -> str:
+    return STEP_CLARIFY_TEXTS.get(step_name, "")
+
+
+def get_step_fallback_text(step_name: str, stage: int) -> str:
+    if stage == 1:
+        return STEP_FALLBACK_1_TEXTS.get(step_name, "")
+    if stage == 2:
+        return STEP_FALLBACK_2_TEXTS.get(step_name, "")
+    return ""
 
 
 def parse_group_message(text: str) -> dict:
@@ -2605,6 +2734,7 @@ async def main():
     format_delivery_state = {}
     step_state = StepState(STEP_STATE_PATH)
     followup_state = FollowupState(FOLLOWUP_STATE_PATH)
+    fallback_quota = GlobalFallbackQuota(FALLBACK_QUOTA_PATH, GLOBAL_FALLBACK_DAILY_LIMIT)
     qa_gate_state = {}
     like_train_pending: Dict[int, dict] = {}
     like_train_seen: Dict[Tuple[int, int], bool] = {}
@@ -2627,6 +2757,14 @@ async def main():
         except Exception as err:
             print(f"⚠️ SHEETS_DIRECT_WRITE_FAIL peer={kwargs.get('peer_id', '')}: {type(err).__name__}: {err}")
             return False
+
+    def can_send_global_fallback(now_dt: datetime, tzinfo: ZoneInfo) -> bool:
+        _ = now_dt, tzinfo
+        return fallback_quota.can_send(tz)
+
+    def mark_global_fallback_sent(now_dt: datetime, tzinfo: ZoneInfo):
+        _ = now_dt, tzinfo
+        fallback_quota.mark_sent(tz)
     try:
         enabled_peers = sheet.load_enabled_peers(tz)
     except Exception:
@@ -3169,6 +3307,7 @@ async def main():
         state.test_message_count = 0
         state.test_last_message = ""
         state.test_ready_clarify_count = 0
+        clear_step_wait(state)
         v2_runtime.set(state)
         return True
 
@@ -3191,6 +3330,9 @@ async def main():
             return False
         state = v2_runtime.get(sender.id)
         step_name = state.flow_step or STEP_SCREENING_WAIT
+        now_ts = time.time()
+        if step_name in WAIT_STEP_SET:
+            arm_step_wait(state, step_name, now_ts)
         voice_decline = step_name == STEP_COMPANY_INTRO and is_voice_decline(text)
         shift_selected = bool((state.shift_choice or "").strip())
 
@@ -3202,6 +3344,7 @@ async def main():
                 state.paused = True
                 paused_peers.add(sender.id)
                 enabled_peers.discard(sender.id)
+                clear_step_wait(state)
                 v2_runtime.set(state)
             return True
 
@@ -3215,6 +3358,7 @@ async def main():
             state.qa_gate_step = ""
             state.qa_gate_opened_at = 0.0
             state.qa_gate_reminder_sent = False
+            clear_step_wait(state)
             v2_runtime.set(state)
             return True
 
@@ -3230,6 +3374,7 @@ async def main():
             state.qa_gate_step = ""
             state.qa_gate_opened_at = 0.0
             state.qa_gate_reminder_sent = False
+            arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
             v2_runtime.set(state)
             return True
 
@@ -3254,6 +3399,7 @@ async def main():
                 state.qa_gate_reminder_sent = False
                 state.qa_gate_opened_at = 0.0
                 state.shift_prompted_at = time.time()
+                arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
                 v2_runtime.set(state)
                 enqueue_faq_question(sender.id, STEP_SCHEDULE_SHIFT_WAIT, text, answer_text)
                 return True
@@ -3273,6 +3419,8 @@ async def main():
                 )
                 state.qa_gate_opened_at = time.time()
                 state.qa_gate_reminder_sent = False
+                if (state.qa_gate_step or step_name) in WAIT_STEP_SET:
+                    arm_step_wait(state, state.qa_gate_step or step_name, time.time())
                 v2_runtime.set(state)
                 enqueue_faq_question(sender.id, state.qa_gate_step or step_name, text, answer_text)
                 return True
@@ -3281,6 +3429,8 @@ async def main():
                 state.qa_gate_step = ""
                 state.qa_gate_reminder_sent = False
                 state.qa_gate_opened_at = 0.0
+                if step_name in WAIT_STEP_SET:
+                    arm_step_wait(state, step_name, time.time())
                 v2_runtime.set(state)
                 intent_name = "ack_continue"
             elif intent_name == "stop":
@@ -3289,11 +3439,14 @@ async def main():
                 state.paused = True
                 paused_peers.add(sender.id)
                 enabled_peers.discard(sender.id)
+                clear_step_wait(state)
                 v2_runtime.set(state)
                 return True
             else:
                 state.qa_gate_opened_at = time.time()
                 state.qa_gate_reminder_sent = False
+                if step_name in WAIT_STEP_SET:
+                    arm_step_wait(state, step_name, time.time())
                 v2_runtime.set(state)
                 return True
 
@@ -3313,6 +3466,7 @@ async def main():
             )
             await send_v2_message(sender, "Підкажи, будь ласка, яку зміну обираєш: денну чи нічну?", STEP_SCHEDULE_SHIFT_WAIT)
             state.shift_prompted_at = time.time()
+            arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
             v2_runtime.set(state)
             enqueue_faq_question(sender.id, STEP_SCHEDULE_SHIFT_WAIT, text, answer_text)
             return True
@@ -3331,6 +3485,7 @@ async def main():
             attempt = int(state.schedule_confirm_clarify_count or 0)
             await send_v2_message(sender, schedule_confirm_clarify_prompt(attempt), STEP_SCHEDULE_CONFIRM)
             state.schedule_confirm_clarify_count = attempt + 1
+            arm_step_wait(state, STEP_SCHEDULE_CONFIRM, time.time())
             v2_runtime.set(state)
             return True
 
@@ -3348,6 +3503,7 @@ async def main():
             attempt = int(state.balance_confirm_clarify_count or 0)
             await send_v2_message(sender, balance_confirm_clarify_prompt(attempt), STEP_BALANCE_CONFIRM)
             state.balance_confirm_clarify_count = attempt + 1
+            arm_step_wait(state, STEP_BALANCE_CONFIRM, time.time())
             v2_runtime.set(state)
             return True
 
@@ -3363,6 +3519,8 @@ async def main():
             state.qa_gate_step = step_name
             state.qa_gate_opened_at = time.time()
             state.qa_gate_reminder_sent = False
+            if step_name in WAIT_STEP_SET:
+                arm_step_wait(state, step_name, time.time())
             v2_runtime.set(state)
             enqueue_faq_question(sender.id, step_name, text, answer_text)
             return True
@@ -3373,6 +3531,7 @@ async def main():
             state.paused = True
             paused_peers.add(sender.id)
             enabled_peers.discard(sender.id)
+            clear_step_wait(state)
             v2_runtime.set(state)
             return True
 
@@ -3400,6 +3559,7 @@ async def main():
                 state.paused = True
                 paused_peers.add(sender.id)
                 enabled_peers.discard(sender.id)
+                clear_step_wait(state)
                 v2_runtime.set(state)
                 return True
 
@@ -3410,6 +3570,7 @@ async def main():
                 await send_v2_message(sender, SCREENING_Q2_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
                 state.screening_q2_asked = True
                 state.screening_started_at = now_ts
+                arm_step_wait(state, STEP_SCREENING_WAIT, time.time())
                 v2_runtime.set(state)
                 return True
 
@@ -3420,6 +3581,7 @@ async def main():
                 state.screening_started_at = 0.0
                 state.screening_last_at = 0.0
                 state.screening_answers = []
+                arm_step_wait(state, STEP_COMPANY_INTRO, time.time())
                 v2_runtime.set(state)
                 return True
 
@@ -3435,18 +3597,26 @@ async def main():
                     state.flow_step = STEP_VOICE_WAIT
                     state.voice_stage = VOICE_SENT
                     state.voice_sent_at = time.time()
+                    arm_step_wait(state, STEP_VOICE_WAIT, time.time())
                     v2_runtime.set(state)
                     return True
             await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status="🕒 Графік")
             state.flow_step = STEP_SCHEDULE_SHIFT_WAIT
             state.shift_prompted_at = time.time()
+            arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
             v2_runtime.set(state)
             return True
 
         if step_name == STEP_VOICE_WAIT:
-            await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status="🕒 Графік")
-            state.flow_step = STEP_SCHEDULE_SHIFT_WAIT
-            state.shift_prompted_at = time.time()
+            if intent_name == "ack_continue":
+                await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status="🕒 Графік")
+                state.flow_step = STEP_SCHEDULE_SHIFT_WAIT
+                state.shift_prompted_at = time.time()
+                arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
+                v2_runtime.set(state)
+                return True
+            await send_v2_message(sender, get_step_clarify_text(STEP_VOICE_WAIT), STEP_VOICE_WAIT, status="🎧 Голосове")
+            arm_step_wait(state, STEP_VOICE_WAIT, time.time())
             v2_runtime.set(state)
             return True
 
@@ -3455,6 +3625,7 @@ async def main():
             if not choice:
                 await send_v2_message(sender, "Підкажи, будь ласка, яку зміну обираєш: денну чи нічну?", STEP_SCHEDULE_SHIFT_WAIT)
                 state.shift_prompted_at = time.time()
+                arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
                 v2_runtime.set(state)
                 return True
             enqueue_candidate_note(sender, f"Графік: {choice}")
@@ -3463,12 +3634,15 @@ async def main():
             state.flow_step = STEP_SCHEDULE_CONFIRM
             state.shift_choice = choice
             state.schedule_confirm_clarify_count = 0
+            arm_step_wait(state, STEP_SCHEDULE_CONFIRM, time.time())
             v2_runtime.set(state)
             return True
 
         if step_name == STEP_SCHEDULE_CONFIRM:
             if intent_name != "ack_continue":
                 await send_v2_message(sender, SCHEDULE_CONFIRM_TEXT, STEP_SCHEDULE_CONFIRM)
+                arm_step_wait(state, STEP_SCHEDULE_CONFIRM, time.time())
+                v2_runtime.set(state)
                 return True
             balance_links = [PHOTO_1_MESSAGE_LINK, PHOTO_2_MESSAGE_LINK]
             missing = [l for l in balance_links if not l]
@@ -3487,12 +3661,15 @@ async def main():
             state.flow_step = STEP_BALANCE_CONFIRM
             state.schedule_confirm_clarify_count = 0
             state.balance_confirm_clarify_count = 0
+            arm_step_wait(state, STEP_BALANCE_CONFIRM, time.time())
             v2_runtime.set(state)
             return True
 
         if step_name == STEP_BALANCE_CONFIRM:
             if intent_name != "ack_continue":
                 await send_v2_message(sender, BALANCE_CONFIRM_TEXT, STEP_BALANCE_CONFIRM)
+                arm_step_wait(state, STEP_BALANCE_CONFIRM, time.time())
+                v2_runtime.set(state)
                 return True
             if not TEST_TASK_MESSAGE_LINK:
                 await send_v2_message(sender, "Контент для наступного етапу тимчасово недоступний. Зараз уточню і повернусь до вас.", STEP_PROOF_FORWARD)
@@ -3511,6 +3688,7 @@ async def main():
             state.test_message_count = 0
             state.test_last_message = ""
             state.test_ready_clarify_count = 0
+            arm_step_wait(state, STEP_TEST_REVIEW, time.time())
             v2_runtime.set(state)
             return True
 
@@ -3534,12 +3712,14 @@ async def main():
                 state.test_ready_clarify_count = attempt + 1
                 state.test_prompted_at = time.time()
                 state.test_help_sent = False
+                arm_step_wait(state, STEP_TEST_REVIEW, time.time())
                 v2_runtime.set(state)
                 return True
             state.test_message_count = int(state.test_message_count or 0) + 1
             state.test_last_message = (text or "").strip()
             state.test_prompted_at = state.test_prompted_at or time.time()
             state.test_help_sent = False
+            arm_step_wait(state, STEP_TEST_REVIEW, time.time())
             v2_runtime.set(state)
             return True
 
@@ -3547,6 +3727,7 @@ async def main():
             enqueue_candidate_note(sender, text)
             await send_v2_message(sender, "Дякую! Передаю вашу анкету тімліду, далі звʼяжемось по старту 🙌", STEP_HANDOFF, status=CONFIRM_STATUS)
             state.flow_step = STEP_HANDOFF
+            clear_step_wait(state)
             v2_runtime.set(state)
             return True
 
@@ -3566,6 +3747,10 @@ async def main():
                 screening_q2_asked=False,
                 screening_q1_answer="",
                 screening_q2_answer="",
+                step_wait_started_at=time.time(),
+                step_wait_step=STEP_SCREENING_WAIT,
+                step_followup_stage=0,
+                step_followup_last_at=0.0,
             )
             v2_runtime.set(seeded_state)
             await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
@@ -3812,8 +3997,18 @@ async def main():
                     current_v2 = PeerRuntimeState(peer_id=entity.id, flow_step=STEP_SCREENING_WAIT, auto_mode="ON", paused=False)
                 current_v2.auto_mode = "ON"
                 current_v2.paused = False
+                if current_v2.flow_step in WAIT_STEP_SET:
+                    arm_step_wait(current_v2, current_v2.flow_step, time.time())
                 v2_runtime.set(current_v2)
                 print(f"START1_RECOVER peer={entity.id} source=v2 step={current_v2.flow_step}")
+            elif text_lower in STOP_COMMANDS:
+                current_v2 = v2_runtime.get(entity.id)
+                clear_step_wait(current_v2)
+                v2_runtime.set(current_v2)
+            else:
+                current_v2 = v2_runtime.get(entity.id)
+                clear_step_wait(current_v2)
+                v2_runtime.set(current_v2)
             queue_today_upsert(
                 peer_id=entity.id,
                 name=name,
@@ -3886,6 +4081,7 @@ async def main():
         v2_state.screening_q2_asked = False
         v2_state.screening_q1_answer = ""
         v2_state.screening_q2_answer = ""
+        arm_step_wait(v2_state, STEP_SCREENING_WAIT, time.time())
         v2_runtime.set(v2_state)
         await send_v2_message(entity, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
         await send_v2_message(entity, SCREENING_Q1_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
@@ -4211,7 +4407,9 @@ async def main():
             pause_status == "PAUSED" or peer_id in paused_peers or peer_id not in enabled_peers
         )
 
-        if plus_start_first_message or (plus_start and (pause_status == "PAUSED" or peer_id in paused_peers or peer_id not in enabled_peers)) or group_incoming_autostart:
+        if plus_start and not plus_start_first_message:
+            print(f"PLUS_IGNORED_NOT_FIRST peer={peer_id}")
+        if plus_start_first_message or group_incoming_autostart:
             paused_peers.discard(peer_id)
             enabled_peers.add(peer_id)
             clear_qa_gate(peer_id)
@@ -4235,6 +4433,10 @@ async def main():
                 screening_q2_asked=False,
                 screening_q1_answer="",
                 screening_q2_answer="",
+                step_wait_started_at=time.time(),
+                step_wait_step=STEP_SCREENING_WAIT,
+                step_followup_stage=0,
+                step_followup_last_at=0.0,
             )
             v2_runtime.set(v2_state)
             await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
@@ -4269,6 +4471,10 @@ async def main():
                 screening_q2_asked=False,
                 screening_q1_answer="",
                 screening_q2_answer="",
+                step_wait_started_at=time.time(),
+                step_wait_step=STEP_SCREENING_WAIT,
+                step_followup_stage=0,
+                step_followup_last_at=0.0,
             )
             v2_runtime.set(v2_state)
             await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
@@ -4597,64 +4803,44 @@ async def main():
                             entity = await client.get_entity(peer_id)
                         except Exception:
                             continue
-                        if v2s.qa_gate_active and not v2s.qa_gate_reminder_sent:
-                            gate_step = (v2s.qa_gate_step or v2s.flow_step or "").strip()
-                            if gate_step == STEP_VOICE_WAIT:
-                                # For voice_wait we only keep voice-specific fallback to avoid duplicate reminders.
-                                pass
-                            elif time.time() >= float(v2s.qa_gate_opened_at or 0) + QA_GATE_REMINDER_DELAY_SEC:
-                                await send_v2_message(entity, V2_GATE_REMINDER_TEXT, gate_step or v2s.flow_step, status="знак питання")
-                                v2s.qa_gate_reminder_sent = True
-                                v2_runtime.set(v2s)
-                        if v2s.flow_step == STEP_SCREENING_WAIT:
-                            started = float(v2s.screening_started_at or 0)
-                            if started > 0 and (time.time() - started) >= SCREENING_WAIT_SEC:
-                                have_q2 = bool((v2s.screening_q2_answer or "").strip())
-                                if not v2s.screening_q2_asked:
-                                    await send_v2_message(entity, SCREENING_Q2_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
-                                    v2s.screening_q2_asked = True
-                                    v2s.screening_started_at = time.time()
-                                    v2_runtime.set(v2s)
-                                    continue
-                                if not have_q2:
-                                    await send_v2_message(entity, SCREENING_TO_INTRO_BRIDGE_TEXT, STEP_SCREENING_WAIT, status="🏢 Знайомство з компанією")
-                                    await send_v2_message(entity, COMPANY_INTRO_TIMEOUT_TEXT, STEP_COMPANY_INTRO, status="🏢 Знайомство з компанією")
-                                    v2s.flow_step = STEP_COMPANY_INTRO
-                                    v2s.screening_started_at = 0.0
-                                    v2s.screening_last_at = 0.0
-                                    v2_runtime.set(v2s)
-                                    continue
-                        if v2s.flow_step == STEP_TEST_REVIEW and not v2s.test_help_sent:
-                            prompted_at = float(v2s.test_prompted_at or 0)
-                            if prompted_at > 0 and (time.time() - prompted_at) >= 300:
-                                await send_v2_message(
-                                    entity,
-                                    TEST_READY_PROMPT_TEXT,
-                                    STEP_TEST_REVIEW,
-                                    status="🎓 Навчання",
-                                )
-                                v2s.test_help_sent = True
-                                v2_runtime.set(v2s)
-                        if v2s.flow_step == STEP_VOICE_WAIT and v2s.voice_stage in {VOICE_SENT, VOICE_FALLBACK_SENT}:
-                            elapsed = time.time() - float(v2s.voice_sent_at or 0)
-                            if v2s.voice_stage == VOICE_SENT and elapsed >= VOICE_FALLBACK_DELAY_SEC:
-                                await send_v2_message(entity, VOICE_FALLBACK_TEXT, STEP_VOICE_WAIT, status="🎧 Голосове")
-                                v2s.voice_stage = VOICE_FALLBACK_SENT
-                                v2_runtime.set(v2s)
-                            elif elapsed >= (VOICE_FALLBACK_DELAY_SEC + VOICE_AUTO_CONTINUE_DELAY_SEC):
-                                await send_v2_message(entity, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status="🕒 Графік")
-                                v2s.voice_stage = VOICE_AUTO_ADVANCED
-                                v2s.flow_step = STEP_SCHEDULE_SHIFT_WAIT
-                                v2s.shift_prompted_at = time.time()
-                                v2_runtime.set(v2s)
-                        if v2s.flow_step == STEP_SCHEDULE_SHIFT_WAIT and float(v2s.shift_prompted_at or 0) > 0:
-                            if (time.time() - float(v2s.shift_prompted_at or 0)) >= SCHEDULE_SHIFT_WAIT_SEC:
-                                await send_v2_message(entity, SCHEDULE_DETAILS_TEXT, STEP_SCHEDULE_BLOCK, status="🕒 Графік")
-                                await send_v2_message(entity, SCHEDULE_CONFIRM_TEXT, STEP_SCHEDULE_CONFIRM, status="🕒 Графік")
-                                v2s.flow_step = STEP_SCHEDULE_CONFIRM
-                                v2s.shift_prompted_at = 0.0
-                                v2s.schedule_confirm_clarify_count = 0
-                                v2_runtime.set(v2s)
+                        if is_paused(entity):
+                            continue
+                        current_step = (v2s.flow_step or "").strip()
+                        if current_step not in WAIT_STEP_SET:
+                            continue
+                        started = float(v2s.step_wait_started_at or 0)
+                        if (v2s.step_wait_step or "") != current_step or started <= 0:
+                            arm_step_wait(v2s, current_step, time.time())
+                            v2_runtime.set(v2s)
+                            continue
+                        elapsed = time.time() - started
+                        stage = int(v2s.step_followup_stage or 0)
+                        send_text = ""
+                        log_label = ""
+                        next_stage = stage
+                        if stage == 0 and elapsed >= STEP_CLARIFY_DELAY_SEC:
+                            send_text = get_step_clarify_text(current_step)
+                            log_label = "STEP_WAIT_CLARIFY_SENT"
+                            next_stage = 1
+                        elif stage == 1 and elapsed >= STEP_FALLBACK_1_DELAY_SEC:
+                            send_text = get_step_fallback_text(current_step, 1)
+                            log_label = "STEP_WAIT_FALLBACK6H_SENT"
+                            next_stage = 2
+                        elif stage == 2 and elapsed >= STEP_FALLBACK_2_DELAY_SEC:
+                            send_text = get_step_fallback_text(current_step, 2)
+                            log_label = "STEP_WAIT_FALLBACK3D_SENT"
+                            next_stage = 3
+                        if not send_text:
+                            continue
+                        if not can_send_global_fallback(now, tz):
+                            print(f"FALLBACK_DAILY_LIMIT_HIT peer={peer_id} step={current_step}")
+                            continue
+                        await send_v2_message(entity, send_text, current_step, status=status_for_text(send_text) or "знак питання")
+                        mark_global_fallback_sent(now, tz)
+                        print(f"{log_label} peer={peer_id} step={current_step}")
+                        v2s.step_followup_stage = next_stage
+                        v2s.step_followup_last_at = time.time()
+                        v2_runtime.set(v2s)
 
                 for key, state in list(followup_state.data.items()):
                     try:
