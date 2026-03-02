@@ -162,7 +162,12 @@ SORT_TODAY_BY_UPDATED = os.environ.get("SORT_TODAY_BY_UPDATED", "0").strip().low
 HISTORY_LOG_ENABLED = os.environ.get("HISTORY_LOG_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 ACCOUNT_KEY = os.environ.get("AUTO_REPLY_ACCOUNT_KEY", "default")
-IS_ALT_ACCOUNT = ACCOUNT_KEY != "default"
+PRIMARY_ACCOUNT_KEY = (os.environ.get("PRIMARY_ACCOUNT_KEY", "default") or "default").strip() or "default"
+PRIMARY_OWNER_KEYS = {PRIMARY_ACCOUNT_KEY}
+if PRIMARY_ACCOUNT_KEY != "default":
+    # Backward compatibility with older owner locks created before PRIMARY_ACCOUNT_KEY was configurable.
+    PRIMARY_OWNER_KEYS.add("default")
+IS_ALT_ACCOUNT = ACCOUNT_KEY != PRIMARY_ACCOUNT_KEY
 TODAY_WORKSHEET = os.environ.get("TODAY_WORKSHEET", "Сегодня")
 HISTORY_SHEET_PREFIX = os.environ.get("HISTORY_SHEET_PREFIX", "История")
 HISTORY_RETENTION_MONTHS = int(os.environ.get("HISTORY_RETENTION_MONTHS", "6"))
@@ -3261,14 +3266,14 @@ async def main():
             parse_mode=parse_mode,
         )
 
-    def is_peer_owned_by_default(peer_id: int) -> bool:
+    def is_peer_owned_by_primary(peer_id: int) -> bool:
         owner = owner_store.get_owner(peer_id)
-        if owner == "default":
+        if owner in PRIMARY_OWNER_KEYS:
             return True
         if not ALT_OWNER_CHECK_WITH_SHEET:
             return False
         try:
-            return sheet.has_peer_for_account(tz, peer_id, "default", require_enabled=False)
+            return sheet.has_peer_for_account(tz, peer_id, PRIMARY_ACCOUNT_KEY, require_enabled=False)
         except Exception:
             return False
 
@@ -3301,7 +3306,7 @@ async def main():
             print(f"⚠️ ONBOARDING_SEND_FAIL peer={peer_id} source={start_source} err={type(err).__name__}: {err}")
             return False
         if not IS_ALT_ACCOUNT:
-            owner_store.set_owner(peer_id, "default", start_source, tz)
+            owner_store.set_owner(peer_id, PRIMARY_ACCOUNT_KEY, start_source, tz)
         else:
             owner_store.try_claim(peer_id, ACCOUNT_KEY, start_source, tz)
         return True
@@ -4165,7 +4170,7 @@ async def main():
                     arm_step_wait(current_v2, current_v2.flow_step, time.time())
                 v2_runtime.set(current_v2)
                 if not IS_ALT_ACCOUNT:
-                    owner_store.set_owner(entity.id, "default", "manual", tz)
+                    owner_store.set_owner(entity.id, PRIMARY_ACCOUNT_KEY, "manual", tz)
                 print(f"START1_RECOVER peer={entity.id} source=v2 step={current_v2.flow_step}")
             elif text_lower in STOP_COMMANDS:
                 current_v2 = v2_runtime.get(entity.id)
@@ -4235,8 +4240,8 @@ async def main():
             return
 
         if IS_ALT_ACCOUNT:
-            if is_peer_owned_by_default(int(entity.id)):
-                print(f"ALT_DELAYED_START_CANCELLED owner=default peer={entity.id}")
+            if is_peer_owned_by_primary(int(entity.id)):
+                print(f"ALT_DELAYED_START_CANCELLED owner=primary peer={entity.id}")
                 return
             due_at = time.time() + ALT_GROUP_START_DELAY_SEC
             pending_group_autostart[int(entity.id)] = float(due_at)
@@ -4669,7 +4674,7 @@ async def main():
                 return
             print(f"✅ Test user bypassed debounce: {peer_id}")
         if not IS_ALT_ACCOUNT:
-            owner_store.set_owner(peer_id, "default", "incoming", tz)
+            owner_store.set_owner(peer_id, PRIMARY_ACCOUNT_KEY, "incoming", tz)
         processing_peers.add(peer_id)
 
         try:
@@ -4920,11 +4925,11 @@ async def main():
                             continue
                         pending_group_autostart.pop(peer_id, None)
                         owner = owner_store.get_owner(peer_id)
-                        if owner == "default":
-                            print(f"ALT_DELAYED_START_CANCELLED owner=default peer={peer_id}")
+                        if owner in PRIMARY_OWNER_KEYS:
+                            print(f"ALT_DELAYED_START_CANCELLED owner=primary peer={peer_id}")
                             continue
-                        if is_peer_owned_by_default(peer_id):
-                            print(f"ALT_DELAYED_START_CANCELLED owner=default peer={peer_id}")
+                        if is_peer_owned_by_primary(peer_id):
+                            print(f"ALT_DELAYED_START_CANCELLED owner=primary peer={peer_id}")
                             continue
                         try:
                             entity = await client.get_entity(peer_id)
