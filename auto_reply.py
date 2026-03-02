@@ -3694,7 +3694,7 @@ async def main():
             enqueue_faq_question(sender.id, step_name, text, answer_text)
             return True
 
-        if intent_name == "stop" and not voice_decline and step_name not in {STEP_SCHEDULE_CONFIRM, STEP_BALANCE_CONFIRM, STEP_TEST_REVIEW}:
+        if intent_name == "stop" and not voice_decline and step_name in WAIT_STEP_SET:
             await send_v2_message(sender, STOP_REPLY_TEXT, step_name, status=AUTO_STOP_STATUS)
             state.auto_mode = "OFF"
             state.paused = True
