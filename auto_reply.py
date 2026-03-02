@@ -5021,11 +5021,13 @@ async def main():
                             next_stage = 3
                         if not send_text:
                             continue
-                        if not can_send_global_fallback(now, tz):
+                        is_clarify_stage = (next_stage == 1 and log_label == "STEP_WAIT_CLARIFY_SENT")
+                        if not is_clarify_stage and not can_send_global_fallback(now, tz):
                             print(f"FALLBACK_DAILY_LIMIT_HIT peer={peer_id} step={current_step}")
                             continue
                         await send_v2_message(entity, send_text, current_step, status=status_for_text(send_text) or "знак питання")
-                        mark_global_fallback_sent(now, tz)
+                        if not is_clarify_stage:
+                            mark_global_fallback_sent(now, tz)
                         print(f"{log_label} peer={peer_id} step={current_step}")
                         v2s.step_followup_stage = next_stage
                         v2s.step_followup_last_at = time.time()
