@@ -850,6 +850,60 @@ def is_hard_stop_message(text: str) -> bool:
     return any(m in t for m in stop_markers)
 
 
+def is_screening_q1_reply_text(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    # Explicit vacancy refusal should still stop the flow.
+    hard_refusal_markers = (
+        "не підход",
+        "не подходит",
+        "неактуаль",
+        "не актуаль",
+        "не цікаво",
+        "неинтересно",
+        "не маю часу",
+        "немає часу",
+        "нема часу",
+        "не буду",
+        "не хочу",
+        "не потрібно",
+        "не нужна работа",
+    )
+    if any(m in t for m in hard_refusal_markers):
+        return False
+    q1_markers = (
+        "досвід",
+        "опыт",
+        "працював",
+        "працювала",
+        "работал",
+        "работала",
+        "чула",
+        "слыш",
+        "без досвіду",
+        "без опыта",
+        "не мав",
+        "не маю",
+        "не мала",
+        "не було",
+        "не был",
+        "не было",
+    )
+    if any(m in t for m in q1_markers):
+        return True
+    return t in {
+        "ні",
+        "нет",
+        "так",
+        "yes",
+        "no",
+        "нажаль ні",
+        "на жаль ні",
+        "к сожалению нет",
+    }
+
+
 def is_voice_decline(text: str) -> bool:
     t = normalize_text(text)
     if not t:
@@ -3517,7 +3571,8 @@ async def main():
                 v2_runtime.set(state)
             return True
 
-        if is_hard_stop_message(text):
+        screening_q1_reply = step_name == STEP_SCREENING_WAIT and is_screening_q1_reply_text(text)
+        if is_hard_stop_message(text) and not screening_q1_reply:
             await send_v2_message(sender, STOP_REPLY_TEXT, step_name, status=AUTO_STOP_STATUS)
             state.auto_mode = "OFF"
             state.paused = True
