@@ -50,6 +50,7 @@ class PeerRuntimeState:
     screening_q2_answer: str = ""
     shift_prompted_at: float = 0.0
     shift_choice: str = ""
+    schedule_shift_fit_check_pending: bool = False
     schedule_confirm_clarify_count: int = 0
     balance_confirm_clarify_count: int = 0
     test_answers: List[str] = field(default_factory=list)

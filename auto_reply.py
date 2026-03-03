@@ -774,6 +774,39 @@ def is_schedule_question_text(text: str) -> bool:
     return any(k in t for k in schedule_keywords)
 
 
+def is_schedule_shift_objection(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    if ("не підход" in t or "не подходит" in t) and ("граф" in t or "змін" in t or "смен" in t):
+        return True
+    if ("інші варіант" in t or "інший варіант" in t or "другие вариант" in t or "другой вариант" in t) and (
+        "граф" in t or "змін" in t or "смен" in t
+    ):
+        return True
+    return False
+
+
+def is_yes_reply(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    if t in {"так", "да", "ага", "ок", "окей", "добре", "хорошо", "підходить", "подходит"}:
+        return True
+    return is_continue_phrase(text) or is_neutral_ack(text)
+
+
+def is_no_reply(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    if is_stop_phrase(text):
+        return True
+    if t in {"ні", "нет", "не", "неа", "не підходить", "не подходит"}:
+        return True
+    return ("не підход" in t) or ("не подходит" in t)
+
+
 def is_schedule_not_clear_reply(text: str) -> bool:
     t = normalize_text(text)
     if not t:
@@ -3593,6 +3626,7 @@ async def main():
             await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status="🕒 Графік")
             state.flow_step = STEP_SCHEDULE_SHIFT_WAIT
             state.shift_prompted_at = time.time()
+            state.schedule_shift_fit_check_pending = False
             state.qa_gate_active = False
             state.qa_gate_step = ""
             state.qa_gate_opened_at = 0.0
@@ -3603,6 +3637,21 @@ async def main():
 
         if state.qa_gate_active:
             if (state.qa_gate_step or step_name) == STEP_SCHEDULE_SHIFT_WAIT and intent_name == "question":
+                if is_schedule_shift_objection(text):
+                    await send_v2_message(
+                        sender,
+                        "У нас доступні лише денна та нічна зміни на постійній основі. Чи підходить вам такий графік?",
+                        STEP_SCHEDULE_SHIFT_WAIT,
+                    )
+                    state.qa_gate_active = False
+                    state.qa_gate_step = ""
+                    state.qa_gate_reminder_sent = False
+                    state.qa_gate_opened_at = 0.0
+                    state.schedule_shift_fit_check_pending = True
+                    state.shift_prompted_at = time.time()
+                    arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
+                    v2_runtime.set(state)
+                    return True
                 answer_text = await answer_with_training_or_faq(
                     sender,
                     STEP_SCHEDULE_SHIFT_WAIT,
@@ -3674,6 +3723,17 @@ async def main():
                 return True
 
         if step_name == STEP_SCHEDULE_SHIFT_WAIT and intent_name == "question":
+            if is_schedule_shift_objection(text):
+                await send_v2_message(
+                    sender,
+                    "У нас доступні лише денна та нічна зміни на постійній основі. Чи підходить вам такий графік?",
+                    STEP_SCHEDULE_SHIFT_WAIT,
+                )
+                state.schedule_shift_fit_check_pending = True
+                state.shift_prompted_at = time.time()
+                arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
+                v2_runtime.set(state)
+                return True
             answer_text = await answer_with_training_or_faq(
                 sender,
                 STEP_SCHEDULE_SHIFT_WAIT,
@@ -3826,6 +3886,7 @@ async def main():
             await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status="🕒 Графік")
             state.flow_step = STEP_SCHEDULE_SHIFT_WAIT
             state.shift_prompted_at = time.time()
+            state.schedule_shift_fit_check_pending = False
             arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
             v2_runtime.set(state)
             return True
@@ -3835,6 +3896,7 @@ async def main():
                 await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status="🕒 Графік")
                 state.flow_step = STEP_SCHEDULE_SHIFT_WAIT
                 state.shift_prompted_at = time.time()
+                state.schedule_shift_fit_check_pending = False
                 arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
                 v2_runtime.set(state)
                 return True
@@ -3844,6 +3906,37 @@ async def main():
             return True
 
         if step_name == STEP_SCHEDULE_SHIFT_WAIT:
+            if state.schedule_shift_fit_check_pending:
+                if is_yes_reply(text):
+                    state.schedule_shift_fit_check_pending = False
+                    await send_v2_message(
+                        sender,
+                        "Підкажи, будь ласка, яку зміну обираєш: денну чи нічну?",
+                        STEP_SCHEDULE_SHIFT_WAIT,
+                    )
+                    state.shift_prompted_at = time.time()
+                    arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
+                    v2_runtime.set(state)
+                    return True
+                if is_no_reply(text):
+                    await send_v2_message(sender, STOP_REPLY_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status=AUTO_STOP_STATUS)
+                    state.auto_mode = "OFF"
+                    state.paused = True
+                    paused_peers.add(sender.id)
+                    enabled_peers.discard(sender.id)
+                    state.schedule_shift_fit_check_pending = False
+                    clear_step_wait(state)
+                    v2_runtime.set(state)
+                    return True
+                await send_v2_message(
+                    sender,
+                    "Підкажіть, будь ласка, чи підходить вам графік з двома змінами: денна або нічна?",
+                    STEP_SCHEDULE_SHIFT_WAIT,
+                )
+                state.shift_prompted_at = time.time()
+                arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
+                v2_runtime.set(state)
+                return True
             choice = parse_shift_choice(text)
             if not choice:
                 await send_v2_message(sender, "Підкажи, будь ласка, яку зміну обираєш: денну чи нічну?", STEP_SCHEDULE_SHIFT_WAIT)
@@ -3856,6 +3949,7 @@ async def main():
             await send_v2_message(sender, SCHEDULE_CONFIRM_TEXT, STEP_SCHEDULE_CONFIRM, status="🕒 Графік")
             state.flow_step = STEP_SCHEDULE_CONFIRM
             state.shift_choice = choice
+            state.schedule_shift_fit_check_pending = False
             state.schedule_confirm_clarify_count = 0
             arm_step_wait(state, STEP_SCHEDULE_CONFIRM, time.time())
             v2_runtime.set(state)
