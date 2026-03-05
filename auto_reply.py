@@ -862,13 +862,26 @@ def is_hard_stop_message(text: str) -> bool:
         return False
     if is_stop_phrase(text):
         return True
-    if message_has_question(text):
-        return False
-    stop_markers = (
+    hard_refusal_markers = (
+        "відмов",
+        "откаж",
         "не підход",
         "не подходит",
         "неактуаль",
         "не актуаль",
+        "не цікаво",
+        "неинтересно",
+        "не буду",
+        "не хочу",
+        "не потрібно",
+        "не нужно",
+    )
+    # Hard refusal has priority even if the message contains a question.
+    if any(m in t for m in hard_refusal_markers):
+        return True
+    if message_has_question(text):
+        return False
+    stop_markers = (
         "немає часу",
         "не маю часу",
         "нема часу",
@@ -3665,7 +3678,6 @@ async def main():
                     status="знак питання",
                     delay_before=QUESTION_RESPONSE_DELAY_SEC,
                 )
-                await send_v2_message(sender, "Підкажи, будь ласка, яку зміну обираєш: денну чи нічну?", STEP_SCHEDULE_SHIFT_WAIT)
                 state.qa_gate_active = False
                 state.qa_gate_step = ""
                 state.qa_gate_reminder_sent = False
@@ -3747,7 +3759,6 @@ async def main():
                 status="знак питання",
                 delay_before=QUESTION_RESPONSE_DELAY_SEC,
             )
-            await send_v2_message(sender, "Підкажи, будь ласка, яку зміну обираєш: денну чи нічну?", STEP_SCHEDULE_SHIFT_WAIT)
             state.shift_prompted_at = time.time()
             arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
             v2_runtime.set(state)
@@ -3765,9 +3776,6 @@ async def main():
                     delay_before=QUESTION_RESPONSE_DELAY_SEC,
                 )
                 enqueue_faq_question(sender.id, STEP_SCHEDULE_CONFIRM, text, answer_text)
-            attempt = int(state.schedule_confirm_clarify_count or 0)
-            await send_v2_message(sender, schedule_confirm_clarify_prompt(attempt), STEP_SCHEDULE_CONFIRM)
-            state.schedule_confirm_clarify_count = attempt + 1
             arm_step_wait(state, STEP_SCHEDULE_CONFIRM, time.time())
             v2_runtime.set(state)
             return True
@@ -3783,9 +3791,6 @@ async def main():
                     delay_before=QUESTION_RESPONSE_DELAY_SEC,
                 )
                 enqueue_faq_question(sender.id, STEP_BALANCE_CONFIRM, text, answer_text)
-            attempt = int(state.balance_confirm_clarify_count or 0)
-            await send_v2_message(sender, balance_confirm_clarify_prompt(attempt), STEP_BALANCE_CONFIRM)
-            state.balance_confirm_clarify_count = attempt + 1
             arm_step_wait(state, STEP_BALANCE_CONFIRM, time.time())
             v2_runtime.set(state)
             return True
@@ -3984,7 +3989,6 @@ async def main():
 
         if step_name == STEP_BALANCE_CONFIRM:
             if intent_name != "ack_continue":
-                await send_v2_message(sender, BALANCE_CONFIRM_TEXT, STEP_BALANCE_CONFIRM)
                 arm_step_wait(state, STEP_BALANCE_CONFIRM, time.time())
                 v2_runtime.set(state)
                 return True
@@ -4024,9 +4028,6 @@ async def main():
                         delay_before=QUESTION_RESPONSE_DELAY_SEC,
                     )
                     enqueue_faq_question(sender.id, STEP_TEST_REVIEW, text, answer_text)
-                attempt = int(state.test_ready_clarify_count or 0)
-                await send_v2_message(sender, test_ready_clarify_prompt(attempt), STEP_TEST_REVIEW)
-                state.test_ready_clarify_count = attempt + 1
                 state.test_prompted_at = time.time()
                 state.test_help_sent = False
                 arm_step_wait(state, STEP_TEST_REVIEW, time.time())
@@ -5174,11 +5175,15 @@ async def main():
                             print(f"FALLBACK_DAILY_LIMIT_HIT peer={peer_id} step={current_step}")
                             continue
                         await send_v2_message(entity, send_text, current_step, status=status_for_text(send_text) or "знак питання")
+                        sent_at = time.time()
                         if not is_clarify_stage:
                             mark_global_fallback_sent(now, tz)
                         print(f"{log_label} peer={peer_id} step={current_step}")
                         v2s.step_followup_stage = next_stage
-                        v2s.step_followup_last_at = time.time()
+                        # Re-arm from the actual send moment so each stage delay is relative
+                        # to the previous reminder (clarify -> +6h -> +3d), not original step start.
+                        v2s.step_followup_last_at = sent_at
+                        v2s.step_wait_started_at = sent_at
                         v2_runtime.set(v2s)
 
                 if not FLOW_V2_ENABLED:
