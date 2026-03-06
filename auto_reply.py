@@ -1596,6 +1596,22 @@ class SheetWriter:
             return found_idx, found_row
         return None, None
 
+    def _find_row_by_peer(self, ws, peer_id: int):
+        headers = self._get_headers(ws)
+        try:
+            peer_idx = headers.index("Peer ID")
+        except ValueError:
+            return None, None
+        try:
+            values = ws.get_all_values()
+        except Exception:
+            self._invalidate_ws_cache(ws)
+            return None, None
+        for row_idx, row in enumerate(values[1:], start=2):
+            if peer_idx < len(row) and row[peer_idx].strip() == str(peer_id):
+                return row_idx, row
+        return None, None
+
     def _event_type(
         self,
         status: Optional[str],
@@ -1881,6 +1897,10 @@ class SheetWriter:
         ws = self._ensure_today_ws(tz)
         headers = self._get_headers(ws)
         row_idx, existing = self._find_row(ws, peer_id, ACCOUNT_KEY)
+        # Keep exactly one row per peer in "Сегодня":
+        # if the row exists under another account key, reuse it instead of creating a new one.
+        if row_idx is None:
+            row_idx, existing = self._find_row_by_peer(ws, peer_id)
         existing = existing or [""] * len(headers)
         if len(existing) < len(headers):
             existing = existing + [""] * (len(headers) - len(existing))
@@ -1964,6 +1984,7 @@ class SheetWriter:
             if row_idx:
                 end_col = self._col_letter(len(headers))
                 ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
+                self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), ACCOUNT_KEY)] = row_idx
             else:
                 row_idx_recheck, existing_recheck = self._find_row(ws, peer_id, ACCOUNT_KEY)
                 if row_idx_recheck:
@@ -1974,6 +1995,18 @@ class SheetWriter:
                     end_col = self._col_letter(len(headers))
                     ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
                 else:
+                    row_idx_peer, existing_peer = self._find_row_by_peer(ws, peer_id)
+                    if row_idx_peer:
+                        row_idx = row_idx_peer
+                        existing = existing_peer or [""] * len(headers)
+                        if len(existing) < len(headers):
+                            existing = existing + [""] * (len(headers) - len(existing))
+                        end_col = self._col_letter(len(headers))
+                        ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
+                        self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), ACCOUNT_KEY)] = row_idx
+                        self._next_row_cache[ws.id] = max(int(self._next_row_cache.get(ws.id, 2)), row_idx + 1)
+                        self._sort_today_by_updated(ws, headers)
+                        return
                     next_row = int(self._next_row_cache.get(ws.id, 2))
                     end_col = self._col_letter(len(headers))
                     ws.update(range_name=f"A{next_row}:{end_col}{next_row}", values=[existing], value_input_option="USER_ENTERED")
@@ -4680,6 +4713,7 @@ async def main():
             return
         peer_id = sender.id
         text = event.raw_text or ""
+        test_restart = is_test_restart(sender, text)
         local_generation = int(restart_generation.get(peer_id, 0))
         name = getattr(sender, "first_name", "") or "Unknown"
         username = getattr(sender, "username", "") or ""
@@ -4693,6 +4727,12 @@ async def main():
             incoming_mode = "ON"
         else:
             incoming_mode = "ON" if peer_id in enabled_peers else "OFF"
+
+        if IS_ALT_ACCOUNT and ALT_STRICT_GROUP_ONLY and not test_restart:
+            owner = owner_store.get_owner(peer_id)
+            if owner != ACCOUNT_KEY:
+                print(f"ALT_PRIVATE_IGNORED_NOT_GROUP peer={peer_id}")
+                return
 
         queue_today_upsert(
             peer_id=sender.id,
@@ -4723,12 +4763,6 @@ async def main():
         if IS_ALT_ACCOUNT:
             group_incoming_autostart = False
 
-        if IS_ALT_ACCOUNT and ALT_STRICT_GROUP_ONLY and not is_test_restart(sender, text):
-            owner = owner_store.get_owner(peer_id)
-            if owner != ACCOUNT_KEY:
-                print(f"ALT_PRIVATE_IGNORED_NOT_GROUP peer={peer_id}")
-                return
-
         if plus_start and not plus_start_first_message:
             print(f"PLUS_IGNORED_NOT_FIRST peer={peer_id}")
         if (not IS_ALT_ACCOUNT) and (plus_start_first_message or group_incoming_autostart):
@@ -4753,7 +4787,7 @@ async def main():
                 print(f"✅ PLUS start switched to V2 flow peer={peer_id}")
             return
 
-        if is_test_restart(sender, text):
+        if test_restart:
             restart_generation[peer_id] = int(restart_generation.get(peer_id, 0)) + 1
             paused_peers.discard(peer_id)
             enabled_peers.add(peer_id)
