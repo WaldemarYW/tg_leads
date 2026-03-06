@@ -59,6 +59,9 @@ class PeerRuntimeState:
     test_message_count: int = 0
     test_last_message: str = ""
     test_ready_clarify_count: int = 0
+    form_waiting_photo: bool = False
+    form_prompted_at: float = 0.0
+    form_photo_reminder_sent: bool = False
     step_wait_started_at: float = 0.0
     step_wait_step: str = ""
     step_followup_stage: int = 0

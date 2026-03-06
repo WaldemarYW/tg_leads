@@ -145,6 +145,7 @@ QUESTION_RESPONSE_DELAY_SEC = float(os.environ.get("QUESTION_RESPONSE_DELAY_SEC"
 QUESTION_RESUME_DELAY_SEC = float(os.environ.get("QUESTION_RESUME_DELAY_SEC", "300"))
 QA_GATE_REMINDER_DELAY_SEC = float(os.environ.get("QA_GATE_REMINDER_DELAY_SEC", "300"))
 TRAINING_TO_FORM_DELAY_SEC = float(os.environ.get("TRAINING_TO_FORM_DELAY_SEC", "30"))
+FORM_PHOTO_REMINDER_DELAY_SEC = float(os.environ.get("FORM_PHOTO_REMINDER_DELAY_SEC", "300"))
 STEP_CLARIFY_DELAY_SEC = float(os.environ.get("STEP_CLARIFY_DELAY_SEC", "600"))
 STEP_FALLBACK_1_DELAY_SEC = float(os.environ.get("STEP_FALLBACK_1_DELAY_SEC", "21600"))
 STEP_FALLBACK_2_DELAY_SEC = float(os.environ.get("STEP_FALLBACK_2_DELAY_SEC", "259200"))
@@ -176,6 +177,7 @@ CROSS_ACCOUNT_OWNER_STATE_PATH = os.environ.get("CROSS_ACCOUNT_OWNER_STATE_PATH"
 ALT_GROUP_START_DELAY_SEC = float(os.environ.get("ALT_GROUP_START_DELAY_SEC", "300"))
 ALT_STRICT_GROUP_ONLY = os.environ.get("ALT_STRICT_GROUP_ONLY", "1").strip().lower() in {"1", "true", "yes", "on"}
 ALT_OWNER_CHECK_WITH_SHEET = os.environ.get("ALT_OWNER_CHECK_WITH_SHEET", "1").strip().lower() in {"1", "true", "yes", "on"}
+GROUP_LEADS_UPSERT_LOCK = os.environ.get("GROUP_LEADS_UPSERT_LOCK", "/opt/tg_leads/.group_leads_upsert.lock")
 
 TODAY_HEADERS = [
     "Имя",
@@ -632,6 +634,42 @@ def is_tracked_message(peer_id: int, message_id: int) -> bool:
     if not bucket:
         return False
     return int(message_id) in bucket
+
+
+def has_photo_attachment(message) -> bool:
+    if not message:
+        return False
+    if getattr(message, "photo", None) is not None:
+        return True
+    media = getattr(message, "media", None)
+    doc = getattr(media, "document", None)
+    if not doc:
+        return False
+    mime = str(getattr(doc, "mime_type", "") or "").strip().lower()
+    return mime.startswith("image/")
+
+
+def is_filled_form_text(text: str) -> bool:
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if len(lines) < 6:
+        return False
+
+    has_email = bool(re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", raw))
+    has_phone = bool(re.search(r"(?:\+?\d[\d\s\-\(\)]{8,}\d)", raw))
+    has_tg = any(re.match(r"^@[A-Za-z0-9_]{4,}$", ln) for ln in lines)
+    date_lines = sum(1 for ln in lines if re.search(r"\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b", ln))
+    has_schedule_line = any(re.search(r"\b\d{1,2}\s*(?:-|–|—|до|to)\s*\d{1,2}\b", ln.lower()) for ln in lines)
+
+    score = 0
+    score += 1 if has_email else 0
+    score += 1 if has_phone else 0
+    score += 1 if has_tg else 0
+    score += 1 if date_lines >= 2 else 0
+    score += 1 if has_schedule_line else 0
+    return score >= 3
 
 
 def is_stop_phrase(text: str) -> bool:
@@ -2072,6 +2110,7 @@ class GroupLeadsSheet:
         self.gc = sheets_client(GOOGLE_CREDS)
         self.sh = self.gc.open(SHEET_NAME)
         self.ws = get_or_create_worksheet(self.sh, GROUP_LEADS_WORKSHEET, rows=1000, cols=len(GROUP_LEADS_HEADERS))
+        self.lock_path = GROUP_LEADS_UPSERT_LOCK
         self._ensure_headers_exact()
 
     def _ensure_headers_exact(self):
@@ -2100,7 +2139,7 @@ class GroupLeadsSheet:
                 value_input_option="USER_ENTERED",
             )
 
-    def _find_row(self, values, tg_norm: str, phone_norm: str):
+    def _find_row(self, values, tg_norm: str, phone_norm: str, source_id: str, source_name: str):
         if not values:
             return None, None
         headers = [h.strip().lower() for h in values[0]]
@@ -2122,7 +2161,25 @@ class GroupLeadsSheet:
             if get_col("phone") is not None
             else get_col("телефон")
         )
+        source_id_idx = (
+            get_col("id источника")
+            if get_col("id источника") is not None
+            else get_col("source id")
+        )
+        source_name_idx = (
+            get_col("источник")
+            if get_col("источник") is not None
+            else get_col("source")
+        )
         for idx, row in enumerate(data, start=2):
+            if source_id and source_id_idx is not None and source_id_idx < len(row):
+                row_source_id = (row[source_id_idx] or "").strip()
+                if row_source_id == source_id:
+                    if source_name and source_name_idx is not None and source_name_idx < len(row):
+                        row_source_name = normalize_name(row[source_name_idx] or "")
+                        if row_source_name and row_source_name != normalize_name(source_name):
+                            continue
+                    return idx, row
             if tg_idx is not None and tg_idx < len(row) and tg_norm:
                 if normalize_username(row[tg_idx]) == tg_norm:
                     return idx, row
@@ -2132,52 +2189,65 @@ class GroupLeadsSheet:
         return None, None
 
     def upsert(self, tz: ZoneInfo, data: dict, status: Optional[str]):
-        received_at = datetime.now(tz).isoformat(timespec="seconds")
-        tg_value = data.get("tg", "") or ""
-        phone_value = data.get("phone", "") or ""
-        tg_norm = normalize_username(tg_value)
-        phone_norm = normalize_phone(phone_value)
+        lock_acquired = False
+        for _ in range(30):
+            if acquire_lock(self.lock_path, ttl_sec=5):
+                lock_acquired = True
+                break
+            time.sleep(0.1)
         try:
-            values = self.ws.get_all_values()
-        except Exception:
-            values = []
-        row_idx, existing = self._find_row(values, tg_norm, phone_norm)
-        existing = existing or [""] * len(GROUP_LEADS_HEADERS)
+            self._ensure_headers_exact()
+            received_at = datetime.now(tz).isoformat(timespec="seconds")
+            tg_value = data.get("tg", "") or ""
+            phone_value = data.get("phone", "") or ""
+            source_id = str(data.get("source_id", "") or "").strip()
+            source_name = str(data.get("source_name", "") or "").strip()
+            tg_norm = normalize_username(tg_value)
+            phone_norm = normalize_phone(phone_value)
+            try:
+                values = self.ws.get_all_values()
+            except Exception:
+                values = [GROUP_LEADS_HEADERS[:]]
+            row_idx, existing = self._find_row(values, tg_norm, phone_norm, source_id, source_name)
+            existing = existing or [""] * len(GROUP_LEADS_HEADERS)
 
-        def take(key: str, idx: int) -> str:
-            value = data.get(key)
-            if value is not None and value != "":
-                return value
-            return existing[idx] if idx < len(existing) else ""
+            def take(key: str, idx: int) -> str:
+                value = data.get(key)
+                if value is not None and value != "":
+                    return value
+                return existing[idx] if idx < len(existing) else ""
 
-        row = [
-            received_at,
-            status or take("status", 1),
-            take("full_name", 2),
-            take("age", 3),
-            take("desired_income", 4),
-            take("phone", 5),
-            take("tg", 6),
-            take("pc", 7),
-            take("note", 8),
-            take("source_id", 9),
-            take("source_name", 10),
-            take("raw_text", 11),
-        ]
-        end_col = col_letter(len(GROUP_LEADS_HEADERS))
-        if row_idx:
-            self.ws.update(
-                range_name=f"A{row_idx}:{end_col}{row_idx}",
-                values=[row],
-                value_input_option="USER_ENTERED",
-            )
-        else:
-            next_row = len(values) + 1
-            self.ws.update(
-                range_name=f"A{next_row}:{end_col}{next_row}",
-                values=[row],
-                value_input_option="USER_ENTERED",
-            )
+            row = [
+                received_at,
+                status or take("status", 1),
+                take("full_name", 2),
+                take("age", 3),
+                take("desired_income", 4),
+                take("phone", 5),
+                take("tg", 6),
+                take("pc", 7),
+                take("note", 8),
+                take("source_id", 9),
+                take("source_name", 10),
+                take("raw_text", 11),
+            ]
+            end_col = col_letter(len(GROUP_LEADS_HEADERS))
+            if row_idx:
+                self.ws.update(
+                    range_name=f"A{row_idx}:{end_col}{row_idx}",
+                    values=[row],
+                    value_input_option="USER_ENTERED",
+                )
+            else:
+                next_row = max(len(values) + 1, 2)
+                self.ws.update(
+                    range_name=f"A{next_row}:{end_col}{next_row}",
+                    values=[row],
+                    value_input_option="USER_ENTERED",
+                )
+        finally:
+            if lock_acquired:
+                release_lock(self.lock_path)
 
 
 class RegistrationSheet:
@@ -2230,6 +2300,7 @@ class RegistrationSheet:
         return None
 
     def upsert(self, tz: ZoneInfo, data: dict):
+        self._ensure_headers_exact()
         row = [
             data.get("full_name", ""),
             data.get("birth_date", ""),
@@ -2249,7 +2320,10 @@ class RegistrationSheet:
         ]
         source_group = str(data.get("source_group", "") or "")
         source_message_id = str(data.get("source_message_id", "") or "")
-        values = self.ws.get_all_values()
+        try:
+            values = self.ws.get_all_values()
+        except Exception:
+            values = [REGISTRATION_HEADERS[:]]
         row_idx = self._find_row(values, source_group, source_message_id)
         end_col = col_letter(len(REGISTRATION_HEADERS))
         if row_idx:
@@ -2259,7 +2333,7 @@ class RegistrationSheet:
                 value_input_option="USER_ENTERED",
             )
             return
-        next_row = len(values) + 1
+        next_row = max(len(values) + 1, 2)
         self.ws.update(
             range_name=f"A{next_row}:{end_col}{next_row}",
             values=[row],
@@ -2325,7 +2399,7 @@ class FAQQuestionsSheet:
                 value_input_option="USER_ENTERED",
             )
             return
-        next_row = len(values) + 1
+        next_row = max(len(values) + 1, 2)
         out = [row.get(h, "") for h in FAQ_QUESTIONS_HEADERS]
         self.ws.update(
             range_name=f"A{next_row}:{end_col}{next_row}",
@@ -2361,7 +2435,7 @@ class FAQSuggestionsSheet:
         for existing in values[1:]:
             if existing and existing[0].strip() == key:
                 return
-        next_row = len(values) + 1
+        next_row = max(len(values) + 1, 2)
         end_col = col_letter(len(FAQ_SUGGESTIONS_HEADERS))
         out = [row.get(h, "") for h in FAQ_SUGGESTIONS_HEADERS]
         self.ws.update(
@@ -2644,6 +2718,7 @@ async def send_and_update(
     auto_reply_enabled: Optional[bool] = None,
     followup_state: Optional["FollowupState"] = None,
     parse_mode: Optional[str] = None,
+    return_success: bool = False,
 ):
     history = []
     if use_ai:
@@ -2682,10 +2757,10 @@ async def send_and_update(
     message_text = result.text_used
     if not result.success:
         print(f"⚠️ Send error peer={entity.id} step={step_name or '-'} err={result.error}")
-        return text
+        return False if return_success else text
     sent_message = sent_payload.get("message")
     if not sent_message:
-        return text
+        return False if return_success else text
     try:
         track_sent_message(entity.id, sent_message.id)
     except Exception:
@@ -2754,7 +2829,7 @@ async def send_and_update(
                     print(f"⚠️ SHEETS_DIRECT_WRITE_FAIL peer={entity.id}: {type(err).__name__}: {err}")
     if delay_after:
         await asyncio.sleep(delay_after)
-    return message_text
+    return True if return_success else message_text
 
 
 def wants_video(text: str) -> bool:
@@ -3379,9 +3454,9 @@ async def main():
         step_name: str,
         status: Optional[str] = None,
         delay_before: Optional[float] = None,
-    ):
+    ) -> bool:
         parse_mode = "md" if "[сайт](" in (text or "") else None
-        await send_and_update(
+        ok = await send_and_update(
             client,
             sheet,
             tz,
@@ -3396,7 +3471,9 @@ async def main():
             step_name=step_name,
             followup_state=followup_state,
             parse_mode=parse_mode,
+            return_success=True,
         )
+        return bool(ok)
 
     def is_peer_owned_by_primary(peer_id: int) -> bool:
         owner = owner_store.get_owner(peer_id)
@@ -3432,10 +3509,13 @@ async def main():
         )
         v2_runtime.set(v2_state)
         try:
-            await send_v2_message(entity, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
-            await send_v2_message(entity, SCREENING_Q1_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
+            intro_ok = await send_v2_message(entity, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
+            q1_ok = await send_v2_message(entity, SCREENING_Q1_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
         except Exception as err:
             print(f"⚠️ ONBOARDING_SEND_FAIL peer={peer_id} source={start_source} err={type(err).__name__}: {err}")
+            return False
+        if not (intro_ok or q1_ok):
+            print(f"⚠️ ONBOARDING_SEND_FAIL peer={peer_id} source={start_source} err=no_messages_sent")
             return False
         if not IS_ALT_ACCOUNT:
             owner_store.set_owner(peer_id, PRIMARY_ACCOUNT_KEY, start_source, tz)
@@ -3608,6 +3688,9 @@ async def main():
         state.test_message_count = 0
         state.test_last_message = ""
         state.test_ready_clarify_count = 0
+        state.form_waiting_photo = True
+        state.form_prompted_at = time.time()
+        state.form_photo_reminder_sent = False
         clear_step_wait(state)
         v2_runtime.set(state)
         return True
@@ -3626,12 +3709,19 @@ async def main():
         )
         enqueue_sheet_event("faq_question_log", qlog.__dict__)
 
-    async def handle_v2_message(sender: User, text: str, intent_name: str) -> bool:
+    async def handle_v2_message(sender: User, text: str, intent_name: str, has_photo: bool = False) -> bool:
         if not FLOW_V2_ENABLED or not v2_enrollment.has(sender.id):
             return False
         state = v2_runtime.get(sender.id)
         step_name = state.flow_step or STEP_SCREENING_WAIT
         now_ts = time.time()
+        if step_name == STEP_FORM_FORWARD and not has_photo:
+            # Any incoming non-photo message on form step means the lead is active:
+            # postpone document reminder and wait for 5 minutes of silence again.
+            state.form_waiting_photo = True
+            state.form_prompted_at = now_ts
+            state.form_photo_reminder_sent = False
+            v2_runtime.set(state)
         if step_name in WAIT_STEP_SET:
             arm_step_wait(state, step_name, now_ts)
         voice_decline = step_name == STEP_COMPANY_INTRO and is_voice_decline(text)
@@ -4075,16 +4165,36 @@ async def main():
             return True
 
         if step_name == STEP_FORM_FORWARD:
-            enqueue_candidate_note(sender, text)
-            await send_v2_message(sender, "Дякую! Передаю вашу анкету тімліду, далі звʼяжемось по старту 🙌", STEP_HANDOFF, status=CONFIRM_STATUS)
-            state.flow_step = STEP_HANDOFF
-            clear_step_wait(state)
+            if has_photo:
+                enqueue_candidate_note(sender, "Фото анкети отримано")
+                await send_v2_message(sender, "Дякую! Передаю вашу анкету тімліду, далі звʼяжемось по старту 🙌", STEP_HANDOFF, status=CONFIRM_STATUS)
+                state.flow_step = STEP_HANDOFF
+                state.form_waiting_photo = False
+                state.form_prompted_at = 0.0
+                state.form_photo_reminder_sent = False
+                clear_step_wait(state)
+                v2_runtime.set(state)
+                return True
+            if text.strip():
+                enqueue_candidate_note(sender, text)
+                if is_filled_form_text(text) and not message_has_question(text):
+                    await send_v2_message(
+                        sender,
+                        "Дякую, анкету отримав. Будь ласка, надішліть фото або скрін документа для верифікації.",
+                        STEP_FORM_FORWARD,
+                        status="📝 Анкета",
+                    )
+                    state.form_prompted_at = time.time()
+                    state.form_photo_reminder_sent = False
+            state.form_waiting_photo = True
+            if not state.form_prompted_at:
+                state.form_prompted_at = time.time()
             v2_runtime.set(state)
             return True
 
         return True
 
-    async def process_v2_turn(sender: User, text: str) -> bool:
+    async def process_v2_turn(sender: User, text: str, has_photo: bool = False) -> bool:
         peer_id = sender.id
         if not v2_enrollment.has(peer_id):
             v2_enrollment.add(peer_id)
@@ -4110,7 +4220,7 @@ async def main():
             return True
         v2_state = v2_runtime.get(peer_id)
         v2_intent = await resolve_v2_intent(sender, text, v2_state.flow_step)
-        handled_v2 = await handle_v2_message(sender, text, v2_intent)
+        handled_v2 = await handle_v2_message(sender, text, v2_intent, has_photo=has_photo)
         if not handled_v2:
             print(f"⚠️ V2 handler returned no-op peer={peer_id} step={v2_state.flow_step}")
         return handled_v2
@@ -4713,6 +4823,7 @@ async def main():
             return
         peer_id = sender.id
         text = event.raw_text or ""
+        incoming_has_photo = has_photo_attachment(getattr(event, "message", None))
         test_restart = is_test_restart(sender, text)
         local_generation = int(restart_generation.get(peer_id, 0))
         name = getattr(sender, "first_name", "") or "Unknown"
@@ -4839,7 +4950,7 @@ async def main():
         if peer_id in processing_peers:
             if FLOW_V2_ENABLED:
                 bucket = buffered_incoming.setdefault(peer_id, deque())
-                bucket.append((int(restart_generation.get(peer_id, 0)), text))
+                bucket.append((int(restart_generation.get(peer_id, 0)), text, incoming_has_photo))
                 print(f"ℹ️ Buffered incoming peer={peer_id} size={len(bucket)}")
                 return
             if not is_test:
@@ -4877,10 +4988,10 @@ async def main():
             )
 
             if FLOW_V2_ENABLED:
-                handled_v2 = await process_v2_turn(sender, text)
+                handled_v2 = await process_v2_turn(sender, text, has_photo=incoming_has_photo)
                 if handled_v2:
                     last_reply_at[peer_id] = time.time()
-                    return
+                return
                 return
 
             history = await build_ai_history(client, sender, limit=10)
@@ -5080,16 +5191,21 @@ async def main():
                         break
                     item = queued.popleft()
                     if isinstance(item, tuple):
-                        msg_generation, next_text = item
+                        if len(item) >= 3:
+                            msg_generation, next_text, next_has_photo = item[0], item[1], bool(item[2])
+                        else:
+                            msg_generation, next_text = item
+                            next_has_photo = False
                     else:
                         msg_generation, next_text = int(restart_generation.get(peer_id, 0)), str(item)
+                        next_has_photo = False
                     if not queued:
                         buffered_incoming.pop(peer_id, None)
                     if int(msg_generation) != int(restart_generation.get(peer_id, 0)):
                         continue
                     processing_peers.add(peer_id)
                     try:
-                        await process_v2_turn(sender, next_text)
+                        await process_v2_turn(sender, next_text, has_photo=next_has_photo)
                         last_reply_at[peer_id] = time.time()
                     except Exception as err:
                         print(f"⚠️ Buffered V2 process error peer={peer_id}: {type(err).__name__}: {err}")
@@ -5176,6 +5292,26 @@ async def main():
                         except Exception:
                             continue
                         if is_paused(entity):
+                            continue
+                        if (v2s.flow_step or "").strip() == STEP_FORM_FORWARD and v2s.form_waiting_photo:
+                            now_ts = time.time()
+                            prompted_at = float(v2s.form_prompted_at or 0.0)
+                            if prompted_at <= 0:
+                                v2s.form_prompted_at = now_ts
+                                v2_runtime.set(v2s)
+                                continue
+                            last_in_ts = float(last_incoming_at.get(peer_id, 0.0) or 0.0)
+                            silence_anchor = max(prompted_at, last_in_ts)
+                            if (not v2s.form_photo_reminder_sent) and (now_ts - silence_anchor >= FORM_PHOTO_REMINDER_DELAY_SEC):
+                                ok = await send_v2_message(
+                                    entity,
+                                    "Будь ласка, надішліть фото або скрін документа для верифікації.",
+                                    STEP_FORM_FORWARD,
+                                    status="📝 Анкета",
+                                )
+                                if ok:
+                                    v2s.form_photo_reminder_sent = True
+                                    v2_runtime.set(v2s)
                             continue
                         current_step = (v2s.flow_step or "").strip()
                         if current_step not in WAIT_STEP_SET:
