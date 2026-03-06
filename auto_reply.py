@@ -287,9 +287,10 @@ CLARIFY_NEGATIVE_FOLLOWUP_TEXT = (
     "Підкажіть, будь ласка, що саме залишилось незрозумілим?\n"
     "Я коротко поясню."
 )
-QA_GATE_REMINDER_TEXT = "Якщо зʼявилися ще питання — із радістю відповім. Коли будете готові, підемо далі 🙂"
-VOICE_FALLBACK_TEXT = "Якщо зʼявилися питання по голосовому — із радістю поясню. Коли будете готові, підемо далі 🙂"
-V2_GATE_REMINDER_TEXT = "Якщо зʼявилися ще питання — із радістю відповім. Коли будете готові, підемо далі 🙂"
+QA_GATE_REMINDER_TEXT = "Якщо залишилися питання — напишіть, я коротко поясню. Коли будете готові, продовжимо."
+VOICE_FALLBACK_TEXT = "Якщо по голосовому залишилися питання, напишіть — усе коротко поясню і підкажу, що далі."
+V2_GATE_REMINDER_TEXT = "Якщо щось залишилося незрозумілим, напишіть одним повідомленням — я все уточню."
+AI_FOLLOWUP_REWRITE_ENABLED = os.environ.get("AI_FOLLOWUP_REWRITE_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 WAIT_STEP_SET = {
     STEP_SCREENING_WAIT,
     STEP_COMPANY_INTRO,
@@ -300,32 +301,62 @@ WAIT_STEP_SET = {
     STEP_TEST_REVIEW,
 }
 STEP_CLARIFY_TEXTS = {
-    STEP_SCREENING_WAIT: "Бачу, що ви ще не відповіли. Підкажіть, будь ласка, коротко на запитання вище.",
-    STEP_COMPANY_INTRO: "Чи встигли ознайомитися з описом вакансії? Якщо так, можемо рухатися далі.",
-    STEP_VOICE_WAIT: "Чи вдалось прослухати голосове? Якщо зручно, продовжимо далі.",
-    STEP_SCHEDULE_SHIFT_WAIT: "Підкажіть, будь ласка, який графік вам ближчий: денна чи нічна зміна?",
-    STEP_SCHEDULE_CONFIRM: "Чи зрозуміло вам як відбувається робочий процес?",
-    STEP_BALANCE_CONFIRM: "Чи все зрозуміло по нарахуваннях та балансу?",
-    STEP_TEST_REVIEW: "Чи встигли ознайомитися з умовами тестового етапу?",
+    STEP_SCREENING_WAIT: "Підкажіть, будь ласка, коротко: чи є у вас досвід у дейтингу та скільки вам повних років?",
+    STEP_COMPANY_INTRO: "Чи вдалося ознайомитися з описом вакансії? Якщо так, перейдемо до наступного кроку.",
+    STEP_VOICE_WAIT: "Підкажіть, будь ласка, чи вдалося прослухати голосове? Якщо хочете, коротко продублюю ключові умови текстом.",
+    STEP_SCHEDULE_SHIFT_WAIT: "Підкажіть, будь ласка, який графік вам підходить: денна 14:00-23:00 чи нічна 23:00-08:00?",
+    STEP_SCHEDULE_CONFIRM: "Чи зрозуміло, як побудований робочий процес? Якщо потрібно, розпишу коротко по пунктах.",
+    STEP_BALANCE_CONFIRM: "Чи зрозуміло, як формується баланс і виплата? Якщо потрібно, поясню на простому прикладі.",
+    STEP_TEST_REVIEW: "Чи встигли ознайомитися з умовами тестового етапу? Якщо щось неясно, я підкажу.",
 }
 STEP_FALLBACK_1_TEXTS = {
-    STEP_SCREENING_WAIT: "Повертаюся до нашого діалогу. Як буде зручно, надішліть відповідь на запитання — і продовжимо.",
-    STEP_COMPANY_INTRO: "Нагадую про вакансію: якщо ще актуально, дайте знати, і я підготую наступний крок.",
-    STEP_VOICE_WAIT: "Нагадую щодо голосового: якщо потрібне коротке пояснення текстом, напишіть, і я одразу підкажу.",
-    STEP_SCHEDULE_SHIFT_WAIT: "Повертаюся з уточненням по графіку: напишіть, будь ласка, який формат обираєте.",
-    STEP_SCHEDULE_CONFIRM: "Нагадую: якщо хочете, можу коротко розкласти процес по пунктах. Якщо вже ок — рухаємось далі.",
-    STEP_BALANCE_CONFIRM: "Нагадую по блоку оплат: якщо потрібно, поясню на прикладі, як формується дохід.",
-    STEP_TEST_REVIEW: "Нагадую по тестовому етапу: коли будете готові, напишіть, і я надішлю подальші дії.",
+    STEP_SCREENING_WAIT: "Нагадую про анкету: надішліть, будь ласка, 2 короткі відповіді (досвід у дейтингу + вік), і одразу продовжимо.",
+    STEP_COMPANY_INTRO: "Повертаюся щодо вакансії. Якщо для вас ще актуально, напишіть \"так\" - і перейдемо далі.",
+    STEP_VOICE_WAIT: "Нагадую про себе, щоб не загубити контакт.\nПідкажіть, будь ласка, чи актуально для вас продовжити спілкування щодо вакансії?",
+    STEP_SCHEDULE_SHIFT_WAIT: "Нагадую по графіку: напишіть, будь ласка, \"денна\" або \"нічна\", щоб я зафіксував зміну.",
+    STEP_SCHEDULE_CONFIRM: "Якщо по процесу є питання — відповім. Якщо все зрозуміло, напишіть \"так\", і рухаємось далі.",
+    STEP_BALANCE_CONFIRM: "Якщо хочете, поясню нарахування на простому прикладі. Якщо все ок, напишіть \"зрозуміло\".",
+    STEP_TEST_REVIEW: "Нагадую по фінальному етапу: якщо готові продовжити, напишіть \"готовий/готова\".",
 }
 STEP_FALLBACK_2_TEXTS = {
-    STEP_SCREENING_WAIT: "Повертаюся з фінальним нагадуванням. Якщо вакансія ще актуальна — надішліть, будь ласка, відповідь на запитання.",
-    STEP_COMPANY_INTRO: "Фінальне нагадування: якщо вакансія все ще актуальна, напишіть — і ми продовжимо.",
-    STEP_VOICE_WAIT: "Фінальне нагадування: якщо хочете продовжити, напишіть у будь-який момент — я на звʼязку.",
-    STEP_SCHEDULE_SHIFT_WAIT: "Фінальне нагадування: якщо вакансія актуальна, підкажіть, будь ласка, яку зміну обираєте.",
-    STEP_SCHEDULE_CONFIRM: "Фінальне нагадування: якщо є ще питання по процесу — відповім, або можемо рухатися далі.",
-    STEP_BALANCE_CONFIRM: "Фінальне нагадування: якщо щось незрозуміло по балансу — поясню, або можемо перейти далі.",
-    STEP_TEST_REVIEW: "Фінальне нагадування: якщо готові продовжувати, напишіть, і я одразу надішлю наступний етап.",
+    STEP_SCREENING_WAIT: "Повертаюся до анкети. Якщо вакансія ще актуальна, надішліть, будь ласка, 2 короткі відповіді (досвід + вік), і продовжимо.",
+    STEP_COMPANY_INTRO: "Якщо вам ще цікава вакансія, дайте знати у відповідь - і я одразу продовжу діалог.",
+    STEP_VOICE_WAIT: "Добрий день!\nНагадую щодо вакансії оператора чату. Якщо тема вже не актуальна — напишіть, будь ласка, щоб я не турбував.",
+    STEP_SCHEDULE_SHIFT_WAIT: "Щоб рухатися далі, потрібно зафіксувати графік. Підкажіть, будь ласка, яку зміну обираєте - денну чи нічну.",
+    STEP_SCHEDULE_CONFIRM: "Якщо по процесу залишилися питання - відповім. Якщо все зрозуміло, можемо перейти далі.",
+    STEP_BALANCE_CONFIRM: "Якщо потрібно, ще раз коротко поясню нарахування. Якщо все зрозуміло, перейдемо до наступного кроку.",
+    STEP_TEST_REVIEW: "Коли будете готові рухатися далі, напишіть у відповідь - і я надішлю наступний етап.",
 }
+FORMAL_ADDRESS_REPLACEMENTS = [
+    (r"\bТи\b", "Ви"),
+    (r"\bти\b", "Ви"),
+    (r"\bТобі\b", "Вам"),
+    (r"\bтобі\b", "Вам"),
+    (r"\bТебе\b", "Вас"),
+    (r"\bтебе\b", "Вас"),
+    (r"\bТвій\b", "Ваш"),
+    (r"\bтвій\b", "Ваш"),
+    (r"\bТвоя\b", "Ваша"),
+    (r"\bтвоя\b", "Ваша"),
+    (r"\bТвоє\b", "Ваше"),
+    (r"\bтвоє\b", "Ваше"),
+    (r"\bТвої\b", "Ваші"),
+    (r"\bтвої\b", "Ваші"),
+    (r"\bТы\b", "Вы"),
+    (r"\bты\b", "Вы"),
+    (r"\bТебе\b", "Вам"),
+    (r"\bтебе\b", "Вам"),
+    (r"\bТебя\b", "Вас"),
+    (r"\bтебя\b", "Вас"),
+    (r"\bТвой\b", "Ваш"),
+    (r"\bтвой\b", "Ваш"),
+    (r"\bТвоя\b", "Ваша"),
+    (r"\bтвоя\b", "Ваша"),
+    (r"\bТвое\b", "Ваше"),
+    (r"\bтвое\b", "Ваше"),
+    (r"\bТвои\b", "Ваши"),
+    (r"\bтвои\b", "Ваши"),
+]
 SCREENING_INTRO_TEXT = (
     "Привіт) Ви залишали відгук на вакансію менеджера чату. "
     "Зараз я розповім детальніше про вакансію, але спершу дайте, будь ласка, відповіді на кілька запитань.\n"
@@ -376,7 +407,7 @@ SCHEDULE_SHIFT_TEXT = (
     "- 1 година основної перерви\n"
     "- Короткі міні-перерви по 5 хвилин\n"
     "Щодо вихідних: у вас є 8 вихідних днів на місяць, брати їх можна коли зручно, будні це дні чи вихідні - не важливо)\n"
-    "Який графік роботи тобі підходить?"
+    "Який графік роботи Вам підходить?"
 )
 SCHEDULE_DETAILS_TEXT = (
     "Робота на сайті відбувається одночасно на декількох анкет.\n"
@@ -384,26 +415,26 @@ SCHEDULE_DETAILS_TEXT = (
     "Ваша комунікація буде в Telegram, де створиться спільний чат. Там ви зможете обговорювати робочі моменти по анкетах, ділитись думками та допомагати одне одному.\n"
     "Підсумуємо головне:\n"
     "Графік — 8 годин на день біля ПК. У вас буде особистий кабінет, де фіксується робочий час. "
-    "Робота інтенсивна: в середньому одна дія має бути кожні 5 хвилин. Тобто ти реально працюєш увесь час, а не просто \"в онлайні\".\n"
+    "Робота інтенсивна: в середньому одна дія має бути кожні 5 хвилин. Тобто Ви реально працюєте увесь час, а не просто \"в онлайні\".\n"
     "Навчання триває 8 днів.\n"
     "Зарплата в кінці місяця — 48% від суми на балансі профілю."
 )
 SCHEDULE_CONFIRM_TEXT = "Чи зрозуміло вам як відбувається робочий процес?"
-SCHEDULE_CONFIRM_CLARIFY_TEXT = "Підкажіть, будь ласка, що саме незрозуміло? Я все детально поясню."
+SCHEDULE_CONFIRM_CLARIFY_TEXT = "Підкажіть, будь ласка, що саме незрозуміло по робочому процесу, і я поясню це по пунктах."
 SCHEDULE_CONFIRM_FOLLOWUP_VARIANTS = (
     "Чи є у вас ще запитання по робочому процесу, чи можемо рухатися далі?",
     "Підкажіть, будь ласка, чи залишилися ще питання щодо робочого процесу, чи вже переходимо далі?",
     "Якщо ще є питання по робочому процесу — з радістю відповім. Якщо все зрозуміло, можемо йти далі.",
 )
 BALANCE_CONFIRM_TEXT = "Чи зрозуміло з чого складається баланс?"
-BALANCE_CONFIRM_CLARIFY_TEXT = "Підкажіть, будь ласка, що саме незрозуміло по балансу? Я детально поясню."
+BALANCE_CONFIRM_CLARIFY_TEXT = "Підкажіть, будь ласка, що саме незрозуміло по балансу - я поясню на простому прикладі."
 BALANCE_CONFIRM_FOLLOWUP_VARIANTS = (
     "Чи є у вас ще запитання щодо балансу, чи можемо йти далі?",
     "Підкажіть, будь ласка, чи залишилися питання по балансу, чи переходимо до наступного кроку?",
     "Якщо ще є питання по балансу — із радістю поясню. Якщо все зрозуміло, рухаємось далі.",
 )
 TEST_READY_PROMPT_TEXT = "Чи все зрозуміло по умовах роботи? Чи готові продовжувати?"
-TEST_READY_CLARIFY_TEXT = "Підкажіть, будь ласка, що саме залишилось незрозумілим по умовах? Якщо все зрозуміло — напишіть «Готовий/готова продовжувати»."
+TEST_READY_CLARIFY_TEXT = "Підкажіть, будь ласка, що саме залишилось незрозумілим по умовах. Якщо все зрозуміло, напишіть \"Готовий/готова продовжувати\"."
 TEST_READY_FOLLOWUP_VARIANTS = (
     "Чи залишилися ще питання по умовах роботи, чи можемо рухатися далі?",
     "Підкажіть, будь ласка, чи все зрозуміло по правилах співпраці, чи вже готові продовжувати?",
@@ -413,19 +444,18 @@ TEST_READY_FOLLOWUP_VARIANTS = (
 FOLLOWUP_TEMPLATES = [
     (
         30 * 60,
-        "Хотів уточнити, чи встигли ви ознайомитися з інформацією?\n"
-        "Якщо з’явилися запитання — я на зв’язку і з радістю відповім.",
+        "Повертаюся до вас щодо вакансії.\n"
+        "Якщо зручно, напишіть, чи можемо продовжити. Якщо є питання - усе коротко поясню.",
     ),
     (
         24 * 60 * 60,
-        "Доброго дня 🙂\n"
-        "Нагадую про себе, щоб не загубити контакт.\n"
-        "Підкажіть, будь ласка, чи актуально для вас продовжити спілкування щодо вакансії?",
+        "Доброго дня.\n"
+        "Уточню, будь ласка, чи актуально для вас продовжити спілкування щодо вакансії?",
     ),
     (
         3 * 24 * 60 * 60,
-        "Добрий день!\n"
-        "Нагадую щодо вакансії оператора чату. Якщо тема вже не актуальна — напишіть, будь ласка, щоб я не турбував.",
+        "Повертаюся до вас щодо вакансії.\n"
+        "Якщо тема ще актуальна - напишіть, і продовжимо. Якщо ні - дайте знати, будь ласка, щоб я більше не турбував.",
     ),
 ]
 TEST_USER_ID = "156414561"
@@ -1425,6 +1455,11 @@ class SheetWriter:
         self._row_index_cache_ttl_sec = 30
         self._next_row_cache = {}
         self.migrate_sheets()
+        if HISTORY_LOG_ENABLED:
+            try:
+                self._history_ws(ZoneInfo(TIMEZONE))
+            except Exception as err:
+                print(f"⚠️ Не вдалося підготувати місячний лист історії: {err}")
 
     def _col_letter(self, col_idx: int) -> str:
         result = []
@@ -2700,6 +2735,15 @@ async def has_outgoing_template(client: TelegramClient, entity: User, step_state
     return False
 
 
+def enforce_formal_address(text: str) -> str:
+    out = str(text or "")
+    if not out:
+        return out
+    for pattern, repl in FORMAL_ADDRESS_REPLACEMENTS:
+        out = re.sub(pattern, repl, out)
+    return out
+
+
 async def send_and_update(
     client: TelegramClient,
     sheet: SheetWriter,
@@ -2742,9 +2786,11 @@ async def send_and_update(
     sent_payload = {}
 
     async def _sender(message_text: str):
+        final_text = enforce_formal_address(message_text)
         kwargs = {"parse_mode": parse_mode} if parse_mode else {}
-        sent_message = await client.send_message(entity, message_text, **kwargs)
+        sent_message = await client.send_message(entity, final_text, **kwargs)
         sent_payload["message"] = sent_message
+        sent_payload["text_used"] = final_text
 
     result = await send_message_with_fallback(
         text,
@@ -2754,7 +2800,7 @@ async def send_and_update(
         strip_question_trail=strip_question_trail,
         send=_sender,
     )
-    message_text = result.text_used
+    message_text = sent_payload.get("text_used") or result.text_used
     if not result.success:
         print(f"⚠️ Send error peer={entity.id} step={step_name or '-'} err={result.error}")
         return False if return_success else text
@@ -2989,6 +3035,51 @@ async def build_ai_history(client: TelegramClient, entity: User, limit: int = 10
     return list(reversed(items))
 
 
+async def rewrite_wait_followup_with_ai(
+    client: TelegramClient,
+    entity: User,
+    step_name: str,
+    stage: int,
+    base_text: str,
+) -> str:
+    if not AI_FOLLOWUP_REWRITE_ENABLED or not DIALOG_AI_URL:
+        return base_text
+    raw_base = (base_text or "").strip()
+    if not raw_base:
+        return base_text
+    stage_name = {0: "clarify", 1: "fallback_6h", 2: "fallback_3d"}.get(int(stage), "followup")
+    history = await build_ai_history(client, entity, limit=8)
+    seed = int(time.time() * 1000) % 1000000
+    draft = (
+        "Перефразуй нагадування для кандидата природною українською мовою.\n"
+        "Контекст: HR-діалог по вакансії, тон спокійний, ввічливий, ненав'язливий.\n"
+        "Збережи зміст і дію оригіналу, але не копіюй текст дослівно.\n"
+        "1-2 короткі речення, без списків, без зайвих емодзі, без нових фактів.\n"
+        "Звертайтесь до кандидата виключно на «Ви».\n"
+        f"Крок: {step_name}. Стадія: {stage_name}. Варіант: {seed}.\n"
+        f"Оригінал: {raw_base}"
+    )
+    ai_text = await dialog_suggest(history, draft, no_questions=False)
+    if not ai_text:
+        return base_text
+    rewritten = ai_text.strip()
+    if len(rewritten) < 20:
+        return base_text
+    if normalize_text(rewritten) == normalize_text(raw_base):
+        draft_retry = (
+            "Перепиши це нагадування іншими словами (не дослівно), "
+            "але з тим самим змістом і дружнім тоном.\n"
+            "Звертайтесь до кандидата виключно на «Ви».\n"
+            f"Текст: {raw_base}"
+        )
+        ai_retry = await dialog_suggest(history, draft_retry, no_questions=False)
+        if ai_retry and len(ai_retry.strip()) >= 20 and normalize_text(ai_retry) != normalize_text(raw_base):
+            rewritten = ai_retry.strip()
+        else:
+            return base_text
+    return rewritten
+
+
 class StepState(StepStateStore):
     def __init__(self, path: str):
         super().__init__(path, STEP_ORDER)
@@ -3210,7 +3301,8 @@ async def main():
                 "Відповідь має бути одним повідомленням.\n"
                 "Спочатку коротко відповідай по суті на питання кандидата.\n"
                 "В кінці додай один короткий уточнюючий запит у формі питання.\n"
-                "Не розділяй відповідь на окремі повідомлення."
+                "Не розділяй відповідь на окремі повідомлення.\n"
+                "Звертайтесь до кандидата виключно на «Ви»."
             )
             ai_text = await dialog_suggest(
                 history,
@@ -3257,7 +3349,8 @@ async def main():
         draft = (
             "Дай розгорнуту, але структуровану відповідь у межах FAQ і політик.\n"
             "Поясни по суті простими словами, без зайвої води.\n"
-            "Не став запитань у цьому повідомленні."
+            "Не став запитань у цьому повідомленні.\n"
+            "Звертайтесь до кандидата виключно на «Ви»."
         )
         ai_text = await dialog_suggest(history, draft, no_questions=True)
         if not ai_text:
@@ -3305,7 +3398,7 @@ async def main():
                     caption=video_message.message or "",
                 )
             elif video_message.message:
-                sent = await client.send_message(entity, video_message.message)
+                sent = await client.send_message(entity, enforce_formal_address(video_message.message))
         except Exception:
             print("⚠️ Не вдалося надіслати відео")
             return False
@@ -5344,7 +5437,14 @@ async def main():
                         if not is_clarify_stage and not can_send_global_fallback(now, tz):
                             print(f"FALLBACK_DAILY_LIMIT_HIT peer={peer_id} step={current_step}")
                             continue
-                        await send_v2_message(entity, send_text, current_step, status=status_for_text(send_text) or "знак питання")
+                        final_text = await rewrite_wait_followup_with_ai(
+                            client,
+                            entity,
+                            current_step,
+                            stage,
+                            send_text,
+                        )
+                        await send_v2_message(entity, final_text, current_step, status=status_for_text(final_text) or "знак питання")
                         sent_at = time.time()
                         if not is_clarify_stage:
                             mark_global_fallback_sent(now, tz)

@@ -21,7 +21,7 @@ class ScenarioTextTests(unittest.TestCase):
         self.assertIn("8 вихідних днів", self.content)
 
     def test_shift_question_updated(self):
-        self.assertIn('SHIFT_QUESTION_TEXT = "Який графік роботи тобі підходить?"', self.content)
+        self.assertIn('SHIFT_QUESTION_TEXT = "Який графік роботи Вам підходить?"', self.content)
 
     def test_format_text_updated(self):
         self.assertIn("короткий мінікурс + відео", self.content)
