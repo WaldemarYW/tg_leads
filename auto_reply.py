@@ -1685,6 +1685,24 @@ class SheetWriter:
                 return row_idx, row
         return None, None
 
+    def _owner_account_for_peer(self, peer_id: int, existing_account: str = "") -> str:
+        owner_key = ""
+        try:
+            with open(CROSS_ACCOUNT_OWNER_STATE_PATH, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            rec = raw.get(str(int(peer_id)), {}) if isinstance(raw, dict) else {}
+            owner_key = str(rec.get("owner") or "").strip()
+        except Exception:
+            owner_key = ""
+        if owner_key:
+            if owner_key in PRIMARY_OWNER_KEYS:
+                return PRIMARY_ACCOUNT_KEY
+            return owner_key
+        existing_account = (existing_account or "").strip()
+        if existing_account:
+            return existing_account
+        return ACCOUNT_KEY
+
     def _event_type(
         self,
         status: Optional[str],
@@ -1859,7 +1877,7 @@ class SheetWriter:
         ws = self._history_ws(tz)
         now_iso = datetime.now(tz).isoformat(timespec="seconds")
         headers = self._get_headers(ws)
-        row_idx, existing = self._find_row(ws, peer_id, ACCOUNT_KEY)
+        row_idx, existing = self._find_row_by_peer(ws, peer_id)
         existing = existing or [""] * len(headers)
         if len(existing) < len(headers):
             existing = existing + [""] * (len(headers) - len(existing))
@@ -1899,7 +1917,8 @@ class SheetWriter:
 
         set_value("Время события", now_iso)
         set_value("Дата", str(datetime.now(tz).date()))
-        set_value("Аккаунт", ACCOUNT_KEY)
+        effective_account = self._owner_account_for_peer(peer_id, get_value("Аккаунт"))
+        set_value("Аккаунт", effective_account)
         set_value("Тип события", event_type)
         set_value("Имя", name)
         set_value("Username", ("@" + username) if username else "")
@@ -1920,7 +1939,7 @@ class SheetWriter:
                 end_col = self._col_letter(len(headers))
                 ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
             else:
-                row_idx_recheck, existing_recheck = self._find_row(ws, peer_id, ACCOUNT_KEY)
+                row_idx_recheck, existing_recheck = self._find_row_by_peer(ws, peer_id)
                 if row_idx_recheck:
                     row_idx = row_idx_recheck
                     existing = existing_recheck or [""] * len(headers)
@@ -1932,14 +1951,14 @@ class SheetWriter:
                     next_row = int(self._next_row_cache.get(ws.id, 2))
                     end_col = self._col_letter(len(headers))
                     ws.update(range_name=f"A{next_row}:{end_col}{next_row}", values=[existing], value_input_option="USER_ENTERED")
-                    self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), ACCOUNT_KEY)] = next_row
+                    self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), effective_account)] = next_row
                     self._next_row_cache[ws.id] = next_row + 1
         except Exception as err:
             print(f"⚠️ Не вдалося записати історію: {err}")
             self._invalidate_ws_cache(ws)
             return None
         if not row_idx:
-            row_idx, _ = self._find_row(ws, peer_id, ACCOUNT_KEY)
+            row_idx, _ = self._find_row_by_peer(ws, peer_id)
         if not row_idx:
             return None
         return self._sheet_row_link(ws, row_idx, "Открыть журнал")
@@ -2023,7 +2042,8 @@ class SheetWriter:
         set_value("Peer ID", str(peer_id))
         set_value("Тех. шаг", tech_step or step_snapshot)
         set_value("Обновлено", now_iso)
-        set_value("Аккаунт", ACCOUNT_KEY)
+        effective_account = self._owner_account_for_peer(peer_id, existing[col_idx("Аккаунт")] if col_idx("Аккаунт") is not None and col_idx("Аккаунт") < len(existing) else "")
+        set_value("Аккаунт", effective_account)
         if candidate_note_append:
             notes_idx = col_idx("Відповіді кандидата")
             if notes_idx is not None:
@@ -2057,9 +2077,9 @@ class SheetWriter:
             if row_idx:
                 end_col = self._col_letter(len(headers))
                 ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
-                self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), ACCOUNT_KEY)] = row_idx
+                self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), effective_account)] = row_idx
             else:
-                row_idx_recheck, existing_recheck = self._find_row(ws, peer_id, ACCOUNT_KEY)
+                row_idx_recheck, existing_recheck = self._find_row_by_peer(ws, peer_id)
                 if row_idx_recheck:
                     row_idx = row_idx_recheck
                     existing = existing_recheck or [""] * len(headers)
@@ -2076,7 +2096,7 @@ class SheetWriter:
                             existing = existing + [""] * (len(headers) - len(existing))
                         end_col = self._col_letter(len(headers))
                         ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
-                        self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), ACCOUNT_KEY)] = row_idx
+                        self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), effective_account)] = row_idx
                         self._next_row_cache[ws.id] = max(int(self._next_row_cache.get(ws.id, 2)), row_idx + 1)
                         self._sort_today_by_updated(ws, headers)
                         return
