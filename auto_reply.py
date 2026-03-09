@@ -808,7 +808,7 @@ def parse_shift_choice(text: str) -> Optional[str]:
     if night_range_re.search(t):
         return "нічна"
 
-    day_markers = ("день", "ден", "денна", "денний", "14:00", "14 00", "14-23", "14 до 23")
+    day_markers = ("день", "ден", "денна", "денний", "днев", "14:00", "14 00", "14-23", "14 до 23")
     night_markers = ("ніч", "ноч", "нічна", "нічний", "23 00", "23-08", "23 до 08")
     day = any(m in t for m in day_markers)
     night = any(m in t for m in night_markers)
@@ -890,6 +890,28 @@ def is_schedule_not_clear_reply(text: str) -> bool:
     if any(k in t for k in unclear_keywords):
         return True
     return t in {"ні", "нет", "не", "нi", "неа"}
+
+
+def is_voice_not_listened_reply(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    short_no = {
+        "ні",
+        "нi",
+        "нет",
+        "не",
+        "неа",
+        "ще ні",
+        "еще нет",
+        "не встиг",
+        "не встигла",
+        "не прослухав",
+        "не прослухала",
+        "не слухав",
+        "не слухала",
+    }
+    return t in short_no
 
 
 def schedule_confirm_clarify_prompt(attempt: int) -> str:
@@ -3839,6 +3861,7 @@ async def main():
             arm_step_wait(state, step_name, now_ts)
         voice_decline = step_name == STEP_COMPANY_INTRO and is_voice_decline(text)
         shift_selected = bool((state.shift_choice or "").strip())
+        voice_not_listened = step_name == STEP_VOICE_WAIT and is_voice_not_listened_reply(text)
 
         if state.rejected_by_age in {"under18", "over40"}:
             if not state.referral_after_reject_sent:
@@ -3853,7 +3876,7 @@ async def main():
             return True
 
         screening_q1_reply = step_name == STEP_SCREENING_WAIT and is_screening_q1_reply_text(text)
-        if is_hard_stop_message(text) and not screening_q1_reply:
+        if is_hard_stop_message(text) and not screening_q1_reply and not voice_not_listened:
             await send_v2_message(sender, STOP_REPLY_TEXT, step_name, status=AUTO_STOP_STATUS)
             state.auto_mode = "OFF"
             state.paused = True
@@ -3864,6 +3887,21 @@ async def main():
             state.qa_gate_opened_at = 0.0
             state.qa_gate_reminder_sent = False
             clear_step_wait(state)
+            v2_runtime.set(state)
+            return True
+
+        if voice_not_listened:
+            await send_v2_message(
+                sender,
+                "Розумію. Тоді продовжу в текстовому вигляді.",
+                STEP_VOICE_WAIT,
+                status="🎧 Голосове",
+            )
+            await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status="🕒 Графік")
+            state.flow_step = STEP_SCHEDULE_SHIFT_WAIT
+            state.shift_prompted_at = time.time()
+            state.schedule_shift_fit_check_pending = False
+            arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
             v2_runtime.set(state)
             return True
 
@@ -4152,7 +4190,7 @@ async def main():
                     state.schedule_shift_fit_check_pending = False
                     await send_v2_message(
                         sender,
-                        "Підкажи, будь ласка, яку зміну обираєш: денну чи нічну?",
+                        "Підкажіть, будь ласка, яку зміну обираєте: денну чи нічну?",
                         STEP_SCHEDULE_SHIFT_WAIT,
                     )
                     state.shift_prompted_at = time.time()
@@ -4180,7 +4218,7 @@ async def main():
                 return True
             choice = parse_shift_choice(text)
             if not choice:
-                await send_v2_message(sender, "Підкажи, будь ласка, яку зміну обираєш: денну чи нічну?", STEP_SCHEDULE_SHIFT_WAIT)
+                await send_v2_message(sender, "Підкажіть, будь ласка, яку зміну обираєте: денну чи нічну?", STEP_SCHEDULE_SHIFT_WAIT)
                 state.shift_prompted_at = time.time()
                 arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
                 v2_runtime.set(state)
