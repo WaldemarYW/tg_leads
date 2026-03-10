@@ -239,6 +239,8 @@ SHEETS_QUEUE_PATH = os.environ.get("AUTO_REPLY_SHEETS_QUEUE_PATH", "/opt/tg_lead
 SHEETS_QUEUE_FLUSH_SEC = float(os.environ.get("AUTO_REPLY_SHEETS_QUEUE_FLUSH_SEC", "1"))
 SHEETS_QUEUE_BATCH_SIZE = int(os.environ.get("AUTO_REPLY_SHEETS_QUEUE_BATCH_SIZE", "20"))
 SHEETS_QUEUE_LOG_SEC = int(os.environ.get("AUTO_REPLY_SHEETS_QUEUE_LOG_SEC", "30"))
+TODAY_UPSERT_DEBOUNCE_SEC = float(os.environ.get("TODAY_UPSERT_DEBOUNCE_SEC", "3.0"))
+GROUP_LEADS_LOOKUP_CACHE_TTL_SEC = int(os.environ.get("GROUP_LEADS_LOOKUP_CACHE_TTL_SEC", "60"))
 CONTINUE_DELAY_SEC = float(os.environ.get("AUTO_REPLY_CONTINUE_DELAY_SEC", "0"))
 FLOW_V2_ENABLED = True
 V2_ENROLLMENT_PATH = os.environ.get("AUTO_REPLY_V2_ENROLLMENT_PATH", "/opt/tg_leads/.auto_reply.v2_enrolled.json")
@@ -1476,6 +1478,9 @@ class SheetWriter:
         self._row_index_cache_ts = {}
         self._row_index_cache_ttl_sec = 30
         self._next_row_cache = {}
+        self._group_leads_ws = None
+        self._group_leads_lookup_cache = []
+        self._group_leads_lookup_cache_ts = 0.0
         self.migrate_sheets()
         if HISTORY_LOG_ENABLED:
             try:
@@ -1537,6 +1542,13 @@ class SheetWriter:
         self._row_index_cache.pop(ws_id, None)
         self._row_index_cache_ts.pop(ws_id, None)
         self._next_row_cache.pop(ws_id, None)
+        try:
+            if (ws.title or "").strip() == GROUP_LEADS_WORKSHEET:
+                self._group_leads_lookup_cache = []
+                self._group_leads_lookup_cache_ts = 0.0
+                self._group_leads_ws = ws
+        except Exception:
+            pass
 
     def _get_headers(self, ws):
         ws_id = ws.id
@@ -1748,6 +1760,57 @@ class SheetWriter:
     def _sheet_row_link(self, ws, row_idx: int, label: str) -> str:
         return f'=HYPERLINK("#gid={ws.id}&range=A{int(row_idx)}";"{label}")'
 
+    def _get_group_leads_ws(self):
+        if self._group_leads_ws is not None:
+            return self._group_leads_ws
+        self._group_leads_ws = self.sh.worksheet(GROUP_LEADS_WORKSHEET)
+        return self._group_leads_ws
+
+    def _get_group_leads_lookup_rows(self):
+        now = time.time()
+        if self._group_leads_lookup_cache and (now - self._group_leads_lookup_cache_ts) < max(5, GROUP_LEADS_LOOKUP_CACHE_TTL_SEC):
+            return self._group_leads_lookup_cache
+        ws = self._get_group_leads_ws()
+        values = ws.get_all_values()
+        rows = []
+        if values:
+            headers = [h.strip().lower() for h in values[0]]
+
+            def idx_of(*names: str) -> Optional[int]:
+                for name in names:
+                    try:
+                        return headers.index(name)
+                    except ValueError:
+                        continue
+                return None
+
+            tg_idx = idx_of("tg", "telegram", "тг")
+            age_idx = idx_of("age", "возраст")
+            pc_idx = idx_of("pc", "ноутбук", "пк", "пк/ноутбук")
+            full_name_idx = idx_of("full_name", "фио", "піб", "имя")
+            if tg_idx is not None or full_name_idx is not None:
+                for idx, row in enumerate(values[1:], start=2):
+                    row_username = row[tg_idx] if tg_idx is not None and tg_idx < len(row) else ""
+                    row_name = row[full_name_idx] if full_name_idx is not None and full_name_idx < len(row) else ""
+                    age = row[age_idx].strip() if age_idx is not None and age_idx < len(row) else ""
+                    pc = row[pc_idx].strip() if pc_idx is not None and pc_idx < len(row) else ""
+                    rows.append(
+                        {
+                            "row_idx": idx,
+                            "username_norm": normalize_username(row_username),
+                            "name_norm": normalize_name(row_name),
+                            "age": age,
+                            "pc": pc,
+                        }
+                    )
+        self._group_leads_lookup_cache = rows
+        self._group_leads_lookup_cache_ts = now
+        return rows
+
+    def invalidate_group_leads_lookup_cache(self):
+        self._group_leads_lookup_cache = []
+        self._group_leads_lookup_cache_ts = 0.0
+
     def _find_group_lead_info(self, username: str, name: str) -> Optional[dict]:
         uname = normalize_username(username)
         name_norm = normalize_name(name)
@@ -1756,46 +1819,17 @@ class SheetWriter:
         if not name_norm:
             name_norm = ""
         try:
-            ws = self.sh.worksheet(GROUP_LEADS_WORKSHEET)
+            rows = self._get_group_leads_lookup_rows()
         except Exception:
             return None
-        try:
-            values = ws.get_all_values()
-        except Exception:
-            return None
-        if not values:
-            return None
-        headers = [h.strip().lower() for h in values[0]]
-
-        def idx_of(*names: str) -> Optional[int]:
-            for name in names:
-                try:
-                    return headers.index(name)
-                except ValueError:
-                    continue
-            return None
-
-        tg_idx = idx_of("tg", "telegram", "тг")
-        age_idx = idx_of("age", "возраст")
-        pc_idx = idx_of("pc", "ноутбук", "пк", "пк/ноутбук")
-        full_name_idx = idx_of("full_name", "фио", "піб", "имя")
-        try:
-            if tg_idx is None and full_name_idx is None:
-                raise ValueError("no lookup columns found")
-        except ValueError:
+        if not rows:
             return None
         fallback_match = None
-        for idx, row in enumerate(values[1:], start=2):
-            row_username = row[tg_idx] if tg_idx is not None and tg_idx < len(row) else ""
-            row_name = row[full_name_idx] if full_name_idx is not None and full_name_idx < len(row) else ""
-            if uname and normalize_username(row_username) == uname:
-                age = row[age_idx].strip() if age_idx is not None and age_idx < len(row) else ""
-                pc = row[pc_idx].strip() if pc_idx is not None and pc_idx < len(row) else ""
-                return {"row_idx": idx, "age": age, "pc": pc}
-            if not fallback_match and name_norm and names_match(row_name, name_norm):
-                age = row[age_idx].strip() if age_idx is not None and age_idx < len(row) else ""
-                pc = row[pc_idx].strip() if pc_idx is not None and pc_idx < len(row) else ""
-                fallback_match = {"row_idx": idx, "age": age, "pc": pc}
+        for item in rows:
+            if uname and item.get("username_norm", "") == uname:
+                return {"row_idx": item.get("row_idx"), "age": item.get("age", ""), "pc": item.get("pc", "")}
+            if not fallback_match and name_norm and names_match(item.get("name_norm", ""), name_norm):
+                fallback_match = {"row_idx": item.get("row_idx"), "age": item.get("age", ""), "pc": item.get("pc", "")}
         return fallback_match
 
     def refresh_today_from_group_lead(self, tz: ZoneInfo, group_data: dict) -> int:
@@ -1826,7 +1860,7 @@ class SheetWriter:
         lead_info = self._find_group_lead_info(group_data.get("tg", ""), group_data.get("full_name", ""))
         if not lead_info:
             return 0
-        app_ws = self.sh.worksheet(GROUP_LEADS_WORKSHEET)
+        app_ws = self._get_group_leads_ws()
         app_link = self._sheet_row_link(app_ws, int(lead_info["row_idx"]), "Открыть заявку")
         lead_age = lead_info.get("age", "")
         lead_pc = lead_info.get("pc", "")
@@ -2048,7 +2082,7 @@ class SheetWriter:
         try:
             lead_info = self._find_group_lead_info(username, name)
             if lead_info:
-                app_ws = self.sh.worksheet(GROUP_LEADS_WORKSHEET)
+                app_ws = self._get_group_leads_ws()
                 set_value("Ссылка на заявку", self._sheet_row_link(app_ws, int(lead_info["row_idx"]), "Открыть заявку"))
                 set_value("Возраст", lead_info.get("age", ""))
                 set_value("Наличие ПК/ноутбука", lead_info.get("pc", ""))
@@ -2109,19 +2143,9 @@ class SheetWriter:
                         existing = existing + [""] * (len(headers) - len(existing))
                     end_col = self._col_letter(len(headers))
                     ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
+                    self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), effective_account)] = row_idx
+                    self._next_row_cache[ws.id] = max(int(self._next_row_cache.get(ws.id, 2)), row_idx + 1)
                 else:
-                    row_idx_peer, existing_peer = self._find_row_by_peer(ws, peer_id)
-                    if row_idx_peer:
-                        row_idx = row_idx_peer
-                        existing = existing_peer or [""] * len(headers)
-                        if len(existing) < len(headers):
-                            existing = existing + [""] * (len(headers) - len(existing))
-                        end_col = self._col_letter(len(headers))
-                        ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
-                        self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), effective_account)] = row_idx
-                        self._next_row_cache[ws.id] = max(int(self._next_row_cache.get(ws.id, 2)), row_idx + 1)
-                        self._sort_today_by_updated(ws, headers)
-                        return
                     next_row = int(self._next_row_cache.get(ws.id, 2))
                     end_col = self._col_letter(len(headers))
                     ws.update(range_name=f"A{next_row}:{end_col}{next_row}", values=[existing], value_input_option="USER_ENTERED")
@@ -3211,16 +3235,79 @@ async def main():
     pending_registration_tasks = {}
     stop_event = asyncio.Event()
 
-    def queue_today_upsert(**kwargs):
-        if enqueue_sheet_event("today_upsert", kwargs):
+    today_upsert_last_sent_at: Dict[int, float] = {}
+    today_upsert_pending: Dict[int, dict] = {}
+    today_upsert_handles: Dict[int, asyncio.TimerHandle] = {}
+
+    def _enqueue_today_upsert_payload(payload: dict) -> bool:
+        if enqueue_sheet_event("today_upsert", payload):
             return True
         try:
-            sheet.upsert(tz=tz, **kwargs)
-            print(f"AUTO_REPLY_CONTINUE despite_sheet_error peer={kwargs.get('peer_id', '')}")
+            sheet.upsert(tz=tz, **payload)
+            print(f"AUTO_REPLY_CONTINUE despite_sheet_error peer={payload.get('peer_id', '')}")
             return True
         except Exception as err:
-            print(f"⚠️ SHEETS_DIRECT_WRITE_FAIL peer={kwargs.get('peer_id', '')}: {type(err).__name__}: {err}")
+            print(f"⚠️ SHEETS_DIRECT_WRITE_FAIL peer={payload.get('peer_id', '')}: {type(err).__name__}: {err}")
             return False
+
+    def _merge_today_upsert_payload(base: dict, incoming: dict) -> dict:
+        merged = dict(base)
+        for key, value in incoming.items():
+            if value is None:
+                continue
+            merged[key] = value
+        return merged
+
+    def _flush_debounced_today_upsert(peer_id: int):
+        handle = today_upsert_handles.pop(peer_id, None)
+        if handle and not handle.cancelled():
+            try:
+                handle.cancel()
+            except Exception:
+                pass
+        payload = today_upsert_pending.pop(peer_id, None)
+        if not payload:
+            return
+        ok = _enqueue_today_upsert_payload(payload)
+        if ok:
+            today_upsert_last_sent_at[peer_id] = time.time()
+
+    def queue_today_upsert(**kwargs):
+        try:
+            peer_id = int(kwargs.get("peer_id") or 0)
+        except Exception:
+            peer_id = 0
+        if peer_id <= 0:
+            return _enqueue_today_upsert_payload(kwargs)
+
+        now_ts = time.time()
+        if TODAY_UPSERT_DEBOUNCE_SEC <= 0:
+            ok = _enqueue_today_upsert_payload(kwargs)
+            if ok:
+                today_upsert_last_sent_at[peer_id] = now_ts
+            return ok
+
+        base_payload = today_upsert_pending.get(peer_id) or {}
+        today_upsert_pending[peer_id] = _merge_today_upsert_payload(base_payload, kwargs)
+
+        last_sent_at = float(today_upsert_last_sent_at.get(peer_id, 0.0) or 0.0)
+        elapsed = now_ts - last_sent_at
+        wait_sec = max(0.0, TODAY_UPSERT_DEBOUNCE_SEC - elapsed)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _flush_debounced_today_upsert(peer_id)
+            return True
+
+        existing_handle = today_upsert_handles.get(peer_id)
+        if wait_sec <= 0.0 and (existing_handle is None or existing_handle.cancelled()):
+            _flush_debounced_today_upsert(peer_id)
+            return True
+
+        if existing_handle is None or existing_handle.cancelled():
+            today_upsert_handles[peer_id] = loop.call_later(wait_sec, _flush_debounced_today_upsert, peer_id)
+        return True
 
     def can_send_global_fallback(now_dt: datetime, tzinfo: ZoneInfo) -> bool:
         _ = now_dt, tzinfo
@@ -4770,6 +4857,7 @@ async def main():
                 group_data,
                 payload.get("status"),
             )
+            sheet.invalidate_group_leads_lookup_cache()
             try:
                 updated = await asyncio.to_thread(sheet.refresh_today_from_group_lead, tz, group_data)
                 if updated:
@@ -5609,6 +5697,12 @@ async def main():
             await asyncio.sleep(0.5)
     finally:
         try:
+            for handle in list(today_upsert_handles.values()):
+                if handle and not handle.cancelled():
+                    handle.cancel()
+            today_upsert_handles.clear()
+            for pid in list(today_upsert_pending.keys()):
+                _flush_debounced_today_upsert(int(pid))
             if sheets_task:
                 sheets_task.cancel()
             if followup_task:
