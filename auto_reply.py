@@ -1719,6 +1719,25 @@ class SheetWriter:
                 return row_idx, row
         return None, None
 
+    def _find_last_row_by_peer(self, ws, peer_id: int):
+        headers = self._get_headers(ws)
+        try:
+            peer_idx = headers.index("Peer ID")
+        except ValueError:
+            return None, None
+        try:
+            values = ws.get_all_values()
+        except Exception:
+            self._invalidate_ws_cache(ws)
+            return None, None
+        found_idx = None
+        found_row = None
+        for row_idx, row in enumerate(values[1:], start=2):
+            if peer_idx < len(row) and row[peer_idx].strip() == str(peer_id):
+                found_idx = row_idx
+                found_row = row
+        return found_idx, found_row
+
     def _owner_account_for_peer(self, peer_id: int, existing_account: str = "") -> str:
         owner_key = ""
         try:
@@ -2004,17 +2023,15 @@ class SheetWriter:
                     end_col = self._col_letter(len(headers))
                     ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
                 else:
-                    next_row = int(self._next_row_cache.get(ws.id, 2))
-                    end_col = self._col_letter(len(headers))
-                    ws.update(range_name=f"A{next_row}:{end_col}{next_row}", values=[existing], value_input_option="USER_ENTERED")
-                    self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), effective_account)] = next_row
-                    self._next_row_cache[ws.id] = next_row + 1
+                    # Use append_row for new peer rows to avoid cross-process row overwrite races.
+                    ws.append_row(existing, value_input_option="USER_ENTERED")
+                    self._invalidate_ws_cache(ws)
         except Exception as err:
             print(f"⚠️ Не вдалося записати історію: {err}")
             self._invalidate_ws_cache(ws)
             return None
         if not row_idx:
-            row_idx, _ = self._find_row_by_peer(ws, peer_id)
+            row_idx, _ = self._find_last_row_by_peer(ws, peer_id)
         if not row_idx:
             return None
         return self._sheet_row_link(ws, row_idx, "Открыть журнал")
