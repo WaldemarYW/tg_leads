@@ -1776,6 +1776,35 @@ class SheetWriter:
             return "Изменение статуса"
         return "Служебное обновление"
 
+    def _history_line_parts(self, line: str) -> Tuple[Optional[datetime], str]:
+        raw = (line or "").strip()
+        if not raw:
+            return None, ""
+        if " | " not in raw:
+            return None, raw
+        ts_part, rest = raw.split(" | ", 1)
+        try:
+            ts = datetime.fromisoformat(ts_part.strip())
+        except Exception:
+            ts = None
+        return ts, rest.strip()
+
+    def _is_duplicate_history_event(self, prev_line: str, new_line: str, window_sec: int = 5) -> bool:
+        prev_ts, prev_payload = self._history_line_parts(prev_line)
+        new_ts, new_payload = self._history_line_parts(new_line)
+        if not prev_payload or not new_payload:
+            return False
+        if prev_payload != new_payload:
+            return False
+        if prev_ts is None or new_ts is None:
+            # Same payload and unparsable timestamps -> treat as duplicate guard.
+            return True
+        try:
+            delta = abs((new_ts - prev_ts).total_seconds())
+        except Exception:
+            return True
+        return delta <= max(1, int(window_sec))
+
     def _sheet_row_link(self, ws, row_idx: int, label: str) -> str:
         return f'=HYPERLINK("#gid={ws.id}&range=A{int(row_idx)}";"{label}")'
 
@@ -1986,7 +2015,8 @@ class SheetWriter:
 
         journal_prev = get_value("Журнал событий").strip()
         journal_lines = [line for line in journal_prev.splitlines() if line.strip()]
-        journal_lines.append(event_line)
+        if not journal_lines or not self._is_duplicate_history_event(journal_lines[-1], event_line, window_sec=5):
+            journal_lines.append(event_line)
         journal_lines = journal_lines[-max(50, JOURNAL_MAX_LINES_PER_CHAT):]
         journal_text = "\n".join(journal_lines)
 
