@@ -2496,22 +2496,6 @@ class RegistrationSheet:
         except Exception as err:
             print(f"⚠️ Не вдалося оновити заголовки '{REGISTRATION_WORKSHEET}': {err}")
 
-    def _find_row(self, values, source_group: str, source_message_id: str):
-        if not values:
-            return None
-        headers = [h.strip() for h in values[0]]
-        try:
-            group_idx = headers.index("Группа-источник")
-            msg_idx = headers.index("ID сообщения")
-        except ValueError:
-            return None
-        for idx, row in enumerate(values[1:], start=2):
-            group_val = row[group_idx].strip() if group_idx < len(row) else ""
-            msg_val = row[msg_idx].strip() if msg_idx < len(row) else ""
-            if group_val == source_group and msg_val == source_message_id:
-                return idx
-        return None
-
     def upsert(self, tz: ZoneInfo, data: dict):
         self._ensure_headers_exact()
         row = [
@@ -2531,27 +2515,7 @@ class RegistrationSheet:
             str(data.get("source_message_id", "") or ""),
             datetime.now(tz).isoformat(timespec="seconds"),
         ]
-        source_group = str(data.get("source_group", "") or "")
-        source_message_id = str(data.get("source_message_id", "") or "")
-        try:
-            values = self.ws.get_all_values()
-        except Exception:
-            values = [REGISTRATION_HEADERS[:]]
-        row_idx = self._find_row(values, source_group, source_message_id)
-        end_col = col_letter(len(REGISTRATION_HEADERS))
-        if row_idx:
-            self.ws.update(
-                range_name=f"A{row_idx}:{end_col}{row_idx}",
-                values=[row],
-                value_input_option="USER_ENTERED",
-            )
-            return
-        next_row = max(len(values) + 1, 2)
-        self.ws.update(
-            range_name=f"A{next_row}:{end_col}{next_row}",
-            values=[row],
-            value_input_option="USER_ENTERED",
-        )
+        self.ws.append_row(row, value_input_option="USER_ENTERED")
 
 
 class FAQQuestionsSheet:
