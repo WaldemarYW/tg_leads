@@ -51,6 +51,10 @@ class AccountConfig:
     auto_reply_followup_state_path: str
     auto_reply_step_state_path: str
     auto_reply_paused_state_path: str
+    auto_reply_v2_enrollment_path: str
+    auto_reply_v2_runtime_path: str
+    auto_reply_sheets_queue_path: str
+    auto_reply_fallback_quota_path: str
 
 
 def env_key(name: str) -> str:
@@ -113,6 +117,22 @@ def load_accounts() -> List[AccountConfig]:
             auto_reply_followup_state_path=os.path.join(state_dir, f"auto_reply_{key}.followup_state.json"),
             auto_reply_step_state_path=os.path.join(state_dir, f"auto_reply_{key}.step_state.json"),
             auto_reply_paused_state_path=os.path.join(state_dir, f"auto_reply_{key}.paused.json"),
+            auto_reply_v2_enrollment_path=os.environ.get(
+                env_prefix + "AUTO_REPLY_V2_ENROLLMENT_PATH",
+                os.path.join(state_dir, f"auto_reply_{key}.v2_enrolled.json"),
+            ),
+            auto_reply_v2_runtime_path=os.environ.get(
+                env_prefix + "AUTO_REPLY_V2_RUNTIME_PATH",
+                os.path.join(state_dir, f"auto_reply_{key}.v2_runtime.json"),
+            ),
+            auto_reply_sheets_queue_path=os.environ.get(
+                env_prefix + "AUTO_REPLY_SHEETS_QUEUE_PATH",
+                os.path.join(state_dir, f"sheet_events_{key}.sqlite"),
+            ),
+            auto_reply_fallback_quota_path=os.environ.get(
+                env_prefix + "AUTO_REPLY_FALLBACK_QUOTA_PATH",
+                os.path.join(state_dir, f"auto_reply_{key}.fallback_quota.json"),
+            ),
         ))
     return accounts
 
@@ -196,6 +216,10 @@ def start_auto_reply(acct: AccountConfig) -> Tuple[bool, str]:
         env["AUTO_REPLY_FOLLOWUP_STATE_PATH"] = acct.auto_reply_followup_state_path
         env["AUTO_REPLY_STEP_STATE_PATH"] = acct.auto_reply_step_state_path
         env["AUTO_REPLY_PAUSED_STATE_PATH"] = acct.auto_reply_paused_state_path
+        env["AUTO_REPLY_V2_ENROLLMENT_PATH"] = acct.auto_reply_v2_enrollment_path
+        env["AUTO_REPLY_V2_RUNTIME_PATH"] = acct.auto_reply_v2_runtime_path
+        env["AUTO_REPLY_SHEETS_QUEUE_PATH"] = acct.auto_reply_sheets_queue_path
+        env["AUTO_REPLY_FALLBACK_QUOTA_PATH"] = acct.auto_reply_fallback_quota_path
         env["AUTO_REPLY_ACCOUNT_KEY"] = acct.key
         for key in (
             "BOT_REPLY_DELAY_SEC",

@@ -1,5 +1,8 @@
+import json
 import os
+import socket
 import time
+import uuid
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple, List, Set
@@ -395,20 +398,65 @@ def add_exclusion_entries_bulk(entries: List[Tuple[Optional[int], Optional[str],
     return len(rows)
 
 
+def _read_lock_meta(lock_path: str) -> dict:
+    try:
+        with open(lock_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _is_lock_stale(lock_path: str, ttl_sec: int) -> bool:
+    ttl = max(1, int(ttl_sec or 0))
+    now = time.time()
+    meta = _read_lock_meta(lock_path)
+    created_at = meta.get("created_at")
+    if isinstance(created_at, (int, float)) and (now - float(created_at)) >= ttl:
+        return True
+    try:
+        return (now - os.path.getmtime(lock_path)) >= ttl
+    except Exception:
+        return True
+
+
+def _try_create_lock_file(lock_path: str, payload: dict) -> bool:
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    fd = os.open(lock_path, flags, 0o644)
+    try:
+        data = json.dumps(payload, ensure_ascii=True)
+        os.write(fd, data.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return True
+
+
 def acquire_lock(lock_path: str, ttl_sec: int = 300) -> bool:
     now = time.time()
-    if os.path.exists(lock_path):
+    payload = {
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+        "token": str(uuid.uuid4()),
+        "created_at": now,
+    }
+    for _ in range(2):
         try:
-            if now - os.path.getmtime(lock_path) < ttl_sec:
+            return _try_create_lock_file(lock_path, payload)
+        except FileExistsError:
+            if not _is_lock_stale(lock_path, ttl_sec):
+                return False
+            try:
+                os.remove(lock_path)
+            except FileNotFoundError:
+                continue
+            except Exception:
                 return False
         except Exception:
-            pass
-    try:
-        with open(lock_path, "w") as f:
-            f.write(str(now))
-        return True
-    except Exception:
-        return False
+            return False
+    return False
 
 
 def release_lock(lock_path: str):

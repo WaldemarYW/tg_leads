@@ -1,5 +1,7 @@
 import json
 import os
+import time
+import uuid
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
@@ -23,6 +25,43 @@ def adjust_to_followup_window(dt: datetime, start_hour: int, end_hour: int) -> d
 class JsonStore:
     def __init__(self, path: str):
         self.path = path
+        self.lock_path = f"{path}.lock" if path else ""
+
+    def _acquire_lock(self, timeout_sec: float = 2.0, stale_sec: float = 10.0) -> bool:
+        if not self.lock_path:
+            return True
+        deadline = time.time() + max(0.1, float(timeout_sec or 0))
+        payload = f"{os.getpid()}:{time.time():.6f}"
+        while time.time() < deadline:
+            try:
+                fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                try:
+                    os.write(fd, payload.encode("utf-8"))
+                finally:
+                    os.close(fd)
+                return True
+            except FileExistsError:
+                try:
+                    age = time.time() - os.path.getmtime(self.lock_path)
+                    if age >= max(1.0, float(stale_sec or 0)):
+                        os.remove(self.lock_path)
+                        continue
+                except Exception:
+                    pass
+                time.sleep(0.02)
+            except Exception:
+                return False
+        return False
+
+    def _release_lock(self):
+        if not self.lock_path:
+            return
+        try:
+            os.remove(self.lock_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
 
     def load_dict(self) -> dict:
         if not self.path or not os.path.exists(self.path):
@@ -37,11 +76,20 @@ class JsonStore:
     def save_dict(self, data: dict):
         if not self.path:
             return
+        base = os.path.dirname(self.path)
+        if base:
+            os.makedirs(base, exist_ok=True)
+        if not self._acquire_lock():
+            return
         try:
-            with open(self.path, "w") as f:
+            tmp_path = f"{self.path}.tmp.{os.getpid()}.{int(time.time() * 1000)}.{uuid.uuid4().hex}"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=True)
+            os.replace(tmp_path, self.path)
         except OSError:
             return
+        finally:
+            self._release_lock()
 
 
 class FollowupState:

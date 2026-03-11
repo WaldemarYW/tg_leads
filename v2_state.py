@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import time
+import uuid
 from dataclasses import asdict, fields
 from typing import Dict, Iterable, Set
 
@@ -11,7 +13,44 @@ from flow_engine import PeerRuntimeState
 class V2EnrollmentStore:
     def __init__(self, path: str):
         self.path = path
+        self.lock_path = f"{path}.lock" if path else ""
         self.data = self._load()
+
+    def _acquire_lock(self, timeout_sec: float = 2.0, stale_sec: float = 10.0) -> bool:
+        if not self.lock_path:
+            return True
+        deadline = time.time() + max(0.1, float(timeout_sec or 0))
+        payload = f"{os.getpid()}:{time.time():.6f}"
+        while time.time() < deadline:
+            try:
+                fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                try:
+                    os.write(fd, payload.encode("utf-8"))
+                finally:
+                    os.close(fd)
+                return True
+            except FileExistsError:
+                try:
+                    age = time.time() - os.path.getmtime(self.lock_path)
+                    if age >= max(1.0, float(stale_sec or 0)):
+                        os.remove(self.lock_path)
+                        continue
+                except Exception:
+                    pass
+                time.sleep(0.02)
+            except Exception:
+                return False
+        return False
+
+    def _release_lock(self):
+        if not self.lock_path:
+            return
+        try:
+            os.remove(self.lock_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
 
     def _load(self) -> Set[int]:
         if not self.path or not os.path.exists(self.path):
@@ -35,8 +74,15 @@ class V2EnrollmentStore:
         base = os.path.dirname(self.path)
         if base:
             os.makedirs(base, exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(sorted(self.data), f, ensure_ascii=True)
+        if not self._acquire_lock():
+            return
+        try:
+            tmp_path = f"{self.path}.tmp.{os.getpid()}.{int(time.time() * 1000)}.{uuid.uuid4().hex}"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(sorted(self.data), f, ensure_ascii=True)
+            os.replace(tmp_path, self.path)
+        finally:
+            self._release_lock()
 
     def has(self, peer_id: int) -> bool:
         return int(peer_id) in self.data
@@ -59,8 +105,45 @@ class V2EnrollmentStore:
 class V2RuntimeStore:
     def __init__(self, path: str):
         self.path = path
+        self.lock_path = f"{path}.lock" if path else ""
         self.data: Dict[str, dict] = self._load()
         self._state_field_names = {f.name for f in fields(PeerRuntimeState)}
+
+    def _acquire_lock(self, timeout_sec: float = 2.0, stale_sec: float = 10.0) -> bool:
+        if not self.lock_path:
+            return True
+        deadline = time.time() + max(0.1, float(timeout_sec or 0))
+        payload = f"{os.getpid()}:{time.time():.6f}"
+        while time.time() < deadline:
+            try:
+                fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                try:
+                    os.write(fd, payload.encode("utf-8"))
+                finally:
+                    os.close(fd)
+                return True
+            except FileExistsError:
+                try:
+                    age = time.time() - os.path.getmtime(self.lock_path)
+                    if age >= max(1.0, float(stale_sec or 0)):
+                        os.remove(self.lock_path)
+                        continue
+                except Exception:
+                    pass
+                time.sleep(0.02)
+            except Exception:
+                return False
+        return False
+
+    def _release_lock(self):
+        if not self.lock_path:
+            return
+        try:
+            os.remove(self.lock_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
 
     def _load(self) -> Dict[str, dict]:
         if not self.path or not os.path.exists(self.path):
@@ -76,8 +159,15 @@ class V2RuntimeStore:
         base = os.path.dirname(self.path)
         if base:
             os.makedirs(base, exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(self.data, f, ensure_ascii=True)
+        if not self._acquire_lock():
+            return
+        try:
+            tmp_path = f"{self.path}.tmp.{os.getpid()}.{int(time.time() * 1000)}.{uuid.uuid4().hex}"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(self.data, f, ensure_ascii=True)
+            os.replace(tmp_path, self.path)
+        finally:
+            self._release_lock()
 
     def get(self, peer_id: int) -> PeerRuntimeState:
         key = str(int(peer_id))

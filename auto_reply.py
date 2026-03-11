@@ -149,9 +149,11 @@ FORM_PHOTO_REMINDER_DELAY_SEC = float(os.environ.get("FORM_PHOTO_REMINDER_DELAY_
 STEP_CLARIFY_DELAY_SEC = float(os.environ.get("STEP_CLARIFY_DELAY_SEC", "600"))
 STEP_FALLBACK_1_DELAY_SEC = float(os.environ.get("STEP_FALLBACK_1_DELAY_SEC", "21600"))
 STEP_FALLBACK_2_DELAY_SEC = float(os.environ.get("STEP_FALLBACK_2_DELAY_SEC", "259200"))
+STEP_WAIT_FOLLOWUP_GRACE_SEC = float(os.environ.get("STEP_WAIT_FOLLOWUP_GRACE_SEC", "15"))
 GLOBAL_FALLBACK_DAILY_LIMIT = int(os.environ.get("GLOBAL_FALLBACK_DAILY_LIMIT", "30"))
 SENT_MESSAGE_CACHE_LIMIT = int(os.environ.get("SENT_MESSAGE_CACHE_LIMIT", "200"))
 JOURNAL_MAX_LINES_PER_CHAT = int(os.environ.get("JOURNAL_MAX_LINES_PER_CHAT", "500"))
+JOURNAL_DEDUP_TAIL_LINES = int(os.environ.get("JOURNAL_DEDUP_TAIL_LINES", "10"))
 SESSION_LOCK = os.environ.get("TELETHON_SESSION_LOCK", f"{SESSION_FILE}.lock")
 STATUS_PATH = os.environ.get("AUTO_REPLY_STATUS_PATH", "/opt/tg_leads/.auto_reply.status")
 FOLLOWUP_STATE_PATH = os.environ.get("AUTO_REPLY_FOLLOWUP_STATE_PATH", "/opt/tg_leads/.auto_reply.followup_state.json")
@@ -1719,12 +1721,18 @@ class SheetWriter:
                 return row_idx, row
         return None, None
 
-    def _find_last_row_by_peer(self, ws, peer_id: int):
+    def _find_last_row_by_peer(self, ws, peer_id: int, account_key: Optional[str] = None):
         headers = self._get_headers(ws)
         try:
             peer_idx = headers.index("Peer ID")
         except ValueError:
             return None, None
+        account_idx = None
+        if account_key is not None:
+            try:
+                account_idx = headers.index("Аккаунт")
+            except ValueError:
+                return None, None
         try:
             values = ws.get_all_values()
         except Exception:
@@ -1733,6 +1741,12 @@ class SheetWriter:
         found_idx = None
         found_row = None
         for row_idx, row in enumerate(values[1:], start=2):
+            if peer_idx >= len(row) or row[peer_idx].strip() != str(peer_id):
+                continue
+            if account_idx is not None:
+                row_account = row[account_idx].strip() if account_idx < len(row) else ""
+                if row_account != str(account_key or "").strip():
+                    continue
             if peer_idx < len(row) and row[peer_idx].strip() == str(peer_id):
                 found_idx = row_idx
                 found_row = row
@@ -1804,6 +1818,34 @@ class SheetWriter:
         except Exception:
             return True
         return delta <= max(1, int(window_sec))
+
+    def _is_duplicate_history_event_in_tail(self, lines: List[str], new_line: str, window_sec: int = 5, tail_size: int = 10) -> bool:
+        if not lines:
+            return False
+        window = lines[-max(1, int(tail_size or 1)) :]
+        for line in reversed(window):
+            if self._is_duplicate_history_event(line, new_line, window_sec=window_sec):
+                return True
+        return False
+
+    def _is_history_noise_event(
+        self,
+        event_type: str,
+        status: Optional[str],
+        auto_reply_enabled: Optional[bool],
+        last_in: Optional[str],
+        last_out: Optional[str],
+    ) -> bool:
+        if (event_type or "").strip() != "Служебное обновление":
+            return False
+        has_text = bool((last_in or "").strip() or (last_out or "").strip())
+        if has_text:
+            return False
+        if status is not None:
+            return False
+        if auto_reply_enabled is not None:
+            return False
+        return True
 
     def _sheet_row_link(self, ws, row_idx: int, label: str) -> str:
         return f'=HYPERLINK("#gid={ws.id}&range=A{int(row_idx)}";"{label}")'
@@ -1981,7 +2023,21 @@ class SheetWriter:
         ws = self._history_ws(tz)
         now_iso = datetime.now(tz).isoformat(timespec="seconds")
         headers = self._get_headers(ws)
-        row_idx, existing = self._find_row_by_peer(ws, peer_id)
+        if self._is_history_noise_event(event_type, status, auto_reply_enabled, last_in, last_out):
+            print(f"HISTORY_SKIP reason=noise account={ACCOUNT_KEY} peer={peer_id}")
+            return None
+        effective_account = self._owner_account_for_peer(peer_id, ACCOUNT_KEY)
+        row_idx, existing = self._find_row(ws, peer_id, effective_account)
+        if not row_idx:
+            legacy_idx, legacy_row = self._find_last_row_by_peer(ws, peer_id)
+            if legacy_idx and legacy_row:
+                try:
+                    account_idx = headers.index("Аккаунт")
+                except ValueError:
+                    account_idx = None
+                legacy_account = legacy_row[account_idx].strip() if (account_idx is not None and account_idx < len(legacy_row)) else ""
+                if not legacy_account:
+                    row_idx, existing = legacy_idx, legacy_row
         existing = existing or [""] * len(headers)
         if len(existing) < len(headers):
             existing = existing + [""] * (len(headers) - len(existing))
@@ -2015,14 +2071,18 @@ class SheetWriter:
 
         journal_prev = get_value("Журнал событий").strip()
         journal_lines = [line for line in journal_prev.splitlines() if line.strip()]
-        if not journal_lines or not self._is_duplicate_history_event(journal_lines[-1], event_line, window_sec=5):
+        if not self._is_duplicate_history_event_in_tail(
+            journal_lines,
+            event_line,
+            window_sec=5,
+            tail_size=max(1, JOURNAL_DEDUP_TAIL_LINES),
+        ):
             journal_lines.append(event_line)
         journal_lines = journal_lines[-max(50, JOURNAL_MAX_LINES_PER_CHAT):]
         journal_text = "\n".join(journal_lines)
 
         set_value("Время события", now_iso)
         set_value("Дата", str(datetime.now(tz).date()))
-        effective_account = self._owner_account_for_peer(peer_id, get_value("Аккаунт"))
         set_value("Аккаунт", effective_account)
         set_value("Тип события", event_type)
         set_value("Имя", name)
@@ -2043,8 +2103,9 @@ class SheetWriter:
             if row_idx:
                 end_col = self._col_letter(len(headers))
                 ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
+                print(f"HISTORY_ROW_UPDATE account={effective_account} peer={peer_id} row={row_idx}")
             else:
-                row_idx_recheck, existing_recheck = self._find_row_by_peer(ws, peer_id)
+                row_idx_recheck, existing_recheck = self._find_row(ws, peer_id, effective_account)
                 if row_idx_recheck:
                     row_idx = row_idx_recheck
                     existing = existing_recheck or [""] * len(headers)
@@ -2052,16 +2113,18 @@ class SheetWriter:
                         existing = existing + [""] * (len(headers) - len(existing))
                     end_col = self._col_letter(len(headers))
                     ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
+                    print(f"HISTORY_ROW_RECHECK_UPDATE account={effective_account} peer={peer_id} row={row_idx}")
                 else:
                     # Use append_row for new peer rows to avoid cross-process row overwrite races.
                     ws.append_row(existing, value_input_option="USER_ENTERED")
                     self._invalidate_ws_cache(ws)
+                    print(f"HISTORY_ROW_APPEND account={effective_account} peer={peer_id}")
         except Exception as err:
             print(f"⚠️ Не вдалося записати історію: {err}")
             self._invalidate_ws_cache(ws)
             return None
         if not row_idx:
-            row_idx, _ = self._find_last_row_by_peer(ws, peer_id)
+            row_idx, _ = self._find_last_row_by_peer(ws, peer_id, effective_account)
         if not row_idx:
             return None
         return self._sheet_row_link(ws, row_idx, "Открыть журнал")
@@ -2172,7 +2235,8 @@ class SheetWriter:
                 step_snapshot=step_snapshot or tech_step,
                 full_text=full_text,
             )
-            set_value("Ссылка на журнал", history_link or "")
+            if history_link is not None:
+                set_value("Ссылка на журнал", history_link)
         else:
             set_value("Ссылка на журнал", "")
 
@@ -2193,11 +2257,12 @@ class SheetWriter:
                     self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), effective_account)] = row_idx
                     self._next_row_cache[ws.id] = max(int(self._next_row_cache.get(ws.id, 2)), row_idx + 1)
                 else:
-                    next_row = int(self._next_row_cache.get(ws.id, 2))
-                    end_col = self._col_letter(len(headers))
-                    ws.update(range_name=f"A{next_row}:{end_col}{next_row}", values=[existing], value_input_option="USER_ENTERED")
-                    self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), ACCOUNT_KEY)] = next_row
-                    self._next_row_cache[ws.id] = next_row + 1
+                    ws.append_row(existing, value_input_option="USER_ENTERED")
+                    self._invalidate_ws_cache(ws)
+                    appended_row_idx, _ = self._find_last_row_by_peer(ws, peer_id)
+                    if appended_row_idx:
+                        self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), effective_account)] = appended_row_idx
+                        self._next_row_cache[ws.id] = max(int(self._next_row_cache.get(ws.id, 2)), appended_row_idx + 1)
         except Exception as err:
             print(f"⚠️ Не вдалося записати лист '{TODAY_WORKSHEET}': {err}")
             self._invalidate_ws_cache(ws)
@@ -2915,7 +2980,7 @@ async def send_and_update(
     )
     message_text = sent_payload.get("text_used") or result.text_used
     if not result.success:
-        print(f"⚠️ Send error peer={entity.id} step={step_name or '-'} err={result.error}")
+        print(f"⚠️ Send error account={ACCOUNT_KEY} peer={entity.id} step={step_name or '-'} err={result.error}")
         return False if return_success else text
     sent_message = sent_payload.get("message")
     if not sent_message:
@@ -3829,6 +3894,11 @@ async def main():
         res = await dispatch_content(client, sender, content_link)
         if not res.ok:
             return False
+        for mid in (res.message_ids or []):
+            try:
+                track_sent_message(sender.id, int(mid))
+            except Exception:
+                continue
         queue_today_upsert(
             peer_id=sender.id,
             name=getattr(sender, "first_name", "") or "Unknown",
@@ -5128,21 +5198,8 @@ async def main():
         if IS_ALT_ACCOUNT and ALT_STRICT_GROUP_ONLY and not test_restart:
             owner = owner_store.get_owner(peer_id)
             if owner != ACCOUNT_KEY:
-                print(f"ALT_PRIVATE_IGNORED_NOT_GROUP peer={peer_id}")
+                print(f"FILTER account={ACCOUNT_KEY} peer={peer_id} reason=ignored_by_owner owner={owner or '-'}")
                 return
-
-        queue_today_upsert(
-            peer_id=sender.id,
-            name=name,
-            username=username,
-            chat_link=chat_link,
-            last_in=text[:200],
-            status=(MANUAL_OFF_STATUS if incoming_mode == "OFF" else None),
-            sender_role="lead",
-            dialog_mode=incoming_mode,
-            step_snapshot=current_step_snapshot,
-            full_text=text,
-        )
 
         plus_start = is_plus_chat_start(text)
         plus_start_first_message = plus_start and await is_first_lead_message_in_dialog(sender, event.id)
@@ -5161,8 +5218,20 @@ async def main():
             group_incoming_autostart = False
 
         if plus_start and not plus_start_first_message:
-            print(f"PLUS_IGNORED_NOT_FIRST peer={peer_id}")
+            print(f"FILTER account={ACCOUNT_KEY} peer={peer_id} reason=plus_not_first")
         if (not IS_ALT_ACCOUNT) and (plus_start_first_message or group_incoming_autostart):
+            queue_today_upsert(
+                peer_id=sender.id,
+                name=name,
+                username=username,
+                chat_link=chat_link,
+                last_in=text[:200],
+                status=(MANUAL_OFF_STATUS if incoming_mode == "OFF" else None),
+                sender_role="lead",
+                dialog_mode=incoming_mode,
+                step_snapshot=current_step_snapshot,
+                full_text=text,
+            )
             paused_peers.discard(peer_id)
             enabled_peers.add(peer_id)
             clear_qa_gate(peer_id)
@@ -5221,26 +5290,26 @@ async def main():
         is_test = is_test_user(sender)
         if is_paused(sender):
             if not is_test:
-                print(f"⚠️ Filtered paused: {peer_id}")
+                print(f"FILTER account={ACCOUNT_KEY} peer={peer_id} reason=paused")
                 return
             print(f"✅ Test user bypassed paused: {peer_id}")
         if peer_id not in enabled_peers:
             if pause_status == "ACTIVE":
                 enabled_peers.add(peer_id)
-                print(f"ℹ️ Restored enabled from pause-state: {peer_id}")
+                print(f"RECOVER account={ACCOUNT_KEY} peer={peer_id} action=restore_enabled_from_pause_state")
             else:
                 if not is_test:
-                    print(f"⚠️ Filtered not enabled: {peer_id}")
+                    print(f"FILTER account={ACCOUNT_KEY} peer={peer_id} reason=not_enabled")
                     return
                 print(f"✅ Test user bypassed enabled check: {peer_id}")
         if peer_id in processing_peers:
             if FLOW_V2_ENABLED:
                 bucket = buffered_incoming.setdefault(peer_id, deque())
                 bucket.append((int(restart_generation.get(peer_id, 0)), text, incoming_has_photo))
-                print(f"ℹ️ Buffered incoming peer={peer_id} size={len(bucket)}")
+                print(f"BUFFER account={ACCOUNT_KEY} peer={peer_id} size={len(bucket)}")
                 return
             if not is_test:
-                print(f"⚠️ Filtered already processing: {peer_id}")
+                print(f"FILTER account={ACCOUNT_KEY} peer={peer_id} reason=processing")
                 return
             print(f"✅ Test user bypassed processing check: {peer_id}")
         now_ts = time.time()
@@ -5250,9 +5319,21 @@ async def main():
             effective_debounce_sec = min(REPLY_DEBOUNCE_SEC, SCREENING_REPLY_DEBOUNCE_SEC)
         if last_ts and now_ts - last_ts < effective_debounce_sec:
             if not is_test:
-                print(f"⚠️ Filtered debounce: {peer_id}")
+                print(f"⚠️ Filtered debounce account={ACCOUNT_KEY} peer={peer_id}")
                 return
             print(f"✅ Test user bypassed debounce: {peer_id}")
+        queue_today_upsert(
+            peer_id=sender.id,
+            name=name,
+            username=username,
+            chat_link=chat_link,
+            last_in=text[:200],
+            status=(MANUAL_OFF_STATUS if incoming_mode == "OFF" else None),
+            sender_role="lead",
+            dialog_mode=incoming_mode,
+            step_snapshot=current_step_snapshot,
+            full_text=text,
+        )
         if not IS_ALT_ACCOUNT:
             owner_store.set_owner(peer_id, PRIMARY_ACCOUNT_KEY, "incoming", tz)
         processing_peers.add(peer_id)
@@ -5602,12 +5683,20 @@ async def main():
                         current_step = (v2s.flow_step or "").strip()
                         if current_step not in WAIT_STEP_SET:
                             continue
+                        if peer_id in processing_peers:
+                            continue
+                        if buffered_incoming.get(peer_id):
+                            continue
+                        now_ts = time.time()
+                        last_in_ts = float(last_incoming_at.get(peer_id, 0.0) or 0.0)
+                        if last_in_ts > 0 and (now_ts - last_in_ts) < max(0.0, STEP_WAIT_FOLLOWUP_GRACE_SEC):
+                            continue
                         started = float(v2s.step_wait_started_at or 0)
                         if (v2s.step_wait_step or "") != current_step or started <= 0:
-                            arm_step_wait(v2s, current_step, time.time())
+                            arm_step_wait(v2s, current_step, now_ts)
                             v2_runtime.set(v2s)
                             continue
-                        elapsed = time.time() - started
+                        elapsed = now_ts - started
                         stage = int(v2s.step_followup_stage or 0)
                         send_text = ""
                         log_label = ""

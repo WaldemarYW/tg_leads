@@ -1,5 +1,6 @@
 import os
 import tempfile
+import threading
 import unittest
 
 from sheets_queue import SheetsQueueStore, calculate_backoff_sec
@@ -52,7 +53,28 @@ class SheetsQueueTests(unittest.TestCase):
         self.assertGreaterEqual(hard, 300.0 - 1.0)
         self.assertLessEqual(hard, 300.0)
 
+    def test_concurrent_enqueue(self):
+        total_threads = 5
+        per_thread = 50
+        errors = []
+
+        def worker(thread_idx: int):
+            try:
+                for i in range(per_thread):
+                    self.store.enqueue("today_upsert", {"peer_id": thread_idx * 1000 + i})
+            except Exception as err:
+                errors.append(str(err))
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(total_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        stats = self.store.stats()
+        self.assertEqual(stats["pending"], total_threads * per_thread)
+
 
 if __name__ == "__main__":
     unittest.main()
-

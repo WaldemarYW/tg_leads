@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -54,6 +55,20 @@ class StateTests(unittest.TestCase):
         self.assertFalse(within_followup_window(dt, 9, 18))
         adjusted = adjust_to_followup_window(dt, 9, 18)
         self.assertEqual(adjusted.hour, 9)
+
+    def test_step_state_overrides_stale_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "step.json")
+            lock_path = f"{path}.lock"
+            with open(lock_path, "w", encoding="utf-8") as f:
+                f.write("stale")
+            old_ts = time.time() - 30
+            os.utime(lock_path, (old_ts, old_ts))
+
+            store = StepState(path, STEP_ORDER)
+            store.set(99, STEP_CONTACT)
+            self.assertEqual(store.get(99), STEP_CONTACT)
+            self.assertTrue(os.path.exists(path))
 
 
 if __name__ == "__main__":
