@@ -59,7 +59,6 @@ def _compact_text_block(text: str) -> str:
     compact = "\n".join([line for line in lines if line])
     return compact.strip()
 
-
 def build_voice_text_recap_blocks() -> List[str]:
     faq_text = ""
     path = "faq-for-ai.txt"

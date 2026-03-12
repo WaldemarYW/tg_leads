@@ -4051,12 +4051,11 @@ async def main():
 
         if should_replace_voice_with_text(step_name, text):
             recap_blocks = build_voice_text_recap_blocks()
-            for block in recap_blocks[:2]:
-                if not (block or "").strip():
-                    continue
+            recap_text = next((b for b in recap_blocks if (b or "").strip()), "")
+            if recap_text:
                 await send_v2_message(
                     sender,
-                    block,
+                    recap_text,
                     step_name,
                     status="🎧 Голосове",
                 )
