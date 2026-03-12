@@ -5,6 +5,24 @@ import re
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
+VOICE_TEXT_FALLBACK_BLOCK_1 = (
+    "Коротко поясню умови текстом.\n\n"
+    "Сайт працює так: чоловіки оплачують кожну хвилину спілкування, листи, фото та відео. "
+    "Робота чат-менеджера — вести цікаву комунікацію, створювати інвайти та листи, "
+    "щоб підтримувати активність у чаті.\n\n"
+    "Робота віддалена, 8 годин за ПК/ноутбуком, без дзвінків і відеозвʼязку. "
+    "На старті є стажування з тімлідом: він допомагає адаптуватися та веде по процесу. "
+    "Після успішного завершення стажування відкривається доступ до першої виплати."
+)
+
+VOICE_TEXT_FALLBACK_BLOCK_2 = (
+    "Щодо оплати: дохід формується з відсотка від балансу анкети та активності в чаті.\n\n"
+    "У перший місяць базовий відсоток становить 48%, окремо враховуються реальні подарунки. "
+    "Є чітка тарифікація дій (чат, листи, фото, відео), тому дохід напряму залежить від "
+    "якості комунікації та регулярності роботи.\n\n"
+    "Також на платформі є вбудований перекладач, оскільки основна аудиторія — користувачі з Америки."
+)
+
 
 @dataclass
 class AnswerResult:
@@ -34,6 +52,42 @@ def load_faq_corpus() -> str:
             except OSError:
                 continue
     return "\n\n".join([c for c in chunks if c])
+
+
+def _compact_text_block(text: str) -> str:
+    lines = [line.strip() for line in (text or "").splitlines()]
+    compact = "\n".join([line for line in lines if line])
+    return compact.strip()
+
+
+def build_voice_text_recap_blocks() -> List[str]:
+    faq_text = ""
+    path = "faq-for-ai.txt"
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                faq_text = f.read()
+        except OSError:
+            faq_text = ""
+
+    marker = "Як складається баланс:"
+    if faq_text and marker in faq_text:
+        before, after = faq_text.split(marker, 1)
+        first = _compact_text_block(before)
+        second = _compact_text_block(f"{marker}\n{after}")
+        if first and second:
+            return [first, second]
+
+    if faq_text:
+        paragraphs = [p.strip() for p in faq_text.split("\n\n") if p.strip()]
+        if len(paragraphs) >= 2:
+            split_at = max(1, len(paragraphs) // 2)
+            first = _compact_text_block("\n\n".join(paragraphs[:split_at]))
+            second = _compact_text_block("\n\n".join(paragraphs[split_at:]))
+            if first and second:
+                return [first, second]
+
+    return [VOICE_TEXT_FALLBACK_BLOCK_1, VOICE_TEXT_FALLBACK_BLOCK_2]
 
 
 async def answer_from_faq(

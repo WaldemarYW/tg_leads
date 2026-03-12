@@ -107,6 +107,8 @@ SHORT_ACK_WORDS = {
     "так", "та", "yes", "yep", "нема", "нет", "неа", "зрозумів", "зрозуміла",
 }
 
+VOICE_TEXT_TRIGGER_STEPS = {"company_intro", "voice_wait"}
+
 
 def normalize_text(text: Optional[str]) -> str:
     raw = (text or "").strip().lower()
@@ -227,6 +229,42 @@ def is_short_neutral_ack(text: str) -> bool:
     if t in SHORT_ACK_WORDS:
         return True
     return all(part in SHORT_ACK_WORDS for part in parts)
+
+
+def is_text_instead_of_voice_request(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    if is_stop_phrase(text):
+        return False
+    trigger_phrases = (
+        "текстом",
+        "в тексті",
+        "в тексте",
+        "письмов",
+        "письменно",
+        "у письмовій формі",
+        "в письменной форме",
+        "краще текстом",
+        "лучше текстом",
+        "лучше в тексте",
+        "без голосового",
+        "без аудіо",
+        "без аудио",
+        "не зручно слухати",
+        "незручно слухати",
+        "неудобно слушать",
+        "не зручно слухать",
+        "не можу прослухати",
+        "не могу прослушать",
+    )
+    return any(phrase in t for phrase in trigger_phrases)
+
+
+def should_replace_voice_with_text(step_name: Optional[str], text: str) -> bool:
+    if (step_name or "").strip().lower() not in VOICE_TEXT_TRIGGER_STEPS:
+        return False
+    return is_text_instead_of_voice_request(text)
 
 
 def classify_local_intent(text: str, last_step: Optional[str] = None) -> Intent:

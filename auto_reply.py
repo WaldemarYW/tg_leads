@@ -55,6 +55,7 @@ from auto_reply_classifiers import (
     is_neutral_ack as is_neutral_ack_impl,
     is_short_neutral_ack,
     is_stop_phrase as is_stop_phrase_impl,
+    should_replace_voice_with_text,
     message_has_question as message_has_question_impl,
     should_send_question as should_send_question_impl,
     strip_question_trail as strip_question_trail_impl,
@@ -113,7 +114,12 @@ from flow_engine import (
     advance_flow as advance_flow_v2,
 )
 from intent_router import detect_intent as detect_intent_v2
-from faq_service import answer_from_faq, build_cluster_key, normalize_question
+from faq_service import (
+    answer_from_faq,
+    build_cluster_key,
+    build_voice_text_recap_blocks,
+    normalize_question,
+)
 from content_dispatcher import dispatch_content, validate_content_env
 from candidate_notes import append_candidate_answers
 from faq_learning import build_question_log
@@ -4041,6 +4047,25 @@ async def main():
                 enabled_peers.discard(sender.id)
                 clear_step_wait(state)
                 v2_runtime.set(state)
+            return True
+
+        if should_replace_voice_with_text(step_name, text):
+            recap_blocks = build_voice_text_recap_blocks()
+            for block in recap_blocks[:2]:
+                if not (block or "").strip():
+                    continue
+                await send_v2_message(
+                    sender,
+                    block,
+                    step_name,
+                    status="🎧 Голосове",
+                )
+            await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status="🕒 Графік")
+            state.flow_step = STEP_SCHEDULE_SHIFT_WAIT
+            state.shift_prompted_at = time.time()
+            state.schedule_shift_fit_check_pending = False
+            arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
+            v2_runtime.set(state)
             return True
 
         screening_q1_reply = step_name == STEP_SCREENING_WAIT and is_screening_q1_reply_text(text)

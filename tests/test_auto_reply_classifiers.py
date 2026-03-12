@@ -11,7 +11,9 @@ from auto_reply_classifiers import (
     is_neutral_ack,
     is_short_neutral_ack,
     is_stop_phrase,
+    is_text_instead_of_voice_request,
     message_has_question,
+    should_replace_voice_with_text,
 )
 
 
@@ -62,6 +64,19 @@ class ClassifierTests(unittest.TestCase):
 
         unknown_via_ai = asyncio.run(classify_format_choice("подумати", [], ai_client=ai_client))
         self.assertEqual(unknown_via_ai, "mini_course")
+
+    def test_text_instead_of_voice_request(self):
+        self.assertTrue(is_text_instead_of_voice_request("Краще в письмовій формі"))
+        self.assertTrue(is_text_instead_of_voice_request("Мені незручно слухати, напишіть текстом"))
+        self.assertTrue(is_text_instead_of_voice_request("лучше текстом, без аудио"))
+        self.assertFalse(is_text_instead_of_voice_request("мені не цікаво"))
+        self.assertFalse(is_text_instead_of_voice_request("не підходить"))
+
+    def test_should_replace_voice_with_text_step_guard(self):
+        self.assertTrue(should_replace_voice_with_text("company_intro", "краще текстом"))
+        self.assertTrue(should_replace_voice_with_text("voice_wait", "не зручно слухати"))
+        self.assertFalse(should_replace_voice_with_text("schedule_shift_wait", "краще текстом"))
+        self.assertFalse(should_replace_voice_with_text("voice_wait", "не цікаво"))
 
 
 if __name__ == "__main__":
