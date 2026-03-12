@@ -186,6 +186,7 @@ ALT_GROUP_START_DELAY_SEC = float(os.environ.get("ALT_GROUP_START_DELAY_SEC", "3
 ALT_STRICT_GROUP_ONLY = os.environ.get("ALT_STRICT_GROUP_ONLY", "1").strip().lower() in {"1", "true", "yes", "on"}
 ALT_OWNER_CHECK_WITH_SHEET = os.environ.get("ALT_OWNER_CHECK_WITH_SHEET", "1").strip().lower() in {"1", "true", "yes", "on"}
 GROUP_LEADS_UPSERT_LOCK = os.environ.get("GROUP_LEADS_UPSERT_LOCK", "/opt/tg_leads/.group_leads_upsert.lock")
+REGISTRATION_UPSERT_LOCK = os.environ.get("REGISTRATION_UPSERT_LOCK", "/opt/tg_leads/.registration_upsert.lock")
 
 TODAY_HEADERS = [
     "Имя",
@@ -2474,6 +2475,7 @@ class RegistrationSheet:
         self.gc = sheets_client(GOOGLE_CREDS)
         self.sh = self.gc.open(SHEET_NAME)
         self.ws = get_or_create_worksheet(self.sh, REGISTRATION_WORKSHEET, rows=1000, cols=len(REGISTRATION_HEADERS))
+        self.lock_path = REGISTRATION_UPSERT_LOCK
         self._ensure_headers_exact()
 
     def _ensure_headers_exact(self):
@@ -2503,25 +2505,54 @@ class RegistrationSheet:
             print(f"⚠️ Не вдалося оновити заголовки '{REGISTRATION_WORKSHEET}': {err}")
 
     def upsert(self, tz: ZoneInfo, data: dict):
-        self._ensure_headers_exact()
-        row = [
-            data.get("full_name", ""),
-            data.get("birth_date", ""),
-            data.get("phone", ""),
-            data.get("email", ""),
-            data.get("candidate_tg", ""),
-            data.get("schedule", ""),
-            data.get("start_date", ""),
-            data.get("city", ""),
-            data.get("admin_tg", ""),
-            data.get("document_drive_link", ""),
-            data.get("message_link", ""),
-            data.get("raw_text", ""),
-            data.get("source_group", ""),
-            str(data.get("source_message_id", "") or ""),
-            datetime.now(tz).isoformat(timespec="seconds"),
-        ]
-        self.ws.append_row(row, value_input_option="USER_ENTERED")
+        lock_acquired = False
+        for _ in range(30):
+            if acquire_lock(self.lock_path, ttl_sec=5):
+                lock_acquired = True
+                break
+            time.sleep(0.1)
+        try:
+            self._ensure_headers_exact()
+            row = [
+                data.get("full_name", ""),
+                data.get("birth_date", ""),
+                data.get("phone", ""),
+                data.get("email", ""),
+                data.get("candidate_tg", ""),
+                data.get("schedule", ""),
+                data.get("start_date", ""),
+                data.get("city", ""),
+                data.get("admin_tg", ""),
+                data.get("document_drive_link", ""),
+                data.get("message_link", ""),
+                data.get("raw_text", ""),
+                data.get("source_group", ""),
+                str(data.get("source_message_id", "") or ""),
+                datetime.now(tz).isoformat(timespec="seconds"),
+            ]
+
+            try:
+                values = self.ws.get_all_values()
+            except Exception:
+                values = [REGISTRATION_HEADERS[:]]
+
+            next_row = 2
+            for idx, existing in enumerate(values[1:], start=2):
+                row_cells = existing[: len(REGISTRATION_HEADERS)]
+                if all(not (cell or "").strip() for cell in row_cells):
+                    next_row = idx
+                    break
+                next_row = idx + 1
+
+            end_col = col_letter(len(REGISTRATION_HEADERS))
+            self.ws.update(
+                range_name=f"A{next_row}:{end_col}{next_row}",
+                values=[row],
+                value_input_option="USER_ENTERED",
+            )
+        finally:
+            if lock_acquired:
+                release_lock(self.lock_path)
 
 
 class FAQQuestionsSheet:
