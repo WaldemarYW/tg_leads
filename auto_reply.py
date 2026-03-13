@@ -1343,6 +1343,30 @@ def get_step_fallback_text(step_name: str, stage: int) -> str:
     return ""
 
 
+def v2_wait_followup_abort_reason(
+    state: Optional[PeerRuntimeState],
+    expected_step: str,
+    latest_incoming_ts: float = 0.0,
+    rewrite_started_at: float = 0.0,
+    paused_in_sheet: bool = False,
+) -> Optional[str]:
+    if state is None:
+        return "state_missing"
+    if paused_in_sheet:
+        return "paused_sheet"
+    if bool(state.paused):
+        return "paused_runtime"
+    current_step = (state.flow_step or "").strip()
+    expected_step = (expected_step or "").strip()
+    if current_step != expected_step:
+        return "step_changed"
+    if current_step not in WAIT_STEP_SET:
+        return "not_wait_step"
+    if rewrite_started_at > 0 and latest_incoming_ts > rewrite_started_at:
+        return "new_incoming"
+    return None
+
+
 class CrossAccountOwnerStore:
     def __init__(self, path: str):
         self.path = path
@@ -5861,6 +5885,7 @@ async def main():
                         if not is_clarify_stage and not can_send_global_fallback(now, tz):
                             print(f"FALLBACK_DAILY_LIMIT_HIT peer={peer_id} step={current_step}")
                             continue
+                        rewrite_started_at = time.time()
                         final_text = await rewrite_wait_followup_with_ai(
                             client,
                             entity,
@@ -5868,6 +5893,19 @@ async def main():
                             stage,
                             send_text,
                         )
+                        latest_state = v2_runtime.get(peer_id)
+                        latest_in_ts = float(last_incoming_at.get(peer_id, 0.0) or 0.0)
+                        paused_now = is_paused(entity)
+                        abort_reason = v2_wait_followup_abort_reason(
+                            latest_state,
+                            current_step,
+                            latest_incoming_ts=latest_in_ts,
+                            rewrite_started_at=rewrite_started_at,
+                            paused_in_sheet=paused_now,
+                        )
+                        if abort_reason:
+                            print(f"STEP_WAIT_ABORTED peer={peer_id} step={current_step} reason={abort_reason}")
+                            continue
                         await send_v2_message(entity, final_text, current_step, status=status_for_text(final_text) or "знак питання")
                         sent_at = time.time()
                         if not is_clarify_stage:
