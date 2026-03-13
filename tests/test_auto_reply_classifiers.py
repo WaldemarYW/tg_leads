@@ -7,6 +7,7 @@ from auto_reply_classifiers import (
     classify_format_choice,
     classify_intent,
     classify_stop_continue,
+    is_balance_interest_question,
     is_continue_phrase,
     is_neutral_ack,
     is_short_neutral_ack,
@@ -77,6 +78,13 @@ class ClassifierTests(unittest.TestCase):
         self.assertTrue(should_replace_voice_with_text("voice_wait", "не зручно слухати"))
         self.assertFalse(should_replace_voice_with_text("schedule_shift_wait", "краще текстом"))
         self.assertFalse(should_replace_voice_with_text("voice_wait", "не цікаво"))
+
+    def test_balance_interest_question(self):
+        self.assertTrue(is_balance_interest_question("Підкажіть, будь ласка, яка зарплата?"))
+        self.assertTrue(is_balance_interest_question("А як формується баланс?"))
+        self.assertTrue(is_balance_interest_question("Скільки платять за зміну?"))
+        self.assertFalse(is_balance_interest_question("Зарплата нормальна"))
+        self.assertFalse(is_balance_interest_question("Підкажіть, будь ласка, який графік?"))
 
 
 if __name__ == "__main__":

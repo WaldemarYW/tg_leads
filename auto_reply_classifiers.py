@@ -99,6 +99,26 @@ CONTINUE_PHRASES = [
 VIDEO_WORDS = ("відео", "видео")
 FORMAT_VIDEO_WORDS = ("відео", "видео", "video")
 FORMAT_MINI_COURSE_WORDS = ("мінікурс", "миникурс", "mini-course", "mini course", "курс", "тренажер", "сайт")
+BALANCE_INTEREST_WORDS = (
+    "баланс",
+    "зарплат",
+    "оплат",
+    "виплат",
+    "выплат",
+    "дохід",
+    "доход",
+    "відсот",
+    "процент",
+    "скільки плат",
+    "сколько плат",
+    "скільки можна зароб",
+    "сколько можно заработ",
+    "гроші",
+    "деньг",
+    "money",
+    "salary",
+    "pay",
+)
 QUESTION_HINT_RE = re.compile(
     r"\b(коли|де|як|який|яка|які|що|чи|скільки|когда|где|как|какой|какая|какие|что|сколько|почему|зачем|можно|можна|підкажи|подскажи|интересует|цікавить|хочу знати|хочу узнать|розкажи|расскажи)\b"
 )
@@ -320,6 +340,15 @@ def fallback_format_choice(text: str) -> str:
 def wants_video(text: str) -> bool:
     t = normalize_text(text)
     return any(word in t for word in VIDEO_WORDS)
+
+
+def is_balance_interest_question(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    if not message_has_question(text):
+        return False
+    return any(word in t for word in BALANCE_INTEREST_WORDS)
 
 
 async def classify_stop_continue(

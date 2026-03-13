@@ -54,6 +54,7 @@ from auto_reply_classifiers import (
     is_continue_phrase as is_continue_phrase_impl,
     is_neutral_ack as is_neutral_ack_impl,
     is_short_neutral_ack,
+    is_balance_interest_question,
     is_stop_phrase as is_stop_phrase_impl,
     should_replace_voice_with_text,
     message_has_question as message_has_question_impl,
@@ -95,6 +96,10 @@ from registration_ingest import (
 )
 from sheets_queue import SheetsQueueStore, calculate_backoff_sec
 from flow_engine import (
+    BALANCE_CHECKPOINT_AFTER_COMPANY_INTRO_OFFER_VOICE,
+    BALANCE_CHECKPOINT_AFTER_SCHEDULE_CONFIRM_QUESTION,
+    BALANCE_CHECKPOINT_AFTER_SCHEDULE_SHIFT_PROMPT,
+    BALANCE_CHECKPOINT_AFTER_VOICE_WAIT,
     PeerRuntimeState,
     STEP_AGE_REJECTED,
     STEP_BALANCE_CONFIRM,
@@ -112,6 +117,9 @@ from flow_engine import (
     VOICE_FALLBACK_SENT,
     VOICE_SENT,
     advance_flow as advance_flow_v2,
+    balance_detour_checkpoint,
+    balance_resume_message,
+    balance_resume_step,
 )
 from intent_router import detect_intent as detect_intent_v2
 from faq_service import (
@@ -310,6 +318,18 @@ WAIT_STEP_SET = {
     STEP_SCHEDULE_CONFIRM,
     STEP_BALANCE_CONFIRM,
     STEP_TEST_REVIEW,
+}
+BALANCE_DETOUR_ALLOWED_STEPS = {
+    STEP_COMPANY_INTRO,
+    STEP_VOICE_WAIT,
+    STEP_SCHEDULE_SHIFT_WAIT,
+    STEP_SCHEDULE_CONFIRM,
+}
+BALANCE_RESUME_CHECKPOINTS = {
+    BALANCE_CHECKPOINT_AFTER_COMPANY_INTRO_OFFER_VOICE,
+    BALANCE_CHECKPOINT_AFTER_VOICE_WAIT,
+    BALANCE_CHECKPOINT_AFTER_SCHEDULE_SHIFT_PROMPT,
+    BALANCE_CHECKPOINT_AFTER_SCHEDULE_CONFIRM_QUESTION,
 }
 STEP_CLARIFY_TEXTS = {
     STEP_SCREENING_WAIT: "Підкажіть, будь ласка, чи актуальна для Вас вакансія. Якщо так, надішліть 2 короткі відповіді: досвід у дейтингу та Ваш вік.",
@@ -3810,6 +3830,88 @@ async def main():
         )
         return bool(ok)
 
+    async def send_test_task_content(sender: User, state: PeerRuntimeState) -> bool:
+        if not TEST_TASK_MESSAGE_LINK:
+            await send_v2_message(
+                sender,
+                "Контент для наступного етапу тимчасово недоступний. Зараз уточню і повернусь до вас.",
+                STEP_PROOF_FORWARD,
+            )
+            return False
+        if BOT_REPLY_DELAY_SEC > 0:
+            await asyncio.sleep(BOT_REPLY_DELAY_SEC)
+        ok = await dispatch_v2_content(sender, TEST_TASK_MESSAGE_LINK, STEP_PROOF_FORWARD, "🎥 Більше інформації")
+        if not ok:
+            await send_v2_message(
+                sender,
+                "Не вдалося надіслати матеріал тестового завдання. Повторю трохи пізніше.",
+                STEP_PROOF_FORWARD,
+            )
+            return False
+        state.flow_step = STEP_TEST_REVIEW
+        state.balance_confirm_clarify_count = 0
+        state.test_answers = []
+        state.test_prompted_at = time.time()
+        state.test_help_sent = False
+        state.test_message_count = 0
+        state.test_last_message = ""
+        state.test_ready_clarify_count = 0
+        arm_step_wait(state, STEP_TEST_REVIEW, time.time())
+        return True
+
+    async def start_balance_detour(sender: User, state: PeerRuntimeState, source_step: str) -> bool:
+        checkpoint = balance_detour_checkpoint(source_step)
+        if not checkpoint or checkpoint not in BALANCE_RESUME_CHECKPOINTS:
+            return False
+        balance_links = [PHOTO_1_MESSAGE_LINK, PHOTO_2_MESSAGE_LINK]
+        missing = [link for link in balance_links if not link]
+        if missing:
+            await send_v2_message(
+                sender,
+                "Контент для блоку балансів тимчасово недоступний. Зараз уточню і повернусь до вас.",
+                STEP_PROOF_FORWARD,
+            )
+            return False
+        if BOT_REPLY_DELAY_SEC > 0:
+            await asyncio.sleep(BOT_REPLY_DELAY_SEC)
+        for idx, link in enumerate(balance_links):
+            ok = await dispatch_v2_content(sender, link, STEP_PROOF_FORWARD, "🎥 Більше інформації")
+            if not ok:
+                await send_v2_message(
+                    sender,
+                    "Не вдалося надіслати один із матеріалів. Повторю трохи пізніше.",
+                    STEP_PROOF_FORWARD,
+                )
+                return False
+            if BOT_REPLY_DELAY_SEC > 0 and idx < (len(balance_links) - 1):
+                await asyncio.sleep(BOT_REPLY_DELAY_SEC)
+        await send_v2_message(sender, BALANCE_CONFIRM_TEXT, STEP_BALANCE_CONFIRM, status="💰 Баланси")
+        state.resume_step_after_balance = balance_resume_step(checkpoint)
+        state.resume_checkpoint_after_balance = checkpoint
+        state.flow_step = STEP_BALANCE_CONFIRM
+        state.balance_block_shown = True
+        state.balance_block_skipped = False
+        state.balance_confirm_clarify_count = 0
+        state.qa_gate_active = False
+        state.qa_gate_step = ""
+        state.qa_gate_opened_at = 0.0
+        state.qa_gate_reminder_sent = False
+        arm_step_wait(state, STEP_BALANCE_CONFIRM, time.time())
+        return True
+
+    async def resume_after_balance(sender: User, state: PeerRuntimeState) -> bool:
+        checkpoint = (state.resume_checkpoint_after_balance or "").strip()
+        resume_step_name = balance_resume_step(checkpoint)
+        resume_text = balance_resume_message(checkpoint)
+        if not checkpoint or not resume_step_name or not resume_text:
+            return False
+        await send_v2_message(sender, resume_text, resume_step_name, status=status_for_text(resume_text) or "знак питання")
+        state.flow_step = resume_step_name
+        state.resume_step_after_balance = ""
+        state.resume_checkpoint_after_balance = ""
+        arm_step_wait(state, resume_step_name, time.time())
+        return True
+
     def is_peer_owned_by_primary(peer_id: int) -> bool:
         owner = owner_store.get_owner(peer_id)
         if owner in PRIMARY_OWNER_KEYS:
@@ -4067,6 +4169,7 @@ async def main():
         voice_decline = step_name == STEP_COMPANY_INTRO and is_voice_decline(text)
         shift_selected = bool((state.shift_choice or "").strip())
         voice_not_listened = step_name == STEP_VOICE_WAIT and is_voice_not_listened_reply(text)
+        balance_interest_question = intent_name == "question" and is_balance_interest_question(text)
 
         if state.rejected_by_age in {"under18", "over40"}:
             if not state.referral_after_reject_sent:
@@ -4144,6 +4247,16 @@ async def main():
             arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
             v2_runtime.set(state)
             return True
+
+        if (
+            balance_interest_question
+            and step_name in BALANCE_DETOUR_ALLOWED_STEPS
+            and not state.balance_block_shown
+            and not state.balance_block_skipped
+        ):
+            if await start_balance_detour(sender, state, step_name):
+                v2_runtime.set(state)
+                return True
 
         if state.qa_gate_active:
             if (state.qa_gate_step or step_name) == STEP_SCHEDULE_SHIFT_WAIT and intent_name == "question":
@@ -4463,24 +4576,13 @@ async def main():
                 arm_step_wait(state, STEP_SCHEDULE_CONFIRM, time.time())
                 v2_runtime.set(state)
                 return True
-            balance_links = [PHOTO_1_MESSAGE_LINK, PHOTO_2_MESSAGE_LINK]
-            missing = [l for l in balance_links if not l]
-            if missing:
-                await send_v2_message(sender, "Контент для блоку балансів тимчасово недоступний. Зараз уточню і повернусь до вас.", STEP_PROOF_FORWARD)
-                return True
-            if BOT_REPLY_DELAY_SEC > 0:
-                await asyncio.sleep(BOT_REPLY_DELAY_SEC)
-            for link in balance_links:
-                ok = await dispatch_v2_content(sender, link, STEP_PROOF_FORWARD, "🎥 Більше інформації")
-                if not ok:
-                    await send_v2_message(sender, "Не вдалося надіслати один із матеріалів. Повторю трохи пізніше.", STEP_PROOF_FORWARD)
-                    return True
-                await asyncio.sleep(BOT_REPLY_DELAY_SEC)
-            await send_v2_message(sender, BALANCE_CONFIRM_TEXT, STEP_BALANCE_CONFIRM, status="💰 Баланси")
-            state.flow_step = STEP_BALANCE_CONFIRM
             state.schedule_confirm_clarify_count = 0
-            state.balance_confirm_clarify_count = 0
-            arm_step_wait(state, STEP_BALANCE_CONFIRM, time.time())
+            if not state.balance_block_shown:
+                state.balance_block_skipped = True
+            sent_test_task = await send_test_task_content(sender, state)
+            if not sent_test_task:
+                v2_runtime.set(state)
+                return True
             v2_runtime.set(state)
             return True
 
@@ -4489,24 +4591,14 @@ async def main():
                 arm_step_wait(state, STEP_BALANCE_CONFIRM, time.time())
                 v2_runtime.set(state)
                 return True
-            if not TEST_TASK_MESSAGE_LINK:
-                await send_v2_message(sender, "Контент для наступного етапу тимчасово недоступний. Зараз уточню і повернусь до вас.", STEP_PROOF_FORWARD)
+            resumed = await resume_after_balance(sender, state)
+            if resumed:
+                v2_runtime.set(state)
                 return True
-            if BOT_REPLY_DELAY_SEC > 0:
-                await asyncio.sleep(BOT_REPLY_DELAY_SEC)
-            ok = await dispatch_v2_content(sender, TEST_TASK_MESSAGE_LINK, STEP_PROOF_FORWARD, "🎥 Більше інформації")
-            if not ok:
-                await send_v2_message(sender, "Не вдалося надіслати матеріал тестового завдання. Повторю трохи пізніше.", STEP_PROOF_FORWARD)
+            sent_test_task = await send_test_task_content(sender, state)
+            if not sent_test_task:
+                v2_runtime.set(state)
                 return True
-            state.flow_step = STEP_TEST_REVIEW
-            state.balance_confirm_clarify_count = 0
-            state.test_answers = []
-            state.test_prompted_at = time.time()
-            state.test_help_sent = False
-            state.test_message_count = 0
-            state.test_last_message = ""
-            state.test_ready_clarify_count = 0
-            arm_step_wait(state, STEP_TEST_REVIEW, time.time())
             v2_runtime.set(state)
             return True
 

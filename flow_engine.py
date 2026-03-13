@@ -20,10 +20,40 @@ STEP_TEST_REVIEW = "test_review"
 STEP_FORM_FORWARD = "form_forward"
 STEP_HANDOFF = "handoff"
 
+BALANCE_CHECKPOINT_AFTER_COMPANY_INTRO_OFFER_VOICE = "after_company_intro_offer_voice"
+BALANCE_CHECKPOINT_AFTER_VOICE_WAIT = "after_voice_wait"
+BALANCE_CHECKPOINT_AFTER_SCHEDULE_SHIFT_PROMPT = "after_schedule_shift_prompt"
+BALANCE_CHECKPOINT_AFTER_SCHEDULE_CONFIRM_QUESTION = "after_schedule_confirm_question"
+
 VOICE_IDLE = "idle"
 VOICE_SENT = "sent"
 VOICE_FALLBACK_SENT = "fallback_sent"
 VOICE_AUTO_ADVANCED = "auto_advanced"
+
+BALANCE_DETOUR_CHECKPOINT_BY_STEP = {
+    STEP_COMPANY_INTRO: BALANCE_CHECKPOINT_AFTER_COMPANY_INTRO_OFFER_VOICE,
+    STEP_VOICE_WAIT: BALANCE_CHECKPOINT_AFTER_VOICE_WAIT,
+    STEP_SCHEDULE_SHIFT_WAIT: BALANCE_CHECKPOINT_AFTER_SCHEDULE_SHIFT_PROMPT,
+    STEP_SCHEDULE_CONFIRM: BALANCE_CHECKPOINT_AFTER_SCHEDULE_CONFIRM_QUESTION,
+}
+
+BALANCE_RESUME_STEP_BY_CHECKPOINT = {
+    BALANCE_CHECKPOINT_AFTER_COMPANY_INTRO_OFFER_VOICE: STEP_COMPANY_INTRO,
+    BALANCE_CHECKPOINT_AFTER_VOICE_WAIT: STEP_VOICE_WAIT,
+    BALANCE_CHECKPOINT_AFTER_SCHEDULE_SHIFT_PROMPT: STEP_SCHEDULE_SHIFT_WAIT,
+    BALANCE_CHECKPOINT_AFTER_SCHEDULE_CONFIRM_QUESTION: STEP_SCHEDULE_CONFIRM,
+}
+
+BALANCE_RESUME_MESSAGE_BY_CHECKPOINT = {
+    BALANCE_CHECKPOINT_AFTER_COMPANY_INTRO_OFFER_VOICE:
+        "Щодо оплати коротко пояснив. Вам буде зручно прослухати голосове, щоб я детальніше розповів умови роботи?",
+    BALANCE_CHECKPOINT_AFTER_VOICE_WAIT:
+        "Щодо оплати пояснив. Чи вдалося Вам прослухати голосове? Якщо так, перейдемо далі до графіка.",
+    BALANCE_CHECKPOINT_AFTER_SCHEDULE_SHIFT_PROMPT:
+        "Щодо оплати пояснив. Підкажіть, будь ласка, яку зміну Вам зручніше обрати: денну чи нічну?",
+    BALANCE_CHECKPOINT_AFTER_SCHEDULE_CONFIRM_QUESTION:
+        "Щодо оплати пояснив. Чи зрозуміло тепер, як відбувається робочий процес? Якщо ні, уточню коротко по пунктах.",
+}
 
 
 @dataclass
@@ -66,6 +96,10 @@ class PeerRuntimeState:
     step_wait_step: str = ""
     step_followup_stage: int = 0
     step_followup_last_at: float = 0.0
+    resume_step_after_balance: str = ""
+    resume_checkpoint_after_balance: str = ""
+    balance_block_shown: bool = False
+    balance_block_skipped: bool = False
 
 
 @dataclass
@@ -76,6 +110,18 @@ class FlowActions:
     set_state: Dict[str, object] = field(default_factory=dict)
     timers: List[Dict[str, object]] = field(default_factory=list)
     await_confirmation: bool = False
+
+
+def balance_detour_checkpoint(step_name: str) -> str:
+    return BALANCE_DETOUR_CHECKPOINT_BY_STEP.get((step_name or "").strip(), "")
+
+
+def balance_resume_step(checkpoint: str) -> str:
+    return BALANCE_RESUME_STEP_BY_CHECKPOINT.get((checkpoint or "").strip(), "")
+
+
+def balance_resume_message(checkpoint: str) -> str:
+    return BALANCE_RESUME_MESSAGE_BY_CHECKPOINT.get((checkpoint or "").strip(), "")
 
 
 def advance_flow(peer_state: PeerRuntimeState, intent: str, context: Optional[Dict[str, object]] = None) -> FlowActions:
@@ -116,11 +162,14 @@ def advance_flow(peer_state: PeerRuntimeState, intent: str, context: Optional[Di
 
     if step == STEP_SCHEDULE_CONFIRM:
         if intent == "ack_continue":
-            return FlowActions(route="balance_confirm", set_state={"flow_step": STEP_BALANCE_CONFIRM})
+            return FlowActions(route="proof_forward", set_state={"flow_step": STEP_PROOF_FORWARD})
         return FlowActions(route="schedule_confirm")
 
     if step == STEP_BALANCE_CONFIRM:
         if intent == "ack_continue":
+            resume_step_name = balance_resume_step(peer_state.resume_checkpoint_after_balance)
+            if resume_step_name:
+                return FlowActions(route="resume_after_balance", set_state={"flow_step": resume_step_name})
             return FlowActions(route="proof_forward", set_state={"flow_step": STEP_PROOF_FORWARD})
         return FlowActions(route="balance_confirm")
 
