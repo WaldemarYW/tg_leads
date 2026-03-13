@@ -256,6 +256,9 @@ SHEETS_QUEUE_PATH = os.environ.get("AUTO_REPLY_SHEETS_QUEUE_PATH", "/opt/tg_lead
 SHEETS_QUEUE_FLUSH_SEC = float(os.environ.get("AUTO_REPLY_SHEETS_QUEUE_FLUSH_SEC", "1"))
 SHEETS_QUEUE_BATCH_SIZE = int(os.environ.get("AUTO_REPLY_SHEETS_QUEUE_BATCH_SIZE", "20"))
 SHEETS_QUEUE_LOG_SEC = int(os.environ.get("AUTO_REPLY_SHEETS_QUEUE_LOG_SEC", "30"))
+SHEETS_QUEUE_STALL_SEC = float(
+    os.environ.get("AUTO_REPLY_SHEETS_QUEUE_STALL_SEC", str(max(60, SHEETS_QUEUE_LOG_SEC * 2)))
+)
 TODAY_UPSERT_DEBOUNCE_SEC = float(os.environ.get("TODAY_UPSERT_DEBOUNCE_SEC", "3.0"))
 GROUP_LEADS_LOOKUP_CACHE_TTL_SEC = int(os.environ.get("GROUP_LEADS_LOOKUP_CACHE_TTL_SEC", "60"))
 CONTINUE_DELAY_SEC = float(os.environ.get("AUTO_REPLY_CONTINUE_DELAY_SEC", "0"))
@@ -3362,9 +3365,18 @@ async def main():
     sheets_queue = None
     try:
         sheets_queue = SheetsQueueStore(SHEETS_QUEUE_PATH)
+        initial_stats = sheets_queue.stats()
+        print(
+            f"SHEETS_QUEUE_INIT_OK pid={os.getpid()} path={SHEETS_QUEUE_PATH} "
+            f"pending={int(initial_stats.get('pending') or 0)} "
+            f"ready_pending={int(initial_stats.get('ready_pending') or 0)}"
+        )
     except Exception as err:
         print(f"⚠️ SHEETS_QUEUE_INIT_FAIL path={SHEETS_QUEUE_PATH}: {type(err).__name__}: {err}")
     last_queue_log_at = 0.0
+    last_queue_progress_at = time.time()
+    last_queue_heartbeat_at = time.time()
+    last_queue_stall_log_at = 0.0
     pending_registration_tasks = {}
     stop_event = asyncio.Event()
 
@@ -5144,37 +5156,56 @@ async def main():
         return None
 
     async def sheet_flush_loop():
-        nonlocal last_queue_log_at
+        nonlocal last_queue_log_at, last_queue_progress_at, last_queue_heartbeat_at
         if not sheets_queue:
             return
+        print(
+            f"SHEETS_QUEUE_TASK_START pid={os.getpid()} path={SHEETS_QUEUE_PATH} "
+            f"flush_sec={SHEETS_QUEUE_FLUSH_SEC} batch_size={SHEETS_QUEUE_BATCH_SIZE}"
+        )
         while not stop_event.is_set():
             try:
                 now_ts = time.time()
+                last_queue_heartbeat_at = now_ts
                 batch = sheets_queue.fetch_batch(SHEETS_QUEUE_BATCH_SIZE, now_ts)
+                if batch:
+                    last_queue_progress_at = now_ts
                 for event in batch:
                     attempts = int(event.attempts) + 1
                     try:
                         await apply_sheet_event(event)
                         sheets_queue.mark_done(event.id)
+                        last_queue_progress_at = time.time()
+                        last_queue_heartbeat_at = last_queue_progress_at
                         print(f"SHEETS_QUEUE_FLUSH ok id={event.id} type={event.event_type} attempts={attempts}")
                     except Exception as err:
                         status_code = extract_status_code(err)
                         hard_error = status_code is not None and (400 <= status_code < 500) and status_code != 429
                         backoff = calculate_backoff_sec(attempts, hard_error=hard_error)
                         sheets_queue.mark_retry(event.id, attempts, backoff, f"{type(err).__name__}: {err}")
+                        last_queue_progress_at = time.time()
+                        last_queue_heartbeat_at = last_queue_progress_at
                         print(
                             f"SHEETS_QUEUE_FLUSH fail id={event.id} type={event.event_type} attempts={attempts} "
                             f"backoff={backoff:.1f}s err={type(err).__name__}: {err}"
                         )
                 if (now_ts - last_queue_log_at) >= max(5, SHEETS_QUEUE_LOG_SEC):
-                    stats = sheets_queue.stats()
+                    stats = sheets_queue.stats(now_ts=now_ts)
                     pending = int(stats.get("pending") or 0)
+                    ready_pending = int(stats.get("ready_pending") or 0)
                     oldest = stats.get("oldest_age_sec")
+                    next_ready = stats.get("next_ready_in_sec")
                     oldest_fmt = f"{oldest:.1f}" if isinstance(oldest, (int, float)) else "0"
-                    print(f"SHEETS_QUEUE_BACKLOG pending={pending} oldest_sec={oldest_fmt}")
+                    next_ready_fmt = f"{next_ready:.1f}" if isinstance(next_ready, (int, float)) else "0"
+                    print(
+                        f"SHEETS_QUEUE_BACKLOG pid={os.getpid()} path={SHEETS_QUEUE_PATH} "
+                        f"pending={pending} ready_pending={ready_pending} "
+                        f"oldest_sec={oldest_fmt} next_ready_in_sec={next_ready_fmt}"
+                    )
                     last_queue_log_at = now_ts
             except Exception as err:
-                print(f"⚠️ SHEETS_QUEUE_LOOP_ERROR: {type(err).__name__}: {err}")
+                last_queue_heartbeat_at = time.time()
+                print(f"⚠️ SHEETS_QUEUE_LOOP_ERROR pid={os.getpid()} path={SHEETS_QUEUE_PATH}: {type(err).__name__}: {err}")
             await asyncio.sleep(max(0.2, SHEETS_QUEUE_FLUSH_SEC))
 
     async def is_first_lead_message_in_dialog(entity: User, current_msg_id: int) -> bool:
@@ -5941,6 +5972,49 @@ async def main():
             sheets_task = asyncio.create_task(sheet_flush_loop())
         followup_task = asyncio.create_task(followup_loop())
         while not stop_event.is_set():
+            if sheets_queue and (sheets_task is None or sheets_task.done()):
+                if sheets_task is not None:
+                    try:
+                        sheets_task.result()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as err:
+                        print(
+                            f"⚠️ SHEETS_QUEUE_TASK_DIED pid={os.getpid()} path={SHEETS_QUEUE_PATH}: "
+                            f"{type(err).__name__}: {err}"
+                        )
+                    else:
+                        print(f"⚠️ SHEETS_QUEUE_TASK_DIED pid={os.getpid()} path={SHEETS_QUEUE_PATH}: task exited")
+                sheets_task = asyncio.create_task(sheet_flush_loop())
+                last_queue_heartbeat_at = time.time()
+                last_queue_progress_at = last_queue_heartbeat_at
+                print(f"✅ SHEETS_QUEUE_TASK_RESTART pid={os.getpid()} path={SHEETS_QUEUE_PATH}")
+            if sheets_queue:
+                now_ts = time.time()
+                if (now_ts - last_queue_stall_log_at) >= max(10.0, min(SHEETS_QUEUE_STALL_SEC, float(SHEETS_QUEUE_LOG_SEC))):
+                    try:
+                        stats = sheets_queue.stats(now_ts=now_ts)
+                        pending = int(stats.get("pending") or 0)
+                        ready_pending = int(stats.get("ready_pending") or 0)
+                        oldest = stats.get("oldest_age_sec")
+                        next_ready = stats.get("next_ready_in_sec")
+                        idle_sec = now_ts - last_queue_progress_at
+                        heartbeat_age_sec = now_ts - last_queue_heartbeat_at
+                        if pending > 0 and ready_pending > 0 and idle_sec >= SHEETS_QUEUE_STALL_SEC:
+                            oldest_fmt = f"{oldest:.1f}" if isinstance(oldest, (int, float)) else "0"
+                            next_ready_fmt = f"{next_ready:.1f}" if isinstance(next_ready, (int, float)) else "0"
+                            print(
+                                f"⚠️ SHEETS_QUEUE_STALLED pid={os.getpid()} path={SHEETS_QUEUE_PATH} "
+                                f"pending={pending} ready_pending={ready_pending} "
+                                f"idle_sec={idle_sec:.1f} heartbeat_age_sec={heartbeat_age_sec:.1f} "
+                                f"oldest_sec={oldest_fmt} next_ready_in_sec={next_ready_fmt}"
+                            )
+                            last_queue_stall_log_at = now_ts
+                    except Exception as err:
+                        print(
+                            f"⚠️ SHEETS_QUEUE_STALL_CHECK_FAIL pid={os.getpid()} path={SHEETS_QUEUE_PATH}: "
+                            f"{type(err).__name__}: {err}"
+                        )
             await asyncio.sleep(0.5)
     finally:
         try:

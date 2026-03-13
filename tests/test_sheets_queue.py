@@ -42,7 +42,19 @@ class SheetsQueueTests(unittest.TestCase):
         self.store.enqueue("today_upsert", {"peer_id": 1})
         stats = self.store.stats()
         self.assertEqual(stats["pending"], 1)
+        self.assertEqual(stats["ready_pending"], 1)
         self.assertIsNotNone(stats["oldest_age_sec"])
+        self.assertEqual(stats["next_ready_in_sec"], 0.0)
+
+    def test_stats_respect_backoff_window(self):
+        event_id = self.store.enqueue("today_upsert", {"peer_id": 2})
+        first = self.store.fetch_batch(limit=10)[0]
+        self.store.mark_retry(event_id, attempts=1, backoff_sec=10, error="429")
+        stats = self.store.stats(now_ts=first.created_at + 1)
+        self.assertEqual(stats["pending"], 1)
+        self.assertEqual(stats["ready_pending"], 0)
+        self.assertIsNotNone(stats["next_ready_in_sec"])
+        self.assertGreater(stats["next_ready_in_sec"], 0.0)
 
     def test_backoff_bounds(self):
         for attempts in (1, 2, 3, 5, 8, 20):

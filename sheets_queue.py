@@ -119,19 +119,34 @@ class SheetsQueueStore:
                 )
                 conn.commit()
 
-    def stats(self) -> Dict[str, Optional[float]]:
+    def stats(self, now_ts: Optional[float] = None) -> Dict[str, Optional[float]]:
+        now_ts = now_ts if now_ts is not None else time.time()
         with self._lock:
             with self._connect() as conn:
                 row = conn.execute(
                     """
-                    SELECT COUNT(*) AS cnt, MIN(created_at) AS oldest
+                    SELECT
+                        COUNT(*) AS cnt,
+                        MIN(created_at) AS oldest,
+                        SUM(CASE WHEN next_attempt_at <= ? THEN 1 ELSE 0 END) AS ready_cnt,
+                        MIN(next_attempt_at) AS next_ready_at
                     FROM sheet_events
                     """
+                    ,
+                    (now_ts,),
                 ).fetchone()
         pending = int(row["cnt"] or 0)
         oldest = float(row["oldest"]) if row["oldest"] is not None else None
         oldest_age_sec = (time.time() - oldest) if oldest is not None else None
-        return {"pending": pending, "oldest_age_sec": oldest_age_sec}
+        ready_pending = int(row["ready_cnt"] or 0)
+        next_ready_at = float(row["next_ready_at"]) if row["next_ready_at"] is not None else None
+        next_ready_in_sec = max(0.0, next_ready_at - now_ts) if next_ready_at is not None else None
+        return {
+            "pending": pending,
+            "ready_pending": ready_pending,
+            "oldest_age_sec": oldest_age_sec,
+            "next_ready_in_sec": next_ready_in_sec,
+        }
 
 
 def calculate_backoff_sec(attempts: int, hard_error: bool = False) -> float:
