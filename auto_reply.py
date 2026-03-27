@@ -525,6 +525,32 @@ TEMPLATE_TO_STEP = {
     normalize_text(FORM_TEXT): STEP_FORM,
 }
 
+MANUAL_V2_STEP_ORDER = {
+    STEP_SCREENING_WAIT: 10,
+    STEP_COMPANY_INTRO: 20,
+    STEP_VOICE_WAIT: 30,
+    STEP_SCHEDULE_SHIFT_WAIT: 40,
+    STEP_SCHEDULE_CONFIRM: 50,
+    STEP_BALANCE_CONFIRM: 60,
+    STEP_FORM_FORWARD: 70,
+    STEP_HANDOFF: 80,
+}
+
+MANUAL_V2_TEMPLATE_TO_STEP = {
+    normalize_text(SCREENING_INTRO_TEXT): STEP_SCREENING_WAIT,
+    normalize_text(COMPANY_INTRO_TEXT): STEP_COMPANY_INTRO,
+    normalize_text(COMPANY_INTRO_TIMEOUT_TEXT): STEP_COMPANY_INTRO,
+    normalize_text(SCHEDULE_SHIFT_TEXT): STEP_SCHEDULE_SHIFT_WAIT,
+    normalize_text(SCHEDULE_DETAILS_TEXT): STEP_SCHEDULE_CONFIRM,
+    normalize_text(SCHEDULE_CONFIRM_TEXT): STEP_SCHEDULE_CONFIRM,
+    normalize_text(EARNINGS_EXPLAINER_TEXT_1): STEP_BALANCE_CONFIRM,
+    normalize_text(EARNINGS_EXPLAINER_TEXT_2): STEP_BALANCE_CONFIRM,
+    normalize_text(EARNINGS_EXPLAINER_TEXT_3): STEP_BALANCE_CONFIRM,
+    normalize_text(BALANCE_CONFIRM_TEXT): STEP_BALANCE_CONFIRM,
+    normalize_text(FORM_TEXT): STEP_FORM_FORWARD,
+    normalize_text(FORM_LOCK_REPLY_TEXT): STEP_FORM_FORWARD,
+}
+
 LEGACY_SHEET_NAMES = {"StatusRules", "Excluded", "Paused", "Leads"}
 LEGACY_DAY_SHEET_RE = re.compile(r"^\d{2}\.\d{2}\.\d{2}(\d{2})?$")
 RU_MONTHS = {
@@ -2955,6 +2981,51 @@ def detect_step_from_text(message_text: str) -> Optional[str]:
     return best_step
 
 
+def detect_manual_v2_step_from_text(message_text: str) -> Optional[str]:
+    msg_norm = normalize_text(message_text)
+    if not msg_norm:
+        return None
+    best_step = None
+    best_order = -1
+    for tmpl_norm, step in MANUAL_V2_TEMPLATE_TO_STEP.items():
+        if tmpl_norm and tmpl_norm in msg_norm:
+            order = MANUAL_V2_STEP_ORDER.get(step, -1)
+            if order > best_order:
+                best_order = order
+                best_step = step
+    return best_step
+
+
+def prime_manual_v2_runtime_state(
+    state: PeerRuntimeState,
+    step_name: str,
+    now_ts: Optional[float] = None,
+) -> PeerRuntimeState:
+    current_ts = float(now_ts if now_ts is not None else time.time())
+    state.flow_step = step_name
+    state.auto_mode = "OFF"
+    state.paused = True
+    state.qa_gate_active = False
+    state.qa_gate_step = ""
+    state.qa_gate_opened_at = 0.0
+    state.qa_gate_reminder_sent = False
+    if step_name == STEP_SCHEDULE_SHIFT_WAIT:
+        state.shift_prompted_at = current_ts
+        state.schedule_shift_fit_check_pending = False
+    if step_name == STEP_FORM_FORWARD:
+        state.form_waiting_photo = False
+    if step_name in WAIT_STEP_SET:
+        arm_step_wait(state, step_name, current_ts)
+    elif step_name == STEP_FORM_FORWARD:
+        state.step_wait_started_at = current_ts
+        state.step_wait_step = step_name
+        state.step_followup_stage = 0
+        state.step_followup_last_at = 0.0
+    else:
+        clear_step_wait(state)
+    return state
+
+
 async def get_last_step(client: TelegramClient, entity: User, step_state: "StepState") -> Optional[str]:
     cached = step_state.get(entity.id)
     if cached:
@@ -4822,8 +4893,13 @@ async def main():
                 skip_stop_check_once.add(peer_id)
         else:
             manual_step = detect_step_from_text(text)
+            manual_v2_step = detect_manual_v2_step_from_text(text)
             if manual_step:
                 step_state.set(peer_id, manual_step)
+            if manual_v2_step:
+                current_v2 = v2_runtime.get(peer_id)
+                prime_manual_v2_runtime_state(current_v2, manual_v2_step, now_ts=time.time())
+                v2_runtime.set(current_v2)
             paused_peers.add(peer_id)
             enabled_peers.discard(peer_id)
         try:
@@ -4861,7 +4937,8 @@ async def main():
                 v2_runtime.set(current_v2)
             else:
                 current_v2 = v2_runtime.get(entity.id)
-                clear_step_wait(current_v2)
+                if not detect_manual_v2_step_from_text(text):
+                    clear_step_wait(current_v2)
                 v2_runtime.set(current_v2)
             queue_today_upsert(
                 peer_id=entity.id,
