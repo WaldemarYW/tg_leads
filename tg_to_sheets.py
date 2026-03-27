@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from typing import Optional, Tuple, List, Set
 
 # Legacy module: manual sheet update/exclusion flows are preserved for compatibility,
-# but runtime auto-reply now writes directly via auto_reply.py to the "Сегодня"/history model.
+# but runtime auto-reply now writes directly via auto_reply.py to the active monthly leads sheet model.
 LEGACY_SHEETS_WRITE_ENABLED = os.environ.get("LEGACY_SHEETS_WRITE_ENABLED", "0").strip().lower() in {
     "1",
     "true",
@@ -27,51 +27,67 @@ from google.oauth2.service_account import Credentials
 from gspread.exceptions import WorksheetNotFound
 
 
+RU_MONTHS = {
+    1: "Январь",
+    2: "Февраль",
+    3: "Март",
+    4: "Апрель",
+    5: "Май",
+    6: "Июнь",
+    7: "Июль",
+    8: "Август",
+    9: "Сентябрь",
+    10: "Октябрь",
+    11: "Ноябрь",
+    12: "Декабрь",
+}
+
+
 CONTACT_TEXT = (
-    "Доброго дня 🙂\n"
+    "Доброго дня.\n"
     "Мене звати Володимир, я HR компанії «Furioza».\n\n"
-    "Ви залишали відгук на вакансію менеджера чату.\n"
-    "Підкажіть, будь ласка, пошук роботи для вас зараз актуальний?"
+    "Ви залишали відгук на вакансію чат-менеджера.\n"
+    "Підкажіть, будь ласка, пошук роботи для Вас зараз актуальний?"
 )
 INTEREST_TEXT = (
-    "Чудово 🙌\n"
-    "Тоді коротко розповім, що саме ми пропонуємо.\n\n"
-    "Наша компанія — це холдингова компанія, яка працює у сфері дейтингу."
+    "Дякую.\n"
+    "Тоді коротко зорієнтую по вакансії.\n\n"
+    "Це віддалена full-time робота у сфері дейтингу, де ми ведемо текстове спілкування від імені анкет."
 )
 DATING_TEXT = (
     "Що таке дейтинг?\n\n"
     "Це платне спілкування в текстових чатах.\n"
-    "Користувачі самі вирішують, чи продовжувати діалог і купують послуги для спілкування.\n\n"
+    "Користувачі самі вирішують, чи продовжувати діалог, і оплачують доступні сервіси платформи.\n\n"
     "Без дзвінків.\n"
     "Без відео.\n"
     "Тільки текстові чати.\n\n"
     "Ваші основні завдання:\n"
     "– Вести текстові чати з користувачами платформи\n"
     "– Відповідати на вхідні повідомлення\n"
-    "– Працювати з листами та інвайтами за готовими шаблонами\n\n"
-    "Наша мета — підтримувати активне спілкування користувачів,\n"
-    "щоб вони продовжували діалог і користувалися платними функціями платформи."
+    "– Працювати з листами та інвайтами\n\n"
+    "Наша мета — підтримувати активне й цікаве спілкування,\n"
+    "щоб користувачі продовжували діалог і взаємодію на платформі."
 )
 DUTIES_TEXT = (
     "Цей шаблон збережено для сумісності зі старими діалогами."
 )
 CLARIFY_TEXT = (
-    "Скажіть, будь ласка, чи все зрозуміло на цьому етапі?\n"
-    "Можливо, вже є питання?"
+    "Якщо на цьому етапі є питання - напишіть, я коротко поясню.\n"
+    "Якщо такий формат Вам у цілому підходить, можемо переходити далі."
 )
 SHIFTS_TEXT = (
-    "Ми пропонує 2 зміни на вибір — ви обираєте одну і працюєте за цим графіком на постійній основі:\n"
+    "Ми пропонуємо 2 зміни на вибір — Ви обираєте одну і працюєте за цим графіком на постійній основі:\n"
     "- Денна 14:00–23:00\n"
     "- Нічна 23:00–08:00\n"
     "На кожній зміні передбачено:\n"
     "– 1 година основної перерви\n"
     "– Короткі міні-перерви по 5 хвилин\n"
-    "Щодо вихідних: у вас є 8 вихідних днів на місяць, брати їх можна коли зручно, будні це дні чи вихідні - не важливо)"
+    "Щодо вихідних: у Вас є 8 вихідних днів на місяць, брати їх можна коли зручно."
 )
-SHIFT_QUESTION_TEXT = "Який графік роботи Вам підходить?"
+SHIFT_QUESTION_TEXT = "Яку зміну Вам зручніше розглянути: денну чи нічну?"
 FORMAT_TEXT = (
-    "Щоб вам було легко зрозуміти вакансію без довгих пояснень у чаті, я підготував короткий мінікурс + відео для новачків.\n"
-    "Там просто і по суті: як виглядає зміна, що саме потрібно робити, і з чого почати."
+    "Щоб Вам було легше зрозуміти формат без довгих пояснень у чаті, я підготував короткий мінікурс + відео для новачків.\n"
+    "Там по суті: як виглядає зміна, що саме потрібно робити, як оплачується робота і з чого почати."
 )
 FORMAT_QUESTION_TEXT = "Як вам зручніше: переглянути коротке відео чи пройти мінікурс?"
 VIDEO_FOLLOWUP_TEXT = (
@@ -92,11 +108,11 @@ TRAINING_TEXT = (
     "– короткі текстові блоки\n"
     "– відеоуроки\n"
     "– невеликі тести після кожного блоку\n\n"
-    "Проходите у зручному для вас темпі."
+    "Проходите у зручному для Вас темпі."
 )
 TRAINING_QUESTION_TEXT = "Чи готові ви перейти до навчання?"
 FORM_TEXT = (
-    "Фінальний етап перед стартом навчання — заповнення анкети.\n"
+    "Фінальний етап перед стартом — заповнення анкети.\n"
     "Будь ласка, надішліть мені наступну інформацію:\n\n"
     "1. ПІБ\n"
     "2. Дата народження\n"
@@ -112,21 +128,20 @@ FORM_TEXT = (
     "та внутрішньої перевірки компанії.\n"
     "Інформація не передається третім особам."
 )
-CONFIRM_TEXT = "Дякую! 🙌\nПередаю вас на етап навчання"
+CONFIRM_TEXT = "Дякую.\nПередаю Вас тімліду на наступний етап."
 REFERRAL_TEXT = "Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."
 
 STATUS_RULES_WORKSHEET = os.environ.get("STATUS_RULES_WORKSHEET", "StatusRules")
 STATUS_RULES_HEADERS = ["template", "status"]
 
 DEFAULT_STATUS_RULES = [
-    (CONTACT_TEXT, "👋 Привітання"),
-    (CLARIFY_TEXT, "🏢 Знайомство з компанією"),
-    (SHIFT_QUESTION_TEXT, "🕒 Графік"),
-    (FORMAT_QUESTION_TEXT, "🎥 Більше інформації"),
-    (VIDEO_FOLLOWUP_TEXT, "🎥 Відео"),
-    (TRAINING_QUESTION_TEXT, "🎓 Навчання"),
-    (CONFIRM_TEXT, "✅ Погодився"),
-    (REFERRAL_TEXT, "🎁 Реферал Також хочу повідомити, що в нашій компанії діє реферальна програма 💰."),
+    (CONTACT_TEXT, "Вводные отправлены"),
+    (CLARIFY_TEXT, "Вводные отправлены"),
+    (SHIFT_QUESTION_TEXT, "Ожидание выбора смены"),
+    (FORMAT_QUESTION_TEXT, "Формат работы объяснен"),
+    (VIDEO_FOLLOWUP_TEXT, "Формат работы объяснен"),
+    (TRAINING_QUESTION_TEXT, "Доход и обучение объяснены"),
+    (CONFIRM_TEXT, "Передано тимлиду"),
 ]
 
 SCRIPT_TEMPLATES = [
@@ -157,6 +172,10 @@ def normalize_text(s: Optional[str]) -> str:
     return " ".join(text.split())
 
 
+def format_month_sheet_title(dt: date) -> str:
+    return f"{RU_MONTHS[dt.month]} {dt.month:02d} {dt.year}"
+
+
 def classify_status(
     template_out: str,
     last_msg_from_me: Optional[bool],
@@ -166,17 +185,15 @@ def classify_status(
 ) -> str:
     t_out = normalize_text(template_out)
     if normalize_text(REFERRAL_TEXT) in t_out:
-        return "🎁 Реферал"
+        return ""
     if normalize_text(CONFIRM_TEXT) in t_out:
-        return "✅ Погодився"
+        return "Передано тимлиду"
 
     if last_msg_from_me is False:
-        if "?" in (last_in_text or ""):
-            return "знак питання"
-        return "користувач"
+        return ""
 
     if consecutive_out >= 3:
-        return "🔁 3+ повідомлення від нас без відповіді"
+        return "Не актуально"
 
     for template, status in status_rules:
         if normalize_text(template) in t_out:
@@ -490,7 +507,7 @@ async def update_google_sheet(
 
     creds_path = os.environ["GOOGLE_CREDS"]
     sheet_name = os.environ["SHEET_NAME"]
-    worksheet_name = worksheet_override or os.environ.get("WORKSHEET", "Leads")
+    worksheet_name = worksheet_override or format_month_sheet_title(today)
 
     gc = sheets_client(creds_path)
     sh = gc.open(sheet_name)

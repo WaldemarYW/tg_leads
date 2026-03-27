@@ -197,23 +197,18 @@ GROUP_LEADS_UPSERT_LOCK = os.environ.get("GROUP_LEADS_UPSERT_LOCK", "/opt/tg_lea
 REGISTRATION_UPSERT_LOCK = os.environ.get("REGISTRATION_UPSERT_LOCK", "/opt/tg_leads/.registration_upsert.lock")
 
 TODAY_HEADERS = [
+    "Дата",
     "Имя",
     "Username",
     "Возраст",
     "Наличие ПК/ноутбука",
-    "Відповіді кандидата",
+    "Смена",
     "Ссылка на чат",
     "Ссылка на заявку",
-    "Ссылка на журнал",
     "Статус",
-    "Автоответчик",
-    "Последнее входящее",
-    "Последнее исходящее",
-    "Peer ID",
-    "Тех. шаг",
-    "Обновлено",
+    "Пир",
     "Аккаунт",
-    "Дата",
+    "Дата первого старта",
 ]
 
 HISTORY_HEADERS = [
@@ -282,13 +277,29 @@ LIKE_PAIR_WINDOW_SEC = float(os.environ.get("LIKE_PAIR_WINDOW_SEC", "30"))
 LIKE_TRAINING_MAX_CANDIDATES = int(os.environ.get("LIKE_TRAINING_MAX_CANDIDATES", "20"))
 LIKE_TRAINING_AI_TIMEOUT_SEC = float(os.environ.get("LIKE_TRAINING_AI_TIMEOUT_SEC", "8"))
 LIKE_TRAINING_UNREACT_OPERATOR_ONLY = os.environ.get("LIKE_TRAINING_UNREACT_OPERATOR_ONLY", "1").strip().lower() in {"1", "true", "yes", "on"}
-CONFIRM_STATUS = "✅ Погодився"
-REFERRAL_STATUS = "🎁 Реферал"
-IMMUTABLE_STATUSES = {CONFIRM_STATUS, REFERRAL_STATUS}
+STATUS_NEW_LEAD = "Новый лид"
+STATUS_INTRO_SENT = "Вводные отправлены"
+STATUS_INTEREST_CONFIRMED = "Интерес подтвержден"
+STATUS_SHIFT_PENDING = "Ожидание выбора смены"
+STATUS_SHIFT_SELECTED = "Смена выбрана"
+STATUS_WORK_EXPLAINED = "Формат работы объяснен"
+STATUS_EARNINGS_EXPLAINED = "Доход и обучение объяснены"
+STATUS_FORM_REQUESTED = "Анкета запрошена"
+STATUS_FORM_RECEIVED = "Анкета получена"
+STATUS_DOC_PENDING = "Ожидание документа"
+STATUS_HANDOFF = "Передано тимлиду"
+STATUS_PAUSED = "Пауза"
+STATUS_NOT_RELEVANT = "Не актуально"
+STATUS_STOPPED = "Отказ кандидата"
+STATUS_SHIFT_MISMATCH = "Не подходит график"
+STATUS_NO_PC = "Нет ПК/ноутбука"
+CONFIRM_STATUS = STATUS_HANDOFF
+REFERRAL_STATUS = ""
+IMMUTABLE_STATUSES = {CONFIRM_STATUS}
 STOP_COMMANDS = {"стоп1", "stop1"}
 START_COMMANDS = {"старт1", "start1"}
-AUTO_STOP_STATUS = "❌ Відмова"
-MANUAL_OFF_STATUS = "🧑‍💼 Manual OFF"
+AUTO_STOP_STATUS = STATUS_STOPPED
+MANUAL_OFF_STATUS = STATUS_PAUSED
 STOP_REPLY_TEXT = "Розумію, дякую за відповідь. Якщо обставини зміняться, дайте знати."
 CLARIFY_VARIANTS = [
     CLARIFY_TEXT,
@@ -297,20 +308,20 @@ CLARIFY_VARIANTS = [
     "Чи залишилися ще запитання по цьому етапу?\nГотовий коротко пояснити детальніше.",
 ]
 MISSING_STEP_RECOVERY_TEXT = (
-    "Щоб коректно продовжити, уточню поточний етап.\n"
-    "Підкажіть, будь ласка, яка зміна вам зручніша: денна чи нічна?"
+    "Щоб коректно продовжити, швидко поверну нас у поточний етап.\n"
+    "Підкажіть, будь ласка, яку зміну Вам зручніше розглянути: денну чи нічну?"
 )
 FORM_LOCK_REPLY_TEXT = (
-    "Ми вже на фінальному етапі — заповненні анкети.\n"
-    "Після отримання анкети передаю вас на старт навчання."
+    "Ми вже на фінальному етапі - заповненні анкети.\n"
+    "Після отримання анкети та верифікації передаю Вас тімліду на старт."
 )
 CLARIFY_NEGATIVE_FOLLOWUP_TEXT = (
-    "Розумію 🙌\n"
+    "Розумію.\n"
     "Підкажіть, будь ласка, що саме залишилось незрозумілим?\n"
     "Я коротко поясню."
 )
 QA_GATE_REMINDER_TEXT = "Якщо залишилися питання — напишіть, я коротко поясню. Коли будете готові, продовжимо."
-VOICE_FALLBACK_TEXT = "Якщо по голосовому залишилися питання, напишіть — усе коротко поясню і підкажу, що далі."
+VOICE_FALLBACK_TEXT = "Якщо після цього блоку лишилися питання, напишіть одним повідомленням - усе коротко поясню і підкажу, що далі."
 V2_GATE_REMINDER_TEXT = "Якщо щось залишилося незрозумілим, напишіть одним повідомленням — я все уточню."
 AI_FOLLOWUP_REWRITE_ENABLED = os.environ.get("AI_FOLLOWUP_REWRITE_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 WAIT_STEP_SET = {
@@ -335,31 +346,31 @@ BALANCE_RESUME_CHECKPOINTS = {
     BALANCE_CHECKPOINT_AFTER_SCHEDULE_CONFIRM_QUESTION,
 }
 STEP_CLARIFY_TEXTS = {
-    STEP_SCREENING_WAIT: "Підкажіть, будь ласка, чи актуальна для Вас вакансія. Якщо так, надішліть 2 короткі відповіді: досвід у дейтингу та Ваш вік.",
-    STEP_COMPANY_INTRO: "Підкажіть, будь ласка, чи актуально для Вас продовжити. Якщо є питання по вакансії, із радістю поясню.",
-    STEP_VOICE_WAIT: "Підкажіть, будь ласка, чи вдалося прослухати голосове. Якщо зручніше, коротко продублюю умови текстом.",
-    STEP_SCHEDULE_SHIFT_WAIT: "Підкажіть, будь ласка, чи зручно зараз визначитися зі зміною. Якщо так, напишіть: денна або нічна.",
-    STEP_SCHEDULE_CONFIRM: "Підкажіть, будь ласка, чи все зрозуміло щодо робочого процесу. Якщо ні, уточню саме той пункт, який викликає питання.",
-    STEP_BALANCE_CONFIRM: "Підкажіть, будь ласка, чи зрозуміла система нарахувань. Якщо потрібно, поясню на простому прикладі.",
-    STEP_TEST_REVIEW: "Підкажіть, будь ласка, чи актуально рухатися далі до тестового етапу. Якщо є сумніви, обговоримо їх.",
+    STEP_SCREENING_WAIT: "Якщо вакансія для Вас ще актуальна, дайте короткий зворотний звʼязок, і я проведу Вас далі по етапах.",
+    STEP_COMPANY_INTRO: "Якщо такий формат Вам у цілому підходить, можемо перейти далі. Якщо є питання - коротко поясню.",
+    STEP_VOICE_WAIT: "Підкажіть, будь ласка, чи вдалося ознайомитися з коротким поясненням. Якщо зручніше, продовжу все текстом.",
+    STEP_SCHEDULE_SHIFT_WAIT: "Підкажіть, будь ласка, яку зміну Вам зручніше розглянути: денну чи нічну.",
+    STEP_SCHEDULE_CONFIRM: "Якщо по формату роботи все зрозуміло, можемо перейти до блоку про заробіток і навчання. Якщо є сумнів - коротко уточню.",
+    STEP_BALANCE_CONFIRM: "Якщо по заробітку та навчанню все зрозуміло, можемо переходити далі. Якщо потрібно, поясню на простому прикладі.",
+    STEP_TEST_REVIEW: "Якщо по заробітку та навчанню все зрозуміло, можемо одразу переходити до анкети.",
 }
 STEP_FALLBACK_1_TEXTS = {
-    STEP_SCREENING_WAIT: "Нагадую щодо анкети: якщо вакансія ще актуальна, надішліть, будь ласка, коротко досвід у дейтингу та Ваш вік.",
-    STEP_COMPANY_INTRO: "Нагадую щодо вакансії: якщо для Вас актуально продовжити, дайте знати. Якщо ні — також напишіть, щоб я не турбував.",
-    STEP_VOICE_WAIT: "Нагадую про себе, щоб не загубити контакт. Підкажіть, будь ласка, чи актуально для Вас продовжити спілкування щодо вакансії.",
-    STEP_SCHEDULE_SHIFT_WAIT: "Повертаюся щодо графіка: якщо вакансія ще актуальна, напишіть, будь ласка, яку зміну обираєте — денну чи нічну.",
-    STEP_SCHEDULE_CONFIRM: "Повертаюся щодо робочого процесу: якщо все зрозуміло, продовжимо. Якщо ні — підкажіть, що саме варто уточнити.",
-    STEP_BALANCE_CONFIRM: "Повертаюся щодо умов оплати: якщо є питання — відповім. Якщо все зрозуміло, можемо рухатися далі.",
-    STEP_TEST_REVIEW: "Нагадую щодо тестового етапу: якщо готові продовжити, дайте знати. Якщо тема вже не актуальна — також напишіть.",
+    STEP_SCREENING_WAIT: "Повертаюся щодо вакансії: якщо тема ще актуальна, дайте знати, і я коротко проведу Вас далі.",
+    STEP_COMPANY_INTRO: "Повертаюся щодо вакансії: якщо формат для Вас ще цікавий, дайте знати, і ми перейдемо до наступного кроку.",
+    STEP_VOICE_WAIT: "Повертаюся щодо пояснення вакансії. Якщо зручніше, продовжу все коротко текстом.",
+    STEP_SCHEDULE_SHIFT_WAIT: "Повертаюся щодо графіка: якщо вакансія ще актуальна, напишіть, будь ласка, яку зміну Вам зручніше розглянути.",
+    STEP_SCHEDULE_CONFIRM: "Повертаюся щодо формату роботи: якщо все зрозуміло, перейдемо до блоку про заробіток і навчання. Якщо є питання - відповім.",
+    STEP_BALANCE_CONFIRM: "Повертаюся щодо блоку про заробіток і навчання: якщо все зрозуміло, можемо рухатися далі. Якщо є питання - поясню.",
+    STEP_TEST_REVIEW: "Повертаюся щодо наступного кроку: якщо все зрозуміло, одразу перейдемо до анкети. Якщо є питання - коротко відповім.",
 }
 STEP_FALLBACK_2_TEXTS = {
-    STEP_SCREENING_WAIT: "Добрий день. Підкажіть, будь ласка, чи актуальна для Вас вакансія. Якщо так — надішліть 2 короткі відповіді (досвід і вік).",
-    STEP_COMPANY_INTRO: "Добрий день. Якщо вакансія ще цікава для Вас — дайте, будь ласка, короткий зворотний зв’язок. Якщо ні, напишіть про це.",
-    STEP_VOICE_WAIT: "Добрий день. Нагадую щодо вакансії оператора чату: якщо тема неактуальна, напишіть, будь ласка, щоб я не турбував.",
-    STEP_SCHEDULE_SHIFT_WAIT: "Добрий день. Щоб продовжити, потрібно зафіксувати графік. Підкажіть, будь ласка, яку зміну обираєте: денну чи нічну.",
-    STEP_SCHEDULE_CONFIRM: "Добрий день. Якщо залишилися питання щодо робочого процесу — із радістю відповім. Якщо все зрозуміло, продовжимо.",
-    STEP_BALANCE_CONFIRM: "Добрий день. Якщо Вам потрібні додаткові пояснення щодо нарахувань — надам. Якщо все зрозуміло, перейдемо далі.",
-    STEP_TEST_REVIEW: "Добрий день. Якщо готові продовжити до тестового етапу — напишіть, будь ласка. Якщо ні, підкажіть причину, щоб коректно закрити діалог.",
+    STEP_SCREENING_WAIT: "Добрий день. Якщо вакансія ще актуальна для Вас, дайте короткий зворотний звʼязок, і я проведу Вас далі по етапах.",
+    STEP_COMPANY_INTRO: "Добрий день. Якщо формат вакансії ще цікавий для Вас, дайте короткий зворотний звʼязок, і ми перейдемо далі.",
+    STEP_VOICE_WAIT: "Добрий день. Повертаюся щодо вакансії чат-менеджера: якщо зручніше, продовжу все коротко текстом.",
+    STEP_SCHEDULE_SHIFT_WAIT: "Добрий день. Щоб продовжити, потрібно зафіксувати зміну. Підкажіть, будь ласка, яку зміну Вам зручніше розглянути.",
+    STEP_SCHEDULE_CONFIRM: "Добрий день. Якщо по формату роботи все зрозуміло, перейдемо до блоку про заробіток і навчання. Якщо залишилися питання - із радістю відповім.",
+    STEP_BALANCE_CONFIRM: "Добрий день. Якщо по заробітку та навчанню все зрозуміло, можемо рухатися далі. Якщо потрібне коротке пояснення - надам.",
+    STEP_TEST_REVIEW: "Добрий день. Якщо готові рухатися далі, перейдемо до анкети. Якщо залишилися питання - коротко відповім.",
 }
 FORMAL_ADDRESS_REPLACEMENTS = [
     (r"\bТи\b", "Ви"),
@@ -392,22 +403,12 @@ FORMAL_ADDRESS_REPLACEMENTS = [
     (r"\bтвои\b", "Ваши"),
 ]
 SCREENING_INTRO_TEXT = (
-    "Привіт) Ви залишали відгук на вакансію менеджера чату. "
-    "Зараз я розповім детальніше про вакансію, але спершу дайте, будь ласка, відповіді на кілька запитань.\n"
-    "Ваші відповіді потрібні, щоб я розумів, наскільки детально варто розповідати про вакансію 🙂."
+    "Доброго дня.\n"
+    "Ви залишали відгук на вакансію чат-менеджера.\n"
+    "Коротко зорієнтую Вас по формату роботи, щоб Ви одразу розуміли, чи підходить Вам ця вакансія."
 )
-SCREENING_Q1_TEXT = "Чи мали Ви раніше справу зі сферою дейтингу?"
-SCREENING_Q2_TEXT = "Скільки Вам повних років?"
-SCREENING_TO_INTRO_BRIDGE_TEXT = "Далі я розповім вам загальну інформацію про вакансію"
-AGE_UNDER18_TEXT = (
-    "На жаль, на цьому етапі ми не можемо продовжити оформлення, оскільки компанія розглядає кандидатів лише з 18 років. "
-    "Це пов’язано з внутрішніми правилами, юридичними вимогами та особливостями роботи на міжнародних платформах."
-)
-AGE_OVER40_TEXT = (
-    "Дякую Вам за відповіді 🙂 На жаль, на цьому етапі ми не зможемо продовжити співпрацю, "
-    "оскільки за внутрішніми критеріями проєкту ми розглядаємо кандидатів у межах іншого вікового діапазону.\n"
-    "Дякую за інтерес до вакансії та бажаю Вам успіхів у пошуку роботи!"
-)
+MID_FUNNEL_YES_CLOSE_TEXT = "Якщо такий формат Вам у цілому підходить, можемо перейти далі?"
+SCREENING_TO_INTRO_BRIDGE_TEXT = "Дякую. Тоді коротко покажу, як влаштована вакансія і що буде далі."
 REFERRAL_AFTER_REJECT_TEXT = (
     "Також хочу повідомити, що в нашій компанії діє реферальна програма 💰\n"
     "Ви можете отримати 100 $ бонусу за кожного запрошеного друга,\n"
@@ -419,77 +420,90 @@ REFERRAL_AFTER_REJECT_TEXT = (
     "яким може бути цікава така робота — сміливо рекомендуйте 🙂"
 )
 COMPANY_INTRO_TEXT = (
-    "Дякую за відповіді)\n"
-    "Наша компанія Furioza Company працює в сфері дейтингу з 2014 року. "
-    "Робота повністю віддалена в повну зайнятість (8-годинний робочий графік), тільки через ПК або ноутбук.\n\n"
-    "В обов'язки чат-менеджера входить комунікація з клієнтами в режимі онлайн чату, "
-    "відповіді на листи, створення інвайтів та просування анкети, без дзвінків та відеодзвінків.\n\n"
-    "Вам буде зручно прослухати голосове повідомлення, щоб я детальніше розповів усі умови роботи?"
+    "Наша компанія Furioza Company працює у сфері дейтингу з 2014 року.\n\n"
+    "Формат роботи віддалений: тільки текстове спілкування, без дзвінків і відеозвʼязку, у full-time графіку 8 годин і лише з ПК або ноутбука.\n\n"
+    "На старті є навчання та супровід тімліда, тому Ви одразу розумієте, як рухатися далі.\n\n"
+    f"{MID_FUNNEL_YES_CLOSE_TEXT}"
 )
 COMPANY_INTRO_TIMEOUT_TEXT = (
-    "Наша компанія Furioza Company працює в сфері дейтингу з 2014 року. "
-    "Робота повністю віддалена в повну зайнятість (8-годинний робочий графік), тільки через ПК або ноутбук.\n\n"
-    "В обов'язки чат-менеджера входить комунікація з клієнтами в режимі онлайн чату, "
-    "відповіді на листи, створення інвайтів та просування анкети, без дзвінків та відеодзвінків.\n\n"
-    "Вам буде зручно прослухати голосове повідомлення, щоб я детальніше розповів усі умови роботи?"
+    "Наша компанія Furioza Company працює у сфері дейтингу з 2014 року. "
+    "Формат роботи віддалений: тільки текстове спілкування, без дзвінків і відеозвʼязку, у full-time графіку 8 годин і лише з ПК або ноутбука.\n\n"
+    "На старті є навчання та супровід тімліда, тому Ви одразу розумієте, як рухатися далі.\n\n"
+    f"{MID_FUNNEL_YES_CLOSE_TEXT}"
 )
 SCHEDULE_SHIFT_TEXT = (
-    "Ми пропонує 2 зміни на вибір — ви обираєте одну і працюєте за цим графіком на постійній основі:\n"
+    "По графіку: у нас є 2 зміни на вибір, і Ви обираєте одну на постійній основі:\n"
     "- Денна 14:00–23:00\n"
     "- Нічна 23:00–08:00\n"
     "На кожній зміні передбачено:\n"
     "- 1 година основної перерви\n"
     "- Короткі міні-перерви по 5 хвилин\n"
-    "Щодо вихідних: у вас є 8 вихідних днів на місяць, брати їх можна коли зручно, будні це дні чи вихідні - не важливо)\n"
-    "Який графік роботи Вам підходить?"
+    "Щодо вихідних: у Вас є 8 вихідних днів на місяць, їх можна планувати самостійно.\n"
+    "Підкажіть, будь ласка, яку зміну Вам зручніше розглянути: денну чи нічну?"
 )
 SCHEDULE_DETAILS_TEXT = (
-    "Робота на сайті відбувається одночасно на декількох анкет.\n"
-    "Працювати потрібно у парі з напарниками — 8 годин у своїй зміні, та 2 напарника — у своїй. "
-    "Ваша комунікація буде в Telegram, де створиться спільний чат. Там ви зможете обговорювати робочі моменти по анкетах, ділитись думками та допомагати одне одному.\n"
-    "Підсумуємо головне:\n"
-    "Графік — 8 годин на день біля ПК. У вас буде особистий кабінет, де фіксується робочий час. "
-    "Робота інтенсивна: в середньому одна дія має бути кожні 5 хвилин. Тобто Ви реально працюєте увесь час, а не просто \"в онлайні\".\n"
-    "Навчання триває 8 днів.\n"
-    "Зарплата в кінці місяця — 48% від суми на балансі профілю."
+    "Коротко по формату роботи.\n"
+    "Ви працюєте одночасно на декількох анкетах у своїй зміні та взаємодієте з командою в Telegram, де можна швидко узгоджувати робочі моменти.\n\n"
+    "Що важливо розуміти:\n"
+    "Робота full-time та досить інтенсивна, тобто це не формат \"просто бути онлайн\".\n"
+    "У Вас буде особистий кабінет, де фіксується робочий час.\n"
+    "Навчання триває близько 8 днів і проходить під супроводом тімліда."
 )
-SCHEDULE_CONFIRM_TEXT = "Чи зрозуміло вам як відбувається робочий процес?"
-SCHEDULE_CONFIRM_CLARIFY_TEXT = "Підкажіть, будь ласка, що саме незрозуміло по робочому процесу, і я поясню це по пунктах."
+SCHEDULE_CONFIRM_TEXT = "Чи зрозумілий Вам у цілому формат роботи? Якщо так, зможемо перейти далі."
+SCHEDULE_CONFIRM_CLARIFY_TEXT = "Підкажіть, будь ласка, що саме потрібно уточнити по формату роботи, і я коротко поясню це по пунктах."
 SCHEDULE_CONFIRM_FOLLOWUP_VARIANTS = (
-    "Чи є у вас ще запитання по робочому процесу, чи можемо рухатися далі?",
-    "Підкажіть, будь ласка, чи залишилися ще питання щодо робочого процесу, чи вже переходимо далі?",
-    "Якщо ще є питання по робочому процесу — з радістю відповім. Якщо все зрозуміло, можемо йти далі.",
+    "Чи залишилися у Вас ще питання по формату роботи, чи можемо рухатися далі?",
+    "Підкажіть, будь ласка, чи все зрозуміло по формату співпраці, чи ще щось коротко уточнити?",
+    "Якщо ще є питання по формату роботи - із радістю відповім. Якщо все зрозуміло, можемо йти далі.",
 )
-BALANCE_CONFIRM_TEXT = "Чи зрозуміло з чого складається баланс?"
-BALANCE_CONFIRM_CLARIFY_TEXT = "Підкажіть, будь ласка, що саме незрозуміло по балансу - я поясню на простому прикладі."
+EARNINGS_EXPLAINER_TEXT_1 = (
+    "Коротко про те, як тут формується заробіток.\n\n"
+    "Сайт для чоловіків платний: вони оплачують хвилини чату, листи, фото, відео та інші дії на платформі. "
+    "Завдання чат-менеджера - вести сильну комунікацію, утримувати інтерес користувача і продовжувати діалог. "
+    "Тобто дохід тут напряму повʼязаний не зі ставкою, а з тим, наскільки якісно вибудовується спілкування."
+)
+EARNINGS_EXPLAINER_TEXT_2 = (
+    "Тепер про баланс і оплату.\n\n"
+    "Баланс анкети формується з витрат користувачів на платформі, а Ваш дохід рахується як відсоток від цього балансу. "
+    "У перший місяць базовий відсоток становить 48%, окремо враховуються реальні подарунки. "
+    "На старті дохід зазвичай нижчий, тому що ще формується база постійних фаворитів, але з досвідом і регулярною активністю він росте значно стабільніше."
+)
+EARNINGS_EXPLAINER_TEXT_3 = (
+    "І окремо про навчання.\n\n"
+    "Навчання для кандидата безкоштовне: воно проходить онлайн, включає текстові матеріали, відео, тести та супровід тімліда. "
+    "Після цього Ви переходите до стажування вже з розумінням процесу, а не всліпу. "
+    "Якщо по формату, заробітку та навчанню все ок, далі логічний крок - одразу перейти до анкети."
+)
+BALANCE_CONFIRM_TEXT = "Якщо по заробітку та навчанню все зрозуміло, можемо переходити далі."
+BALANCE_CONFIRM_CLARIFY_TEXT = "Підкажіть, будь ласка, що саме хочете уточнити по заробітку, балансу чи навчанню - поясню коротко і по суті."
 BALANCE_CONFIRM_FOLLOWUP_VARIANTS = (
-    "Чи є у вас ще запитання щодо балансу, чи можемо йти далі?",
-    "Підкажіть, будь ласка, чи залишилися питання по балансу, чи переходимо до наступного кроку?",
-    "Якщо ще є питання по балансу — із радістю поясню. Якщо все зрозуміло, рухаємось далі.",
+    "Чи залишилися у Вас ще питання щодо заробітку або навчання, чи можемо переходити далі?",
+    "Підкажіть, будь ласка, чи залишилися питання по моделі доходу або навчанню, чи вже рухаємось далі?",
+    "Якщо ще є питання по заробітку чи навчанню - із радістю поясню. Якщо все зрозуміло, рухаємось далі.",
 )
-TEST_READY_PROMPT_TEXT = "Чи все зрозуміло по умовах роботи? Чи готові продовжувати?"
-TEST_READY_CLARIFY_TEXT = "Підкажіть, будь ласка, що саме залишилось незрозумілим по умовах. Якщо все зрозуміло, напишіть \"Готовий/готова продовжувати\"."
+TEST_READY_PROMPT_TEXT = "Якщо по заробітку та навчанню все ок, можемо переходити до анкети."
+TEST_READY_CLARIFY_TEXT = "Підкажіть, будь ласка, що саме ще лишилось незрозумілим по заробітку, балансу чи навчанню. Якщо все зрозуміло, перейдемо до анкети."
 TEST_READY_FOLLOWUP_VARIANTS = (
-    "Чи залишилися ще питання по умовах роботи, чи можемо рухатися далі?",
-    "Підкажіть, будь ласка, чи все зрозуміло по правилах співпраці, чи вже готові продовжувати?",
-    "Якщо є ще питання по умовах — із радістю поясню. Якщо все ок, напишіть, що готові продовжувати.",
+    "Чи залишилися ще питання по заробітку та навчанню, чи можемо переходити до анкети?",
+    "Підкажіть, будь ласка, чи все зрозуміло по оплаті та старту, чи вже переходимо до анкети?",
+    "Якщо є ще питання по заробітку чи навчанню - із радістю поясню. Якщо все ок, перейдемо до анкети.",
 )
 
 FOLLOWUP_TEMPLATES = [
     (
         30 * 60,
-        "Повертаюся до вас щодо вакансії.\n"
+        "Повертаюся до Вас щодо вакансії.\n"
         "Якщо зручно, напишіть, чи можемо продовжити. Якщо є питання - усе коротко поясню.",
     ),
     (
         24 * 60 * 60,
         "Доброго дня.\n"
-        "Уточню, будь ласка, чи актуально для вас продовжити спілкування щодо вакансії?",
+        "Уточню, будь ласка, чи актуально для Вас продовжити спілкування щодо вакансії. Якщо так, я проведу Вас до наступного кроку без зайвих повідомлень.",
     ),
     (
         3 * 24 * 60 * 60,
-        "Повертаюся до вас щодо вакансії.\n"
-        "Якщо тема ще актуальна - напишіть, і продовжимо. Якщо ні - дайте знати, будь ласка, щоб я більше не турбував.",
+        "Повертаюся до Вас щодо вакансії.\n"
+        "Якщо тема ще актуальна - напишіть, і ми продовжимо. Якщо ні - дайте знати, будь ласка, щоб я більше не турбував.",
     ),
 ]
 TEST_USER_ID = "156414561"
@@ -529,25 +543,113 @@ RU_MONTHS = {
 }
 
 STATUS_BY_TEMPLATE = {
-    normalize_text(CONTACT_TEXT): "👋 Привітання",
-    normalize_text(INTEREST_TEXT): "👋 Привітання",
-    normalize_text(DATING_TEXT): "🏢 Знайомство з компанією",
-    normalize_text(DUTIES_TEXT): "🏢 Знайомство з компанією",
-    normalize_text(CLARIFY_TEXT): "🏢 Знайомство з компанією",
-    normalize_text(SHIFTS_TEXT): "🕒 Графік",
-    normalize_text(SHIFT_QUESTION_TEXT): "🕒 Графік",
-    normalize_text(FORMAT_TEXT): "🎥 Більше інформації",
-    normalize_text(FORMAT_QUESTION_TEXT): "🎥 Більше інформації",
-    normalize_text(VIDEO_FOLLOWUP_TEXT): "🎥 Відео",
-    normalize_text(MINI_COURSE_LINK): "🎥 Більше інформації",
-    normalize_text(MINI_COURSE_FOLLOWUP_TEXT): "🎥 Більше інформації",
-    normalize_text(BOTH_FORMATS_FOLLOWUP_TEXT): "🎥 Більше інформації",
-    normalize_text(TRAINING_TEXT): "🎓 Навчання",
-    normalize_text(TRAINING_QUESTION_TEXT): "🎓 Навчання",
-    normalize_text(FORM_TEXT): "📝 Анкета",
+    normalize_text(CONTACT_TEXT): STATUS_INTRO_SENT,
+    normalize_text(INTEREST_TEXT): STATUS_INTRO_SENT,
+    normalize_text(DATING_TEXT): STATUS_INTRO_SENT,
+    normalize_text(DUTIES_TEXT): STATUS_WORK_EXPLAINED,
+    normalize_text(CLARIFY_TEXT): STATUS_INTRO_SENT,
+    normalize_text(SHIFTS_TEXT): STATUS_SHIFT_PENDING,
+    normalize_text(SHIFT_QUESTION_TEXT): STATUS_SHIFT_PENDING,
+    normalize_text(FORMAT_TEXT): STATUS_WORK_EXPLAINED,
+    normalize_text(FORMAT_QUESTION_TEXT): STATUS_WORK_EXPLAINED,
+    normalize_text(VIDEO_FOLLOWUP_TEXT): STATUS_WORK_EXPLAINED,
+    normalize_text(MINI_COURSE_LINK): STATUS_WORK_EXPLAINED,
+    normalize_text(MINI_COURSE_FOLLOWUP_TEXT): STATUS_WORK_EXPLAINED,
+    normalize_text(BOTH_FORMATS_FOLLOWUP_TEXT): STATUS_WORK_EXPLAINED,
+    normalize_text(TRAINING_TEXT): STATUS_EARNINGS_EXPLAINED,
+    normalize_text(TRAINING_QUESTION_TEXT): STATUS_EARNINGS_EXPLAINED,
+    normalize_text(FORM_TEXT): STATUS_FORM_REQUESTED,
     normalize_text(CONFIRM_TEXT): CONFIRM_STATUS,
-    normalize_text(REFERRAL_TEXT): REFERRAL_STATUS,
 }
+
+SHEET_TERMINAL_STATUSES = {
+    STATUS_HANDOFF,
+    STATUS_STOPPED,
+    STATUS_SHIFT_MISMATCH,
+    STATUS_NO_PC,
+    STATUS_NOT_RELEVANT,
+}
+
+
+def format_month_sheet_title(dt: date) -> str:
+    return f"{RU_MONTHS[dt.month]} {dt.month:02d} {dt.year}"
+
+
+def _status_from_step(step_name: Optional[str], shift: Optional[str], last_out: Optional[str]) -> str:
+    step = (step_name or "").strip()
+    out_norm = normalize_text(last_out or "")
+    if step in {STEP_SCREENING_WAIT, STEP_COMPANY_INTRO, STEP_VOICE_WAIT}:
+        return STATUS_INTRO_SENT
+    if step == STEP_SCHEDULE_SHIFT_WAIT:
+        return STATUS_SHIFT_PENDING
+    if step == STEP_SCHEDULE_BLOCK:
+        return STATUS_SHIFT_SELECTED if (shift or "").strip() else STATUS_SHIFT_PENDING
+    if step == STEP_SCHEDULE_CONFIRM:
+        return STATUS_WORK_EXPLAINED
+    if step in {STEP_BALANCE_CONFIRM, STEP_TEST_REVIEW}:
+        return STATUS_EARNINGS_EXPLAINED
+    if step == STEP_FORM_FORWARD:
+        if "підтвердження віку" in out_norm or "скрін документа" in out_norm or "фото або скрін документа" in out_norm:
+            return STATUS_DOC_PENDING
+        return STATUS_FORM_REQUESTED
+    if step == STEP_HANDOFF:
+        return STATUS_HANDOFF
+    return ""
+
+
+def canonical_sheet_status(
+    incoming_status: Optional[str],
+    step_name: Optional[str],
+    existing_status: Optional[str] = None,
+    shift: Optional[str] = None,
+    last_out: Optional[str] = None,
+) -> str:
+    raw = (incoming_status or "").strip()
+    existing = (existing_status or "").strip()
+    if raw in {"", "знак питання"}:
+        inferred = _status_from_step(step_name, shift, last_out)
+        return inferred or existing
+    if raw in {
+        STATUS_NEW_LEAD,
+        STATUS_INTRO_SENT,
+        STATUS_INTEREST_CONFIRMED,
+        STATUS_SHIFT_PENDING,
+        STATUS_SHIFT_SELECTED,
+        STATUS_WORK_EXPLAINED,
+        STATUS_EARNINGS_EXPLAINED,
+        STATUS_FORM_REQUESTED,
+        STATUS_FORM_RECEIVED,
+        STATUS_DOC_PENDING,
+        STATUS_HANDOFF,
+        STATUS_PAUSED,
+        STATUS_NOT_RELEVANT,
+        STATUS_STOPPED,
+        STATUS_SHIFT_MISMATCH,
+        STATUS_NO_PC,
+    }:
+        return raw
+    if raw == MANUAL_OFF_STATUS or raw == "PAUSED":
+        return STATUS_PAUSED
+    if raw == CONFIRM_STATUS:
+        return STATUS_HANDOFF
+    if raw == AUTO_STOP_STATUS:
+        if (step_name or "").strip() in {STEP_SCHEDULE_SHIFT_WAIT, STEP_SCHEDULE_CONFIRM, STEP_SCHEDULE_BLOCK}:
+            return STATUS_SHIFT_MISMATCH
+        return STATUS_STOPPED
+    if raw in {"👋 Привітання", "🏢 Знайомство з компанією"}:
+        return STATUS_INTRO_SENT
+    if raw == "🕒 Графік":
+        return _status_from_step(step_name, shift, last_out) or STATUS_SHIFT_PENDING
+    if raw in {"🎧 Голосове", "🎥 Більше інформації", "🎥 Відео"}:
+        return STATUS_WORK_EXPLAINED
+    if raw in {"💰 Баланси", "🎓 Навчання"}:
+        return STATUS_EARNINGS_EXPLAINED
+    if raw == "📝 Анкета":
+        return _status_from_step(step_name, shift, last_out) or STATUS_FORM_REQUESTED
+    if raw == REFERRAL_STATUS:
+        return existing
+    inferred = _status_from_step(step_name, shift, last_out)
+    return inferred or existing or raw
 
 GROUP_LEADS_HEADERS = [
     "Получено",
@@ -1019,60 +1121,6 @@ def is_hard_stop_message(text: str) -> bool:
     return any(m in t for m in stop_markers)
 
 
-def is_screening_q1_reply_text(text: str) -> bool:
-    t = normalize_text(text)
-    if not t:
-        return False
-    # Explicit vacancy refusal should still stop the flow.
-    hard_refusal_markers = (
-        "не підход",
-        "не подходит",
-        "неактуаль",
-        "не актуаль",
-        "не цікаво",
-        "неинтересно",
-        "не маю часу",
-        "немає часу",
-        "нема часу",
-        "не буду",
-        "не хочу",
-        "не потрібно",
-        "не нужна работа",
-    )
-    if any(m in t for m in hard_refusal_markers):
-        return False
-    q1_markers = (
-        "досвід",
-        "опыт",
-        "працював",
-        "працювала",
-        "работал",
-        "работала",
-        "чула",
-        "слыш",
-        "без досвіду",
-        "без опыта",
-        "не мав",
-        "не маю",
-        "не мала",
-        "не було",
-        "не был",
-        "не было",
-    )
-    if any(m in t for m in q1_markers):
-        return True
-    return t in {
-        "ні",
-        "нет",
-        "так",
-        "yes",
-        "no",
-        "нажаль ні",
-        "на жаль ні",
-        "к сожалению нет",
-    }
-
-
 def is_voice_decline(text: str) -> bool:
     t = normalize_text(text)
     if not t:
@@ -1538,11 +1586,6 @@ class SheetWriter:
         self._group_leads_lookup_cache = []
         self._group_leads_lookup_cache_ts = 0.0
         self.migrate_sheets()
-        if HISTORY_LOG_ENABLED:
-            try:
-                self._history_ws(ZoneInfo(TIMEZONE))
-            except Exception as err:
-                print(f"⚠️ Не вдалося підготувати місячний лист історії: {err}")
 
     def _col_letter(self, col_idx: int) -> str:
         result = []
@@ -1552,16 +1595,20 @@ class SheetWriter:
         return "".join(reversed(result))
 
     def _month_title(self, dt: date) -> str:
-        return f"{RU_MONTHS[dt.month]} {dt.year}"
+        return format_month_sheet_title(dt)
 
     def _parse_month_title(self, title: str) -> Optional[Tuple[int, int]]:
         title = (title or "").strip()
         for month_num, month_name in RU_MONTHS.items():
             prefix = f"{month_name} "
             if title.startswith(prefix):
-                year_part = title[len(prefix):].strip()
-                if year_part.isdigit():
-                    return int(year_part), month_num
+                suffix = title[len(prefix):].strip()
+                parts = suffix.split()
+                if len(parts) == 1 and parts[0].isdigit():
+                    return int(parts[0]), month_num
+                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                    if int(parts[0]) == month_num:
+                        return int(parts[1]), month_num
         return None
 
     def _month_shift(self, dt: date, months: int) -> date:
@@ -1571,12 +1618,13 @@ class SheetWriter:
         return date(year, month, 1)
 
     def _today_key(self, tz: ZoneInfo) -> str:
-        return datetime.now(tz).strftime("%Y-%m-%d")
+        return datetime.now(tz).strftime("%Y-%m")
 
     def _ensure_today_ws(self, tz: ZoneInfo):
         key = self._today_key(tz)
+        title = self._month_title(datetime.now(tz).date())
         if self.today_ws is None:
-            self.today_ws = get_or_create_worksheet(self.sh, TODAY_WORKSHEET, rows=1000, cols=len(TODAY_HEADERS))
+            self.today_ws = get_or_create_worksheet(self.sh, title, rows=1000, cols=len(TODAY_HEADERS))
             current = self.today_ws.row_values(1)
             if current != TODAY_HEADERS:
                 self.today_ws.clear()
@@ -1585,8 +1633,11 @@ class SheetWriter:
             self._invalidate_ws_cache(self.today_ws)
             return self.today_ws
         if self.today_key != key:
-            self.today_ws.clear()
-            self.today_ws.append_row(TODAY_HEADERS, value_input_option="USER_ENTERED")
+            self.today_ws = get_or_create_worksheet(self.sh, title, rows=1000, cols=len(TODAY_HEADERS))
+            current = self.today_ws.row_values(1)
+            if current != TODAY_HEADERS:
+                self.today_ws.clear()
+                self.today_ws.append_row(TODAY_HEADERS, value_input_option="USER_ENTERED")
             self.today_key = key
             self._invalidate_ws_cache(self.today_ws)
         return self.today_ws
@@ -1625,8 +1676,7 @@ class SheetWriter:
         if ws_id in self._row_index_cache and (now - ts) < self._row_index_cache_ttl_sec:
             return
         try:
-            peer_idx = headers.index("Peer ID")
-            account_idx = headers.index("Аккаунт")
+            peer_idx = headers.index("Пир")
         except ValueError:
             self._row_index_cache[ws_id] = {}
             self._row_index_cache_ts[ws_id] = now
@@ -1635,12 +1685,11 @@ class SheetWriter:
         values = ws.get_all_values()
         index = {}
         for idx, row in enumerate(values[1:], start=2):
-            if peer_idx >= len(row) or account_idx >= len(row):
+            if peer_idx >= len(row):
                 continue
             peer_raw = row[peer_idx].strip()
-            account_raw = row[account_idx].strip()
-            if peer_raw and account_raw:
-                index[(peer_raw, account_raw)] = idx
+            if peer_raw:
+                index[peer_raw] = idx
         self._row_index_cache[ws_id] = index
         self._row_index_cache_ts[ws_id] = now
         self._next_row_cache[ws_id] = len(values) + 1
@@ -1680,9 +1729,19 @@ class SheetWriter:
             return
         for ws in worksheets:
             title = (ws.title or "").strip()
-            if title in {GROUP_LEADS_WORKSHEET, TODAY_WORKSHEET}:
+            if title in {GROUP_LEADS_WORKSHEET, REGISTRATION_WORKSHEET, FAQ_QUESTIONS_WORKSHEET, FAQ_SUGGESTIONS_WORKSHEET, LIKE_TRAINING_SHEET}:
                 continue
-            if title in LEGACY_SHEET_NAMES or LEGACY_DAY_SHEET_RE.match(title):
+            parsed = self._parse_month_title(title)
+            if parsed:
+                year, month = parsed
+                expected_title = self._month_title(date(year, month, 1))
+                if title != expected_title:
+                    try:
+                        self.sh.del_worksheet(ws)
+                    except Exception as err:
+                        print(f"⚠️ Не вдалося видалити legacy лист '{title}': {err}")
+                continue
+            if title == TODAY_WORKSHEET or title in LEGACY_SHEET_NAMES or LEGACY_DAY_SHEET_RE.match(title):
                 try:
                     self.sh.del_worksheet(ws)
                 except Exception as err:
@@ -1714,7 +1773,7 @@ class SheetWriter:
         headers = self._get_headers(ws)
         self._ensure_row_index(ws, headers)
         ws_id = ws.id
-        idx = self._row_index_cache.get(ws_id, {}).get((str(peer_id), account_key))
+        idx = self._row_index_cache.get(ws_id, {}).get(str(peer_id))
         end_col = self._col_letter(len(headers))
         if idx:
             values = ws.get(f"A{idx}:{end_col}{idx}")
@@ -1734,16 +1793,13 @@ class SheetWriter:
             self._next_row_cache[ws_id] = 2
             return None, None
         try:
-            peer_idx = headers.index("Peer ID")
-            account_idx = headers.index("Аккаунт")
+            peer_idx = headers.index("Пир")
         except ValueError:
             return None, None
         found_idx = None
         found_row = None
         for row_idx, row in enumerate(values[1:], start=2):
-            peer_match = peer_idx < len(row) and row[peer_idx].strip() == str(peer_id)
-            account_match = account_idx < len(row) and row[account_idx].strip() == account_key
-            if peer_match and account_match:
+            if peer_idx < len(row) and row[peer_idx].strip() == str(peer_id):
                 found_idx = row_idx
                 found_row = row
                 break
@@ -1751,7 +1807,7 @@ class SheetWriter:
         if not isinstance(index, dict):
             index = {}
         if found_idx:
-            index[(str(peer_id), account_key)] = found_idx
+            index[str(peer_id)] = found_idx
         self._row_index_cache[ws_id] = index
         self._row_index_cache_ts[ws_id] = time.time()
         self._next_row_cache[ws_id] = len(values) + 1
@@ -1762,7 +1818,7 @@ class SheetWriter:
     def _find_row_by_peer(self, ws, peer_id: int):
         headers = self._get_headers(ws)
         try:
-            peer_idx = headers.index("Peer ID")
+            peer_idx = headers.index("Пир")
         except ValueError:
             return None, None
         try:
@@ -1778,7 +1834,7 @@ class SheetWriter:
     def _find_last_row_by_peer(self, ws, peer_id: int, account_key: Optional[str] = None):
         headers = self._get_headers(ws)
         try:
-            peer_idx = headers.index("Peer ID")
+            peer_idx = headers.index("Пир")
         except ValueError:
             return None, None
         account_idx = None
@@ -2191,6 +2247,7 @@ class SheetWriter:
         username: str,
         chat_link: str,
         status: Optional[str] = None,
+        shift: Optional[str] = None,
         auto_reply_enabled: Optional[bool] = None,
         last_in: Optional[str] = None,
         last_out: Optional[str] = None,
@@ -2205,14 +2262,11 @@ class SheetWriter:
         followup_last_sent_at: Optional[str] = None,
         candidate_note_append: Optional[str] = None,
     ):
-        del followup_stage, followup_next_at, followup_last_sent_at
+        del auto_reply_enabled, sender_role, dialog_mode, full_text, event_type_override
+        del followup_stage, followup_next_at, followup_last_sent_at, candidate_note_append
         ws = self._ensure_today_ws(tz)
         headers = self._get_headers(ws)
-        row_idx, existing = self._find_row(ws, peer_id, ACCOUNT_KEY)
-        # Keep exactly one row per peer in "Сегодня":
-        # if the row exists under another account key, reuse it instead of creating a new one.
-        if row_idx is None:
-            row_idx, existing = self._find_row_by_peer(ws, peer_id)
+        row_idx, existing = self._find_row_by_peer(ws, peer_id)
         existing = existing or [""] * len(headers)
         if len(existing) < len(headers):
             existing = existing + [""] * (len(headers) - len(existing))
@@ -2236,12 +2290,14 @@ class SheetWriter:
         if existing_status in IMMUTABLE_STATUSES:
             status = existing_status
 
-        now_iso = datetime.now(tz).isoformat(timespec="seconds")
+        now_date = str(datetime.now(tz).date())
         set_value("Дата", str(datetime.now(tz).date()))
         set_value("Имя", name)
         set_value("Username", ("@" + username) if username else "")
         set_value("Возраст", "")
         set_value("Наличие ПК/ноутбука", "")
+        if shift is not None:
+            set_value("Смена", shift)
         set_value("Ссылка на чат", chat_link)
         try:
             lead_info = self._find_group_lead_info(username, name)
@@ -2254,98 +2310,55 @@ class SheetWriter:
                 set_value("Ссылка на заявку", "")
         except Exception:
             set_value("Ссылка на заявку", "")
-        set_value("Статус", status)
-        if auto_reply_enabled is not None:
-            set_value("Автоответчик", "ON" if auto_reply_enabled else "OFF")
-        set_value("Последнее входящее", last_in)
-        set_value("Последнее исходящее", last_out)
-        set_value("Peer ID", str(peer_id))
-        set_value("Тех. шаг", tech_step or step_snapshot)
-        set_value("Обновлено", now_iso)
+        resolved_status = canonical_sheet_status(
+            incoming_status=status,
+            step_name=step_snapshot or tech_step,
+            existing_status=existing_status,
+            shift=(shift if shift is not None else (existing[col_idx("Смена")] if col_idx("Смена") is not None and col_idx("Смена") < len(existing) else "")),
+            last_out=last_out,
+        )
+        if resolved_status:
+            set_value("Статус", resolved_status)
+        set_value("Пир", str(peer_id))
         effective_account = self._owner_account_for_peer(peer_id, existing[col_idx("Аккаунт")] if col_idx("Аккаунт") is not None and col_idx("Аккаунт") < len(existing) else "")
         set_value("Аккаунт", effective_account)
-        if candidate_note_append:
-            notes_idx = col_idx("Відповіді кандидата")
-            if notes_idx is not None:
-                current_notes = existing[notes_idx] if notes_idx < len(existing) else ""
-                merged = candidate_note_append if not current_notes else f"{current_notes}\n---\n{candidate_note_append}"
-                existing[notes_idx] = merged
-
-        if HISTORY_LOG_ENABLED:
-            event_type = self._event_type(status, auto_reply_enabled, last_in, last_out, event_type_override)
-            history_link = self.append_history_event(
-                tz=tz,
-                event_type=event_type,
-                peer_id=peer_id,
-                name=name,
-                username=username,
-                chat_link=chat_link,
-                status=status,
-                auto_reply_enabled=auto_reply_enabled,
-                last_in=last_in,
-                last_out=last_out,
-                sender_role=sender_role,
-                dialog_mode=dialog_mode,
-                step_snapshot=step_snapshot or tech_step,
-                full_text=full_text,
-            )
-            if history_link is not None:
-                set_value("Ссылка на журнал", history_link)
-        else:
-            set_value("Ссылка на журнал", "")
+        first_start_idx = col_idx("Дата первого старта")
+        if first_start_idx is not None:
+            current_first_start = existing[first_start_idx] if first_start_idx < len(existing) else ""
+            if not str(current_first_start or "").strip():
+                existing[first_start_idx] = now_date
 
         try:
             if row_idx:
                 end_col = self._col_letter(len(headers))
                 ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
-                self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), effective_account)] = row_idx
+                self._row_index_cache.setdefault(ws.id, {})[str(peer_id)] = row_idx
             else:
                 row_idx_recheck, existing_recheck = self._find_row_by_peer(ws, peer_id)
                 if row_idx_recheck:
                     row_idx = row_idx_recheck
-                    existing = existing_recheck or [""] * len(headers)
-                    if len(existing) < len(headers):
-                        existing = existing + [""] * (len(headers) - len(existing))
                     end_col = self._col_letter(len(headers))
                     ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
-                    self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), effective_account)] = row_idx
+                    self._row_index_cache.setdefault(ws.id, {})[str(peer_id)] = row_idx
                     self._next_row_cache[ws.id] = max(int(self._next_row_cache.get(ws.id, 2)), row_idx + 1)
                 else:
                     ws.append_row(existing, value_input_option="USER_ENTERED")
                     self._invalidate_ws_cache(ws)
                     appended_row_idx, _ = self._find_last_row_by_peer(ws, peer_id)
                     if appended_row_idx:
-                        self._row_index_cache.setdefault(ws.id, {})[(str(peer_id), effective_account)] = appended_row_idx
+                        self._row_index_cache.setdefault(ws.id, {})[str(peer_id)] = appended_row_idx
                         self._next_row_cache[ws.id] = max(int(self._next_row_cache.get(ws.id, 2)), appended_row_idx + 1)
         except Exception as err:
-            print(f"⚠️ Не вдалося записати лист '{TODAY_WORKSHEET}': {err}")
+            print(f"⚠️ Не вдалося записати лист '{ws.title}': {err}")
             self._invalidate_ws_cache(ws)
             return
-        self._sort_today_by_updated(ws, headers)
 
     def load_enabled_peers(self, tz: ZoneInfo) -> set:
         ws = self._ensure_today_ws(tz)
         values = ws.get_all_values()
         if not values:
             return set()
-        headers = [h.strip() for h in values[0]]
-        try:
-            peer_idx = headers.index("Peer ID")
-            auto_idx = headers.index("Автоответчик")
-            account_idx = headers.index("Аккаунт")
-        except ValueError:
-            return set()
-        enabled = set()
-        for row in values[1:]:
-            if peer_idx >= len(row) or auto_idx >= len(row) or account_idx >= len(row):
-                continue
-            if row[account_idx].strip() != ACCOUNT_KEY:
-                continue
-            peer_raw = row[peer_idx].strip()
-            auto_raw = row[auto_idx].strip().lower()
-            if peer_raw.isdigit() and auto_raw in {"on", "1", "yes", "true", "enabled"}:
-                enabled.add(int(peer_raw))
-        return enabled
+        return set()
 
     def has_peer_for_account(self, tz: ZoneInfo, peer_id: int, account_key: str, require_enabled: bool = False) -> bool:
         ws = self._ensure_today_ws(tz)
@@ -2353,15 +2366,17 @@ class SheetWriter:
         row_idx, row = self._find_row(ws, peer_id, account_key)
         if not row_idx or not row:
             return False
-        if not require_enabled:
-            return True
         try:
-            auto_idx = headers.index("Автоответчик")
+            account_idx = headers.index("Аккаунт")
         except ValueError:
             return False
-        if auto_idx >= len(row):
+        if account_idx >= len(row):
             return False
-        return row[auto_idx].strip().lower() in {"on", "1", "yes", "true", "enabled"}
+        if row[account_idx].strip() != str(account_key or "").strip():
+            return False
+        if not require_enabled:
+            return True
+        return False
 
 
 class LocalPauseStore(LocalPauseStoreStore):
@@ -3778,67 +3793,6 @@ async def main():
 
         return "unknown"
 
-    def parse_age_bucket(text: str) -> str:
-        t = normalize_text(text)
-        if not t:
-            return "unknown"
-        m = re.search(r"(\d{2})", t)
-        if not m:
-            return "unknown"
-        age = int(m.group(1))
-        if age < 18:
-            return "under18"
-        if age > 40:
-            return "over40"
-        return "ok"
-
-
-    def parse_screening_q1_q2(text: str) -> Tuple[Optional[str], Optional[str], str]:
-        raw = (text or "").strip()
-        if not raw:
-            return None, None, "unknown"
-        parts = [p.strip() for p in re.split(r"[\n\r,;]+", raw) if p.strip()]
-        if not parts:
-            parts = [raw]
-
-        age_part: Optional[str] = None
-        age_bucket = "unknown"
-        for part in parts:
-            bucket = parse_age_bucket(part)
-            if bucket in {"under18", "over40", "ok"}:
-                age_part = part
-                age_bucket = bucket
-                break
-        if age_bucket == "unknown":
-            bucket = parse_age_bucket(raw)
-            if bucket in {"under18", "over40", "ok"}:
-                age_bucket = bucket
-                age_part = raw
-
-        q1_part: Optional[str] = None
-        for part in parts:
-            if age_part and part == age_part:
-                continue
-            norm = normalize_text(part)
-            if not norm or norm in {"+", "старт8", "start8"}:
-                continue
-            q1_part = part
-            break
-        if not q1_part and age_part:
-            cleaned = re.sub(r"\b\d{1,2}\b", "", raw)
-            cleaned = re.sub(r"\b(років|роки|рік|лет|года|год)\b", "", cleaned, flags=re.IGNORECASE)
-            cleaned = cleaned.strip(" ,.;:-")
-            if cleaned:
-                q1_part = cleaned
-
-        age_value: Optional[str] = None
-        if age_part:
-            m = re.search(r"(\d{1,2})", age_part)
-            if m:
-                age_value = m.group(1)
-
-        return q1_part, age_value, age_bucket
-
     async def send_v2_message(
         entity: User,
         text: str,
@@ -3866,64 +3820,51 @@ async def main():
         )
         return bool(ok)
 
-    async def send_test_task_content(sender: User, state: PeerRuntimeState) -> bool:
-        if not TEST_TASK_MESSAGE_LINK:
-            await send_v2_message(
-                sender,
-                "Контент для наступного етапу тимчасово недоступний. Зараз уточню і повернусь до вас.",
-                STEP_PROOF_FORWARD,
-            )
-            return False
-        if BOT_REPLY_DELAY_SEC > 0:
-            await asyncio.sleep(BOT_REPLY_DELAY_SEC)
-        ok = await dispatch_v2_content(sender, TEST_TASK_MESSAGE_LINK, STEP_PROOF_FORWARD, "🎥 Більше інформації")
-        if not ok:
-            await send_v2_message(
-                sender,
-                "Не вдалося надіслати матеріал тестового завдання. Повторю трохи пізніше.",
-                STEP_PROOF_FORWARD,
-            )
-            return False
-        state.flow_step = STEP_TEST_REVIEW
-        state.balance_confirm_clarify_count = 0
+    async def send_form_handoff_content(sender: User, state: PeerRuntimeState) -> bool:
+        if FORM_MESSAGE_LINK:
+            ok = await dispatch_v2_content(sender, FORM_MESSAGE_LINK, STEP_FORM_FORWARD, STATUS_FORM_REQUESTED)
+            if not ok:
+                await send_v2_message(sender, FORM_TEXT, STEP_FORM_FORWARD, status=STATUS_FORM_REQUESTED)
+        else:
+            await send_v2_message(sender, FORM_TEXT, STEP_FORM_FORWARD, status=STATUS_FORM_REQUESTED)
+        state.flow_step = STEP_FORM_FORWARD
         state.test_answers = []
-        state.test_prompted_at = time.time()
         state.test_help_sent = False
+        state.test_prompted_at = 0.0
         state.test_message_count = 0
         state.test_last_message = ""
         state.test_ready_clarify_count = 0
-        arm_step_wait(state, STEP_TEST_REVIEW, time.time())
+        state.form_waiting_photo = True
+        state.form_prompted_at = time.time()
+        state.form_photo_reminder_sent = False
+        arm_step_wait(state, STEP_FORM_FORWARD, time.time())
         return True
 
-    async def start_balance_detour(sender: User, state: PeerRuntimeState, source_step: str) -> bool:
-        checkpoint = balance_detour_checkpoint(source_step)
-        if not checkpoint or checkpoint not in BALANCE_RESUME_CHECKPOINTS:
-            return False
-        balance_links = [PHOTO_1_MESSAGE_LINK, PHOTO_2_MESSAGE_LINK]
-        missing = [link for link in balance_links if not link]
-        if missing:
+    async def send_earnings_training_explainer(
+        sender: User,
+        state: PeerRuntimeState,
+        final_prompt: Optional[str] = None,
+    ) -> bool:
+        messages = (
+            EARNINGS_EXPLAINER_TEXT_1,
+            EARNINGS_EXPLAINER_TEXT_2,
+            EARNINGS_EXPLAINER_TEXT_3,
+        )
+        for idx, message_text in enumerate(messages):
             await send_v2_message(
                 sender,
-                "Контент для блоку балансів тимчасово недоступний. Зараз уточню і повернусь до вас.",
-                STEP_PROOF_FORWARD,
+                message_text,
+                STEP_BALANCE_CONFIRM,
+                status=STATUS_EARNINGS_EXPLAINED,
             )
-            return False
-        if BOT_REPLY_DELAY_SEC > 0:
-            await asyncio.sleep(BOT_REPLY_DELAY_SEC)
-        for idx, link in enumerate(balance_links):
-            ok = await dispatch_v2_content(sender, link, STEP_PROOF_FORWARD, "🎥 Більше інформації")
-            if not ok:
-                await send_v2_message(
-                    sender,
-                    "Не вдалося надіслати один із матеріалів. Повторю трохи пізніше.",
-                    STEP_PROOF_FORWARD,
-                )
-                return False
-            if BOT_REPLY_DELAY_SEC > 0 and idx < (len(balance_links) - 1):
+            if BOT_REPLY_DELAY_SEC > 0 and idx < (len(messages) - 1):
                 await asyncio.sleep(BOT_REPLY_DELAY_SEC)
-        await send_v2_message(sender, BALANCE_CONFIRM_TEXT, STEP_BALANCE_CONFIRM, status="💰 Баланси")
-        state.resume_step_after_balance = balance_resume_step(checkpoint)
-        state.resume_checkpoint_after_balance = checkpoint
+        await send_v2_message(
+            sender,
+            final_prompt or BALANCE_CONFIRM_TEXT,
+            STEP_BALANCE_CONFIRM,
+            status=STATUS_EARNINGS_EXPLAINED,
+        )
         state.flow_step = STEP_BALANCE_CONFIRM
         state.balance_block_shown = True
         state.balance_block_skipped = False
@@ -3934,6 +3875,15 @@ async def main():
         state.qa_gate_reminder_sent = False
         arm_step_wait(state, STEP_BALANCE_CONFIRM, time.time())
         return True
+
+    async def start_balance_detour(sender: User, state: PeerRuntimeState, source_step: str) -> bool:
+        checkpoint = balance_detour_checkpoint(source_step)
+        if not checkpoint or checkpoint not in BALANCE_RESUME_CHECKPOINTS:
+            return False
+        state.resume_step_after_balance = balance_resume_step(checkpoint)
+        state.resume_checkpoint_after_balance = checkpoint
+        final_prompt = balance_resume_message(checkpoint) or BALANCE_CONFIRM_TEXT
+        return await send_earnings_training_explainer(sender, state, final_prompt=final_prompt)
 
     async def resume_after_balance(sender: User, state: PeerRuntimeState) -> bool:
         checkpoint = (state.resume_checkpoint_after_balance or "").strip()
@@ -3967,23 +3917,18 @@ async def main():
         v2_enrollment.add(peer_id)
         v2_state = PeerRuntimeState(
             peer_id=peer_id,
-            flow_step=STEP_SCREENING_WAIT,
+            flow_step=STEP_COMPANY_INTRO,
             auto_mode="ON",
             paused=False,
-            screening_started_at=time.time(),
-            screening_q1_asked=True,
-            screening_q2_asked=False,
-            screening_q1_answer="",
-            screening_q2_answer="",
             step_wait_started_at=time.time(),
-            step_wait_step=STEP_SCREENING_WAIT,
+            step_wait_step=STEP_COMPANY_INTRO,
             step_followup_stage=0,
             step_followup_last_at=0.0,
         )
         v2_runtime.set(v2_state)
         try:
-            intro_ok = await send_v2_message(entity, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
-            q1_ok = await send_v2_message(entity, SCREENING_Q1_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
+            intro_ok = await send_v2_message(entity, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status=STATUS_INTRO_SENT)
+            q1_ok = await send_v2_message(entity, COMPANY_INTRO_TEXT, STEP_COMPANY_INTRO, status=STATUS_INTRO_SENT)
         except Exception as err:
             print(f"⚠️ ONBOARDING_SEND_FAIL peer={peer_id} source={start_source} err={type(err).__name__}: {err}")
             return False
@@ -4153,23 +4098,7 @@ async def main():
 
     async def finalize_test_ready(sender: User, state: PeerRuntimeState, confirmation_text: str) -> bool:
         enqueue_candidate_note(sender, f"Підтвердження готовності: {confirmation_text.strip()}")
-        if FORM_MESSAGE_LINK:
-            ok = await dispatch_v2_content(sender, FORM_MESSAGE_LINK, STEP_FORM_FORWARD, "📝 Анкета")
-            if not ok:
-                await send_v2_message(sender, FORM_TEXT, STEP_FORM_FORWARD, status="📝 Анкета")
-        else:
-            await send_v2_message(sender, FORM_TEXT, STEP_FORM_FORWARD, status="📝 Анкета")
-        state.flow_step = STEP_FORM_FORWARD
-        state.test_answers = []
-        state.test_help_sent = False
-        state.test_prompted_at = 0.0
-        state.test_message_count = 0
-        state.test_last_message = ""
-        state.test_ready_clarify_count = 0
-        state.form_waiting_photo = True
-        state.form_prompted_at = time.time()
-        state.form_photo_reminder_sent = False
-        clear_step_wait(state)
+        await send_form_handoff_content(sender, state)
         v2_runtime.set(state)
         return True
 
@@ -4207,18 +4136,6 @@ async def main():
         voice_not_listened = step_name == STEP_VOICE_WAIT and is_voice_not_listened_reply(text)
         balance_interest_question = intent_name == "question" and is_balance_interest_question(text)
 
-        if state.rejected_by_age in {"under18", "over40"}:
-            if not state.referral_after_reject_sent:
-                await send_v2_message(sender, REFERRAL_AFTER_REJECT_TEXT, STEP_AGE_REJECTED, status=REFERRAL_STATUS)
-                state.referral_after_reject_sent = True
-                state.auto_mode = "OFF"
-                state.paused = True
-                paused_peers.add(sender.id)
-                enabled_peers.discard(sender.id)
-                clear_step_wait(state)
-                v2_runtime.set(state)
-            return True
-
         if should_replace_voice_with_text(step_name, text):
             recap_blocks = build_voice_text_recap_blocks()
             recap_text = next((b for b in recap_blocks if (b or "").strip()), "")
@@ -4227,9 +4144,9 @@ async def main():
                     sender,
                     recap_text,
                     step_name,
-                    status="🎧 Голосове",
+                    status=STATUS_INTRO_SENT,
                 )
-            await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status="🕒 Графік")
+            await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status=STATUS_SHIFT_PENDING)
             state.flow_step = STEP_SCHEDULE_SHIFT_WAIT
             state.shift_prompted_at = time.time()
             state.schedule_shift_fit_check_pending = False
@@ -4237,8 +4154,7 @@ async def main():
             v2_runtime.set(state)
             return True
 
-        screening_q1_reply = step_name == STEP_SCREENING_WAIT and is_screening_q1_reply_text(text)
-        if is_hard_stop_message(text) and not screening_q1_reply and not voice_not_listened:
+        if is_hard_stop_message(text) and not voice_not_listened:
             await send_v2_message(sender, STOP_REPLY_TEXT, step_name, status=AUTO_STOP_STATUS)
             state.auto_mode = "OFF"
             state.paused = True
@@ -4257,9 +4173,9 @@ async def main():
                 sender,
                 "Розумію. Тоді продовжу в текстовому вигляді.",
                 STEP_VOICE_WAIT,
-                status="🎧 Голосове",
+                status=STATUS_INTRO_SENT,
             )
-            await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status="🕒 Графік")
+            await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status=STATUS_SHIFT_PENDING)
             state.flow_step = STEP_SCHEDULE_SHIFT_WAIT
             state.shift_prompted_at = time.time()
             state.schedule_shift_fit_check_pending = False
@@ -4272,7 +4188,7 @@ async def main():
             and step_name not in {STEP_SCHEDULE_SHIFT_WAIT, STEP_SCHEDULE_CONFIRM}
             and is_schedule_question_text(text)
         ):
-            await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status="🕒 Графік")
+            await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status=STATUS_SHIFT_PENDING)
             state.flow_step = STEP_SCHEDULE_SHIFT_WAIT
             state.shift_prompted_at = time.time()
             state.schedule_shift_fit_check_pending = False
@@ -4470,71 +4386,22 @@ async def main():
             return True
 
         if step_name == STEP_SCREENING_WAIT:
-            q1_text, q2_age, age_bucket = parse_screening_q1_q2(text)
-            now_ts = time.time()
-            if not state.screening_started_at:
-                state.screening_started_at = now_ts
-            state.screening_last_at = now_ts
-
-            if q1_text and not (state.screening_q1_answer or "").strip():
-                state.screening_q1_answer = q1_text.strip()
-                state.screening_q1_asked = True
-
-            if q2_age and not (state.screening_q2_answer or "").strip():
-                state.screening_q2_answer = q2_age.strip()
-                state.screening_q2_asked = True
-
-            if age_bucket in {"under18", "over40"}:
-                reject_text = AGE_UNDER18_TEXT if age_bucket == "under18" else AGE_OVER40_TEXT
-                await send_v2_message(sender, reject_text, STEP_AGE_REJECTED, status=AUTO_STOP_STATUS)
-                state.flow_step = STEP_AGE_REJECTED
-                state.rejected_by_age = age_bucket
-                state.auto_mode = "OFF"
-                state.paused = True
-                paused_peers.add(sender.id)
-                enabled_peers.discard(sender.id)
-                clear_step_wait(state)
-                v2_runtime.set(state)
-                return True
-
-            have_q1 = bool((state.screening_q1_answer or "").strip())
-            have_q2 = bool((state.screening_q2_answer or "").strip())
-
-            if have_q1 and not have_q2 and not state.screening_q2_asked:
-                await send_v2_message(sender, SCREENING_Q2_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
-                state.screening_q2_asked = True
-                state.screening_started_at = now_ts
-                arm_step_wait(state, STEP_SCREENING_WAIT, time.time())
-                v2_runtime.set(state)
-                return True
-
-            if have_q1 and have_q2:
-                enqueue_candidate_note(sender, format_numbered_answers([state.screening_q1_answer, state.screening_q2_answer]))
-                await send_v2_message(sender, COMPANY_INTRO_TIMEOUT_TEXT, STEP_COMPANY_INTRO, status="🏢 Знайомство з компанією")
-                state.flow_step = STEP_COMPANY_INTRO
-                state.screening_started_at = 0.0
-                state.screening_last_at = 0.0
-                state.screening_answers = []
-                arm_step_wait(state, STEP_COMPANY_INTRO, time.time())
-                v2_runtime.set(state)
-                return True
-
+            await send_v2_message(sender, COMPANY_INTRO_TIMEOUT_TEXT, STEP_COMPANY_INTRO, status=STATUS_INTRO_SENT)
+            state.flow_step = STEP_COMPANY_INTRO
+            state.screening_started_at = 0.0
+            state.screening_last_at = 0.0
+            state.screening_answers = []
+            arm_step_wait(state, STEP_COMPANY_INTRO, time.time())
             v2_runtime.set(state)
             return True
 
         if step_name == STEP_COMPANY_INTRO:
-            if intent_name == "ack_continue" and VOICE_MESSAGE_LINK:
-                ok = await dispatch_v2_content(sender, VOICE_MESSAGE_LINK, STEP_COMPANY_INTRO, "🎧 Голосове")
-                if not ok:
-                    await send_v2_message(sender, "Зараз не вдалося надіслати голосове. Коротко поясню далі в чаті.", STEP_COMPANY_INTRO)
-                else:
-                    state.flow_step = STEP_VOICE_WAIT
-                    state.voice_stage = VOICE_SENT
-                    state.voice_sent_at = time.time()
-                    arm_step_wait(state, STEP_VOICE_WAIT, time.time())
-                    v2_runtime.set(state)
-                    return True
-            await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status="🕒 Графік")
+            if intent_name != "ack_continue":
+                await send_v2_message(sender, COMPANY_INTRO_TIMEOUT_TEXT, STEP_COMPANY_INTRO, status=STATUS_INTRO_SENT)
+                arm_step_wait(state, STEP_COMPANY_INTRO, time.time())
+                v2_runtime.set(state)
+                return True
+            await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status=STATUS_SHIFT_PENDING)
             state.flow_step = STEP_SCHEDULE_SHIFT_WAIT
             state.shift_prompted_at = time.time()
             state.schedule_shift_fit_check_pending = False
@@ -4544,14 +4411,14 @@ async def main():
 
         if step_name == STEP_VOICE_WAIT:
             if intent_name == "ack_continue":
-                await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status="🕒 Графік")
+                await send_v2_message(sender, SCHEDULE_SHIFT_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status=STATUS_SHIFT_PENDING)
                 state.flow_step = STEP_SCHEDULE_SHIFT_WAIT
                 state.shift_prompted_at = time.time()
                 state.schedule_shift_fit_check_pending = False
                 arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
                 v2_runtime.set(state)
                 return True
-            await send_v2_message(sender, get_step_clarify_text(STEP_VOICE_WAIT), STEP_VOICE_WAIT, status="🎧 Голосове")
+            await send_v2_message(sender, get_step_clarify_text(STEP_VOICE_WAIT), STEP_VOICE_WAIT, status=STATUS_INTRO_SENT)
             arm_step_wait(state, STEP_VOICE_WAIT, time.time())
             v2_runtime.set(state)
             return True
@@ -4562,7 +4429,7 @@ async def main():
                     state.schedule_shift_fit_check_pending = False
                     await send_v2_message(
                         sender,
-                        "Підкажіть, будь ласка, яку зміну обираєте: денну чи нічну?",
+                        "Підкажіть, будь ласка, яку зміну Вам зручніше розглянути: денну чи нічну?",
                         STEP_SCHEDULE_SHIFT_WAIT,
                     )
                     state.shift_prompted_at = time.time()
@@ -4581,7 +4448,7 @@ async def main():
                     return True
                 await send_v2_message(
                     sender,
-                    "Підкажіть, будь ласка, чи підходить вам графік з двома змінами: денна або нічна?",
+                    "Підкажіть, будь ласка, чи підходить Вам формат із двома змінами на вибір: денна або нічна?",
                     STEP_SCHEDULE_SHIFT_WAIT,
                 )
                 state.shift_prompted_at = time.time()
@@ -4590,14 +4457,24 @@ async def main():
                 return True
             choice = parse_shift_choice(text)
             if not choice:
-                await send_v2_message(sender, "Підкажіть, будь ласка, яку зміну обираєте: денну чи нічну?", STEP_SCHEDULE_SHIFT_WAIT)
+                await send_v2_message(sender, "Підкажіть, будь ласка, яку зміну Вам зручніше розглянути: денну чи нічну?", STEP_SCHEDULE_SHIFT_WAIT)
                 state.shift_prompted_at = time.time()
                 arm_step_wait(state, STEP_SCHEDULE_SHIFT_WAIT, time.time())
                 v2_runtime.set(state)
                 return True
             enqueue_candidate_note(sender, f"Графік: {choice}")
-            await send_v2_message(sender, SCHEDULE_DETAILS_TEXT, STEP_SCHEDULE_BLOCK, status="🕒 Графік")
-            await send_v2_message(sender, SCHEDULE_CONFIRM_TEXT, STEP_SCHEDULE_CONFIRM, status="🕒 Графік")
+            queue_today_upsert(
+                peer_id=sender.id,
+                name=getattr(sender, "first_name", "") or "Unknown",
+                username=getattr(sender, "username", "") or "",
+                chat_link=build_chat_link_app(sender, sender.id),
+                status=STATUS_SHIFT_SELECTED,
+                shift=choice,
+                step_snapshot=STEP_SCHEDULE_BLOCK,
+                tech_step=STEP_SCHEDULE_BLOCK,
+            )
+            await send_v2_message(sender, SCHEDULE_DETAILS_TEXT, STEP_SCHEDULE_BLOCK, status=STATUS_WORK_EXPLAINED)
+            await send_v2_message(sender, SCHEDULE_CONFIRM_TEXT, STEP_SCHEDULE_CONFIRM, status=STATUS_WORK_EXPLAINED)
             state.flow_step = STEP_SCHEDULE_CONFIRM
             state.shift_choice = choice
             state.schedule_shift_fit_check_pending = False
@@ -4613,10 +4490,16 @@ async def main():
                 v2_runtime.set(state)
                 return True
             state.schedule_confirm_clarify_count = 0
-            if not state.balance_block_shown:
-                state.balance_block_skipped = True
-            sent_test_task = await send_test_task_content(sender, state)
-            if not sent_test_task:
+            if state.balance_block_shown:
+                sent_form = await send_form_handoff_content(sender, state)
+                if not sent_form:
+                    v2_runtime.set(state)
+                    return True
+                v2_runtime.set(state)
+                return True
+            state.balance_block_skipped = True
+            sent_explainer = await send_earnings_training_explainer(sender, state)
+            if not sent_explainer:
                 v2_runtime.set(state)
                 return True
             v2_runtime.set(state)
@@ -4627,12 +4510,20 @@ async def main():
                 arm_step_wait(state, STEP_BALANCE_CONFIRM, time.time())
                 v2_runtime.set(state)
                 return True
+            resume_target = balance_resume_step(state.resume_checkpoint_after_balance)
+            if resume_target == STEP_SCHEDULE_CONFIRM:
+                sent_form = await send_form_handoff_content(sender, state)
+                if not sent_form:
+                    v2_runtime.set(state)
+                    return True
+                v2_runtime.set(state)
+                return True
             resumed = await resume_after_balance(sender, state)
             if resumed:
                 v2_runtime.set(state)
                 return True
-            sent_test_task = await send_test_task_content(sender, state)
-            if not sent_test_task:
+            sent_form = await send_form_handoff_content(sender, state)
+            if not sent_form:
                 v2_runtime.set(state)
                 return True
             v2_runtime.set(state)
@@ -4653,23 +4544,17 @@ async def main():
                         delay_before=QUESTION_RESPONSE_DELAY_SEC,
                     )
                     enqueue_faq_question(sender.id, STEP_TEST_REVIEW, text, answer_text)
-                state.test_prompted_at = time.time()
-                state.test_help_sent = False
                 arm_step_wait(state, STEP_TEST_REVIEW, time.time())
                 v2_runtime.set(state)
                 return True
-            state.test_message_count = int(state.test_message_count or 0) + 1
-            state.test_last_message = (text or "").strip()
-            state.test_prompted_at = state.test_prompted_at or time.time()
-            state.test_help_sent = False
-            arm_step_wait(state, STEP_TEST_REVIEW, time.time())
+            await send_form_handoff_content(sender, state)
             v2_runtime.set(state)
             return True
 
         if step_name == STEP_FORM_FORWARD:
             if has_photo:
                 enqueue_candidate_note(sender, "Фото анкети отримано")
-                await send_v2_message(sender, "Дякую! Передаю вашу анкету тімліду, далі звʼяжемось по старту 🙌", STEP_HANDOFF, status=CONFIRM_STATUS)
+                await send_v2_message(sender, "Дякую. Передаю Вашу анкету тімліду, далі з Вами звʼяжуться по старту.", STEP_HANDOFF, status=CONFIRM_STATUS)
                 state.flow_step = STEP_HANDOFF
                 state.form_waiting_photo = False
                 state.form_prompted_at = 0.0
@@ -4680,11 +4565,20 @@ async def main():
             if text.strip():
                 enqueue_candidate_note(sender, text)
                 if is_filled_form_text(text) and not message_has_question(text):
+                    queue_today_upsert(
+                        peer_id=sender.id,
+                        name=getattr(sender, "first_name", "") or "Unknown",
+                        username=getattr(sender, "username", "") or "",
+                        chat_link=build_chat_link_app(sender, sender.id),
+                        status=STATUS_FORM_RECEIVED,
+                        step_snapshot=STEP_FORM_FORWARD,
+                        tech_step=STEP_FORM_FORWARD,
+                    )
                     await send_v2_message(
                         sender,
-                        "Дякую, анкету отримав. Будь ласка, надішліть фото або скрін документа для верифікації.",
+                        "Дякую, анкету отримав. Будь ласка, надішліть фото або скрін документа для підтвердження віку.",
                         STEP_FORM_FORWARD,
-                        status="📝 Анкета",
+                        status=STATUS_DOC_PENDING,
                     )
                     state.form_prompted_at = time.time()
                     state.form_photo_reminder_sent = False
@@ -4702,22 +4596,17 @@ async def main():
             v2_enrollment.add(peer_id)
             seeded_state = PeerRuntimeState(
                 peer_id=peer_id,
-                flow_step=STEP_SCREENING_WAIT,
+                flow_step=STEP_COMPANY_INTRO,
                 auto_mode="ON",
                 paused=False,
-                screening_started_at=time.time(),
-                screening_q1_asked=True,
-                screening_q2_asked=False,
-                screening_q1_answer="",
-                screening_q2_answer="",
                 step_wait_started_at=time.time(),
-                step_wait_step=STEP_SCREENING_WAIT,
+                step_wait_step=STEP_COMPANY_INTRO,
                 step_followup_stage=0,
                 step_followup_last_at=0.0,
             )
             v2_runtime.set(seeded_state)
-            await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
-            await send_v2_message(sender, SCREENING_Q1_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
+            await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status=STATUS_INTRO_SENT)
+            await send_v2_message(sender, COMPANY_INTRO_TEXT, STEP_COMPANY_INTRO, status=STATUS_INTRO_SENT)
             print(f"✅ V2 auto-enrolled peer={peer_id}")
             return True
         v2_state = v2_runtime.get(peer_id)
@@ -5011,7 +4900,7 @@ async def main():
         if is_no_laptop_value(group_data.get("pc", "")):
             print("⏭️ Пропускаю контакт: в анкеті немає ПК/ноутбука")
             if group_data:
-                skip_status = "⛔ Без ПК/ноутбука"
+                skip_status = STATUS_NO_PC
                 if not enqueue_sheet_event("group_leads_upsert", {"data": group_data, "status": skip_status}):
                     try:
                         group_leads_sheet.upsert(tz, group_data, skip_status)
@@ -5435,22 +5324,17 @@ async def main():
             v2_enrollment.add(peer_id)
             v2_state = PeerRuntimeState(
                 peer_id=peer_id,
-                flow_step=STEP_SCREENING_WAIT,
+                flow_step=STEP_COMPANY_INTRO,
                 auto_mode="ON",
                 paused=False,
-                screening_started_at=time.time(),
-                screening_q1_asked=True,
-                screening_q2_asked=False,
-                screening_q1_answer="",
-                screening_q2_answer="",
                 step_wait_started_at=time.time(),
-                step_wait_step=STEP_SCREENING_WAIT,
+                step_wait_step=STEP_COMPANY_INTRO,
                 step_followup_stage=0,
                 step_followup_last_at=0.0,
             )
             v2_runtime.set(v2_state)
-            await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
-            await send_v2_message(sender, SCREENING_Q1_TEXT, STEP_SCREENING_WAIT, status="👋 Привітання")
+            await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status=STATUS_INTRO_SENT)
+            await send_v2_message(sender, COMPANY_INTRO_TEXT, STEP_COMPANY_INTRO, status=STATUS_INTRO_SENT)
             print(f"✅ START8 switched to V2 flow peer={peer_id}")
             return
         is_test = is_test_user(sender)
@@ -5840,7 +5724,7 @@ async def main():
                                     entity,
                                     "Будь ласка, надішліть фото або скрін документа для верифікації.",
                                     STEP_FORM_FORWARD,
-                                    status="📝 Анкета",
+                                    status=STATUS_DOC_PENDING,
                                 )
                                 if ok:
                                     v2s.form_photo_reminder_sent = True

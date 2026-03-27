@@ -7,21 +7,22 @@ from typing import Callable, List, Optional
 
 VOICE_TEXT_FALLBACK_BLOCK_1 = (
     "Коротко поясню умови текстом.\n\n"
-    "Сайт працює так: чоловіки оплачують кожну хвилину спілкування, листи, фото та відео. "
-    "Робота чат-менеджера — вести цікаву комунікацію, створювати інвайти та листи, "
-    "щоб підтримувати активність у чаті.\n\n"
-    "Робота віддалена, 8 годин за ПК/ноутбуком, без дзвінків і відеозвʼязку. "
-    "На старті є стажування з тімлідом: він допомагає адаптуватися та веде по процесу. "
-    "Після успішного завершення стажування відкривається доступ до першої виплати."
+    "Це віддалена full-time робота чат-менеджером у сфері дейтингу: Ви ведете текстове спілкування "
+    "від імені анкети, відповідаєте на повідомлення, листи та інвайти, без дзвінків і відеозвʼязку. "
+    "Працювати потрібно з ПК або ноутбука 8 годин у вибраній зміні.\n\n"
+    "На старті є навчання та стажування з тімлідом, тому формат підходить і тим, хто хоче швидко "
+    "увійти в процес і зрозуміти роботу поетапно."
 )
 
 VOICE_TEXT_FALLBACK_BLOCK_2 = (
-    "Щодо оплати: дохід формується з відсотка від балансу анкети та активності в чаті.\n\n"
-    "У перший місяць базовий відсоток становить 48%, окремо враховуються реальні подарунки. "
-    "Є чітка тарифікація дій (чат, листи, фото, відео), тому дохід напряму залежить від "
-    "якості комунікації та регулярності роботи.\n\n"
-    "Також на платформі є вбудований перекладач, оскільки основна аудиторія — користувачі з Америки."
+    "По оплаті модель прозора: дохід формується з відсотка від балансу анкети, тобто від активності "
+    "користувачів у чатах, листах, фото та відео. У перший місяць базовий відсоток становить 48%, "
+    "окремо враховуються реальні подарунки.\n\n"
+    "Після цього етапу ми узгоджуємо зміну, за потреби знімаємо питання по умовах, пояснюємо логіку "
+    "заробітку та безкоштовного навчання і передаємо Вас до анкети для старту."
 )
+
+SALES_SCRIPT_PATH = "sales-script.md"
 
 
 @dataclass
@@ -54,12 +55,41 @@ def load_faq_corpus() -> str:
     return "\n\n".join([c for c in chunks if c])
 
 
+def load_sales_script_context() -> str:
+    if not os.path.exists(SALES_SCRIPT_PATH):
+        return ""
+    try:
+        with open(SALES_SCRIPT_PATH, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
 def _compact_text_block(text: str) -> str:
     lines = [line.strip() for line in (text or "").splitlines()]
     compact = "\n".join([line for line in lines if line])
     return compact.strip()
 
+
+def _extract_markdown_section(markdown: str, heading: str) -> str:
+    if not markdown:
+        return ""
+    pattern = re.compile(
+        rf"^##\s+{re.escape(heading)}\s*$\n(.*?)(?=^##\s+|\Z)",
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    match = pattern.search(markdown)
+    if not match:
+        return ""
+    return _compact_text_block(match.group(1))
+
 def build_voice_text_recap_blocks() -> List[str]:
+    sales_script = load_sales_script_context()
+    voice_block_1 = _extract_markdown_section(sales_script, "Voice Recap 1")
+    voice_block_2 = _extract_markdown_section(sales_script, "Voice Recap 2")
+    if voice_block_1 and voice_block_2:
+        return [voice_block_1, voice_block_2]
+
     faq_text = ""
     path = "faq-for-ai.txt"
     if os.path.exists(path):
@@ -68,14 +98,6 @@ def build_voice_text_recap_blocks() -> List[str]:
                 faq_text = f.read()
         except OSError:
             faq_text = ""
-
-    marker = "Як складається баланс:"
-    if faq_text and marker in faq_text:
-        before, after = faq_text.split(marker, 1)
-        first = _compact_text_block(before)
-        second = _compact_text_block(f"{marker}\n{after}")
-        if first and second:
-            return [first, second]
 
     if faq_text:
         paragraphs = [p.strip() for p in faq_text.split("\n\n") if p.strip()]
@@ -99,15 +121,18 @@ async def answer_from_faq(
     question_norm = normalize_question(question)
     cluster_key = build_cluster_key(question_norm)
     faq_corpus = load_faq_corpus()
+    sales_script = load_sales_script_context()
     length_rule = "до 6-8 коротких речень" if mode == "detailed" else "до 3 коротких речень"
     draft = (
         "Відповідай лише українською. "
         "Звертайтесь до кандидата виключно на «Ви». "
-        "Відповідай тільки в межах фактів з контексту FAQ нижче. "
+        "Відповідай тільки в межах фактів з контексту FAQ та sales script нижче. "
+        "Основне завдання: дати пряму відповідь на запитання кандидата і, якщо доречно, мʼяко повернути його до наступного етапу. "
         f"Формат відповіді: {length_rule}. "
         "Якщо питання поза FAQ, чесно скажи що уточниш деталі.\n\n"
         f"Поточний крок сценарію: {step}\n"
         f"Питання кандидата: {question}\n\n"
+        f"Sales script:\n{sales_script[:8000]}\n\n"
         f"FAQ контекст:\n{faq_corpus[:12000]}"
     )
     text = await dialog_suggest(history, draft, no_questions=True)

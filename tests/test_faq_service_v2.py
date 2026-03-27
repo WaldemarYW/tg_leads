@@ -1,6 +1,11 @@
 import unittest
 
-from faq_service import build_cluster_key, build_voice_text_recap_blocks, normalize_question
+from faq_service import (
+    build_cluster_key,
+    build_voice_text_recap_blocks,
+    load_sales_script_context,
+    normalize_question,
+)
 
 
 class FAQServiceTests(unittest.TestCase):
@@ -15,7 +20,12 @@ class FAQServiceTests(unittest.TestCase):
         blocks = build_voice_text_recap_blocks()
         self.assertEqual(len(blocks), 2)
         self.assertTrue(all(bool((b or "").strip()) for b in blocks))
-        self.assertIn("баланс", blocks[1].lower())
+        self.assertIn("дох", blocks[1].lower())
+
+    def test_sales_script_loaded(self):
+        script = load_sales_script_context()
+        self.assertIn("Premium HR Sales Script", script)
+        self.assertIn("Voice Recap 1", script)
 
 
 if __name__ == "__main__":

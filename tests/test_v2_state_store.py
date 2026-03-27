@@ -22,7 +22,7 @@ class V2StateStoreTests(unittest.TestCase):
             store.set(state)
             loaded = store.get(123)
             self.assertEqual(loaded.peer_id, 123)
-            self.assertEqual(loaded.flow_step, "screening_wait")
+            self.assertEqual(loaded.flow_step, "screening_fit")
 
     def test_runtime_store_persists_balance_resume_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -38,8 +38,9 @@ class V2StateStoreTests(unittest.TestCase):
             )
             store.set(state)
             loaded = store.get(321)
-            self.assertEqual(loaded.resume_step_after_balance, "schedule_confirm")
-            self.assertEqual(loaded.resume_checkpoint_after_balance, "after_schedule_confirm_question")
+            self.assertEqual(loaded.flow_step, "income_model")
+            self.assertEqual(loaded.resume_step_after_balance, "objection_gate")
+            self.assertEqual(loaded.resume_checkpoint_after_balance, "after_objection_gate")
             self.assertTrue(loaded.balance_block_shown)
             self.assertFalse(loaded.balance_block_skipped)
 

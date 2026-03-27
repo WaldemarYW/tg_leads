@@ -7,7 +7,7 @@ import uuid
 from dataclasses import asdict, fields
 from typing import Dict, Iterable, Set
 
-from flow_engine import PeerRuntimeState
+from flow_engine import PeerRuntimeState, canonical_checkpoint_name, canonical_step_name
 
 
 class V2EnrollmentStore:
@@ -175,9 +175,17 @@ class V2RuntimeStore:
         if not isinstance(raw, dict):
             raw = {}
         sanitized = {k: v for k, v in raw.items() if k in self._state_field_names}
-        merged = {"peer_id": int(peer_id), **sanitized}
-        if len(sanitized) != len(raw):
-            self.data[key] = sanitized
+        migrated = dict(sanitized)
+        for field_name in ("flow_step", "qa_gate_step", "step_wait_step", "resume_step_after_balance"):
+            if field_name in migrated:
+                migrated[field_name] = canonical_step_name(str(migrated.get(field_name) or ""))
+        if "resume_checkpoint_after_balance" in migrated:
+            migrated["resume_checkpoint_after_balance"] = canonical_checkpoint_name(
+                str(migrated.get("resume_checkpoint_after_balance") or "")
+            )
+        merged = {"peer_id": int(peer_id), **migrated}
+        if len(sanitized) != len(raw) or migrated != sanitized:
+            self.data[key] = migrated
             self._save()
         return PeerRuntimeState(**merged)
 
