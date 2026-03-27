@@ -293,6 +293,8 @@ STATUS_NOT_RELEVANT = "Не актуально"
 STATUS_STOPPED = "Отказ кандидата"
 STATUS_SHIFT_MISMATCH = "Не подходит график"
 STATUS_NO_PC = "Нет ПК/ноутбука"
+STATUS_AGE_REJECTED = "Не подходит по возрасту"
+STATUS_AGE_RISK_40_PLUS = "Возрастной риск 40+"
 CONFIRM_STATUS = STATUS_HANDOFF
 REFERRAL_STATUS = ""
 IMMUTABLE_STATUSES = {CONFIRM_STATUS}
@@ -456,6 +458,30 @@ SCHEDULE_CONFIRM_FOLLOWUP_VARIANTS = (
     "Підкажіть, будь ласка, чи все зрозуміло по формату співпраці, чи ще щось коротко уточнити?",
     "Якщо ще є питання по формату роботи - із радістю відповім. Якщо все зрозуміло, можемо йти далі.",
 )
+NO_PC_START_TEXT = (
+    "Дякую за інтерес до вакансії.\n\n"
+    "Хочу одразу попередити, що без ПК або ноутбука ця робота не підійде. "
+    "Зміна триває 8 годин, робота ведеться в особистому кабінеті, і паралельно потрібно вести кілька текстових діалогів. "
+    "З телефона підтримувати такий темп стабільно та якісно не вийде."
+)
+AGE_40_PLUS_START_TEXT = (
+    "Дякую за інтерес до вакансії.\n\n"
+    "Хочу одразу попередити, що в цьому форматі робота може бути складною для кандидатів 40+. "
+    "Тут потрібно дуже багато й швидко спілкуватися в текстовій переписці протягом 8 годин, "
+    "і за внутрішньою статистикою кандидати цієї вікової категорії зазвичай не справляються з таким навантаженням."
+)
+AGE_15_REJECT_TEXT = (
+    "Дякую за інтерес до вакансії.\n\n"
+    "Хочу одразу повідомити, що ця вакансія не підходить для такого віку."
+)
+REFERRAL_ALT_TEXT = (
+    "Також хочу запропонувати Вам альтернативу.\n\n"
+    "У нас діє реферальна програма: Ви можете отримати 100 $ бонусу за кожну людину, "
+    "яка раніше не працювала в нашій компанії, після старту відпрацює щонайменше 14 днів "
+    "і за перші 30 днів заробить мінімум 200 $ балансу.\n\n"
+    "Якщо серед знайомих є людина, якій підійде віддалений full-time формат, робота з ПК або ноутбука "
+    "та текстове спілкування, можете сміливо рекомендувати її."
+)
 EARNINGS_EXPLAINER_TEXT_1 = (
     "Коротко про те, як тут формується заробіток.\n\n"
     "Сайт для чоловіків платний: вони оплачують хвилини чату, листи, фото, відео та інші дії на платформі. "
@@ -593,6 +619,8 @@ SHEET_TERMINAL_STATUSES = {
     STATUS_STOPPED,
     STATUS_SHIFT_MISMATCH,
     STATUS_NO_PC,
+    STATUS_AGE_REJECTED,
+    STATUS_AGE_RISK_40_PLUS,
     STATUS_NOT_RELEVANT,
 }
 
@@ -652,6 +680,8 @@ def canonical_sheet_status(
         STATUS_STOPPED,
         STATUS_SHIFT_MISMATCH,
         STATUS_NO_PC,
+        STATUS_AGE_REJECTED,
+        STATUS_AGE_RISK_40_PLUS,
     }:
         return raw
     if raw == MANUAL_OFF_STATUS or raw == "PAUSED":
@@ -1578,7 +1608,20 @@ def is_no_laptop_value(value: str) -> bool:
     t = normalize_text(value or "")
     if not t:
         return False
-    if "так" in t or "є" in t:
+    if any(
+        marker in t
+        for marker in (
+            "так",
+            "є пк",
+            "є пк/ноутбук",
+            "є ноут",
+            "є ноутбук",
+            "є комп",
+            "маю пк",
+            "маю ноут",
+            "в наявності",
+        )
+    ):
         return False
     return any(
         marker in t
@@ -1593,6 +1636,53 @@ def is_no_laptop_value(value: str) -> bool:
             "нету",
         )
     )
+
+
+def parse_lead_age(value: str) -> Optional[int]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    match = re.search(r"(\d{1,3})", raw)
+    if not match:
+        return None
+    try:
+        age = int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    if age < 10 or age > 99:
+        return None
+    return age
+
+
+SPECIAL_START_ELIGIBLE = "eligible"
+SPECIAL_START_UNDERAGE_15 = "underage_15"
+SPECIAL_START_NO_PC = "no_pc"
+SPECIAL_START_AGE_40_PLUS = "age_40_plus"
+
+SPECIAL_START_TEXT_BY_REASON = {
+    SPECIAL_START_UNDERAGE_15: AGE_15_REJECT_TEXT,
+    SPECIAL_START_NO_PC: NO_PC_START_TEXT,
+    SPECIAL_START_AGE_40_PLUS: AGE_40_PLUS_START_TEXT,
+}
+
+SPECIAL_START_STATUS_BY_REASON = {
+    SPECIAL_START_UNDERAGE_15: STATUS_AGE_REJECTED,
+    SPECIAL_START_NO_PC: STATUS_NO_PC,
+    SPECIAL_START_AGE_40_PLUS: STATUS_AGE_RISK_40_PLUS,
+}
+
+
+def classify_special_start_policy(lead_info: Optional[dict]) -> str:
+    if not lead_info:
+        return SPECIAL_START_ELIGIBLE
+    age = parse_lead_age(str(lead_info.get("age", "") or ""))
+    if age == 15:
+        return SPECIAL_START_UNDERAGE_15
+    if is_no_laptop_value(str(lead_info.get("pc", "") or "")):
+        return SPECIAL_START_NO_PC
+    if age is not None and age >= 40:
+        return SPECIAL_START_AGE_40_PLUS
+    return SPECIAL_START_ELIGIBLE
 
 
 class SheetWriter:
@@ -3891,6 +3981,80 @@ async def main():
         )
         return bool(ok)
 
+    async def send_special_start_message(
+        entity: User,
+        text: str,
+        status: str,
+        delay_before: Optional[float] = None,
+    ) -> bool:
+        ok = await send_and_update(
+            client,
+            sheet,
+            tz,
+            entity,
+            text,
+            status,
+            use_ai=False,
+            no_questions=False,
+            schedule_followup=False,
+            draft=text,
+            step_state=step_state,
+            step_name="",
+            auto_reply_enabled=False,
+            followup_state=followup_state,
+            delay_before=delay_before,
+            return_success=True,
+        )
+        return bool(ok)
+
+    async def handle_special_start(
+        entity: User,
+        lead_info: Optional[dict],
+        start_source: str,
+    ) -> bool:
+        special_reason = classify_special_start_policy(lead_info)
+        if special_reason == SPECIAL_START_ELIGIBLE:
+            return False
+        peer_id = int(getattr(entity, "id", 0) or 0)
+        if not peer_id:
+            return False
+        primary_text = SPECIAL_START_TEXT_BY_REASON[special_reason]
+        status = SPECIAL_START_STATUS_BY_REASON[special_reason]
+        clear_qa_gate(peer_id)
+        step_state.delete(peer_id)
+        v2_runtime.delete(peer_id)
+        last_reply_at.pop(peer_id, None)
+        last_incoming_at.pop(peer_id, None)
+        pending_question_resume.pop(peer_id, None)
+        processing_peers.discard(peer_id)
+        buffered_incoming.pop(peer_id, None)
+        name = getattr(entity, "first_name", "") or "Unknown"
+        username = getattr(entity, "username", "") or ""
+        chat_link = build_chat_link_app(entity, peer_id)
+        paused_peers.discard(peer_id)
+        enabled_peers.add(peer_id)
+        pause_store.set_status(peer_id, username, name, chat_link, "ACTIVE", updated_by=f"{start_source}:special_precheck")
+        await send_special_start_message(entity, primary_text, status)
+        await send_special_start_message(entity, REFERRAL_ALT_TEXT, status)
+        paused_peers.add(peer_id)
+        enabled_peers.discard(peer_id)
+        pause_store.set_status(peer_id, username, name, chat_link, "PAUSED", updated_by=f"{start_source}:{special_reason}")
+        queue_today_upsert(
+            peer_id=peer_id,
+            name=name,
+            username=username,
+            chat_link=chat_link,
+            auto_reply_enabled=False,
+            sender_role="bot",
+            dialog_mode="OFF",
+            status=status,
+            step_snapshot="",
+            tech_step="",
+            event_type_override=f"SPECIAL_START_{special_reason.upper()}",
+        )
+        print(f"SPECIAL_START peer={peer_id} source={start_source} reason={special_reason}")
+        return True
+
     async def send_form_handoff_content(sender: User, state: PeerRuntimeState) -> bool:
         if FORM_MESSAGE_LINK:
             ok = await dispatch_v2_content(sender, FORM_MESSAGE_LINK, STEP_FORM_FORWARD, STATUS_FORM_REQUESTED)
@@ -5335,10 +5499,13 @@ async def main():
 
         plus_start = is_plus_chat_start(text)
         plus_start_first_message = plus_start and await is_first_lead_message_in_dialog(sender, event.id)
+        lead_info = None
         from_group_lead = False
         try:
-            from_group_lead = bool(sheet._find_group_lead_info(username, name))
+            lead_info = sheet._find_group_lead_info(username, name)
+            from_group_lead = bool(lead_info)
         except Exception:
+            lead_info = None
             from_group_lead = False
         first_message_in_dialog = False
         if from_group_lead and not plus_start_first_message:
@@ -5375,6 +5542,9 @@ async def main():
             processing_peers.discard(peer_id)
             buffered_incoming.pop(peer_id, None)
             start_source = "plus_start" if (plus_start_first_message or plus_start) else "group_incoming_start"
+            handled_special_start = await handle_special_start(sender, lead_info, start_source)
+            if handled_special_start:
+                return
             pause_store.set_status(sender.id, username, name, chat_link, "ACTIVE", updated_by=start_source)
             ok = await start_v2_onboarding(sender, start_source)
             if not ok:
