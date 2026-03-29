@@ -315,7 +315,7 @@ MISSING_STEP_RECOVERY_TEXT = (
 )
 FORM_LOCK_REPLY_TEXT = (
     "Ми вже на фінальному етапі - заповненні анкети.\n"
-    "Після отримання анкети та верифікації передаю Вас тімліду на старт."
+    "Після отримання анкети передаю Вас тімліду на старт."
 )
 CLARIFY_NEGATIVE_FOLLOWUP_TEXT = (
     "Розумію.\n"
@@ -631,7 +631,6 @@ def format_month_sheet_title(dt: date) -> str:
 
 def _status_from_step(step_name: Optional[str], shift: Optional[str], last_out: Optional[str]) -> str:
     step = (step_name or "").strip()
-    out_norm = normalize_text(last_out or "")
     if step in {STEP_SCREENING_WAIT, STEP_COMPANY_INTRO, STEP_VOICE_WAIT}:
         return STATUS_INTRO_SENT
     if step == STEP_SCHEDULE_SHIFT_WAIT:
@@ -643,8 +642,6 @@ def _status_from_step(step_name: Optional[str], shift: Optional[str], last_out: 
     if step in {STEP_BALANCE_CONFIRM, STEP_TEST_REVIEW}:
         return STATUS_EARNINGS_EXPLAINED
     if step == STEP_FORM_FORWARD:
-        if "підтвердження віку" in out_norm or "скрін документа" in out_norm or "фото або скрін документа" in out_norm:
-            return STATUS_DOC_PENDING
         return STATUS_FORM_REQUESTED
     if step == STEP_HANDOFF:
         return STATUS_HANDOFF
@@ -4069,8 +4066,8 @@ async def main():
         state.test_message_count = 0
         state.test_last_message = ""
         state.test_ready_clarify_count = 0
-        state.form_waiting_photo = True
-        state.form_prompted_at = time.time()
+        state.form_waiting_photo = False
+        state.form_prompted_at = 0.0
         state.form_photo_reminder_sent = False
         arm_step_wait(state, STEP_FORM_FORWARD, time.time())
         return True
@@ -4357,11 +4354,9 @@ async def main():
         state = v2_runtime.get(sender.id)
         step_name = state.flow_step or STEP_SCREENING_WAIT
         now_ts = time.time()
-        if step_name == STEP_FORM_FORWARD and not has_photo:
-            # Any incoming non-photo message on form step means the lead is active:
-            # postpone document reminder and wait for 5 minutes of silence again.
-            state.form_waiting_photo = True
-            state.form_prompted_at = now_ts
+        if step_name == STEP_FORM_FORWARD and state.form_waiting_photo:
+            state.form_waiting_photo = False
+            state.form_prompted_at = 0.0
             state.form_photo_reminder_sent = False
             v2_runtime.set(state)
         if step_name in WAIT_STEP_SET:
@@ -4787,16 +4782,6 @@ async def main():
             return True
 
         if step_name == STEP_FORM_FORWARD:
-            if has_photo:
-                enqueue_candidate_note(sender, "Фото анкети отримано")
-                await send_v2_message(sender, "Дякую. Передаю Вашу анкету тімліду, далі з Вами звʼяжуться по старту.", STEP_HANDOFF, status=CONFIRM_STATUS)
-                state.flow_step = STEP_HANDOFF
-                state.form_waiting_photo = False
-                state.form_prompted_at = 0.0
-                state.form_photo_reminder_sent = False
-                clear_step_wait(state)
-                v2_runtime.set(state)
-                return True
             if text.strip():
                 enqueue_candidate_note(sender, text)
                 if is_filled_form_text(text) and not message_has_question(text):
@@ -4809,17 +4794,11 @@ async def main():
                         step_snapshot=STEP_FORM_FORWARD,
                         tech_step=STEP_FORM_FORWARD,
                     )
-                    await send_v2_message(
-                        sender,
-                        "Дякую, анкету отримав. Будь ласка, надішліть фото або скрін документа для підтвердження віку.",
-                        STEP_FORM_FORWARD,
-                        status=STATUS_DOC_PENDING,
-                    )
-                    state.form_prompted_at = time.time()
+                    state.flow_step = STEP_HANDOFF
+                    state.form_waiting_photo = False
+                    state.form_prompted_at = 0.0
                     state.form_photo_reminder_sent = False
-            state.form_waiting_photo = True
-            if not state.form_prompted_at:
-                state.form_prompted_at = time.time()
+                    clear_step_wait(state)
             v2_runtime.set(state)
             return True
 
@@ -5958,24 +5937,10 @@ async def main():
                         if is_paused(entity):
                             continue
                         if (v2s.flow_step or "").strip() == STEP_FORM_FORWARD and v2s.form_waiting_photo:
-                            now_ts = time.time()
-                            prompted_at = float(v2s.form_prompted_at or 0.0)
-                            if prompted_at <= 0:
-                                v2s.form_prompted_at = now_ts
-                                v2_runtime.set(v2s)
-                                continue
-                            last_in_ts = float(last_incoming_at.get(peer_id, 0.0) or 0.0)
-                            silence_anchor = max(prompted_at, last_in_ts)
-                            if (not v2s.form_photo_reminder_sent) and (now_ts - silence_anchor >= FORM_PHOTO_REMINDER_DELAY_SEC):
-                                ok = await send_v2_message(
-                                    entity,
-                                    "Будь ласка, надішліть фото або скрін документа для верифікації.",
-                                    STEP_FORM_FORWARD,
-                                    status=STATUS_DOC_PENDING,
-                                )
-                                if ok:
-                                    v2s.form_photo_reminder_sent = True
-                                    v2_runtime.set(v2s)
+                            v2s.form_waiting_photo = False
+                            v2s.form_prompted_at = 0.0
+                            v2s.form_photo_reminder_sent = False
+                            v2_runtime.set(v2s)
                             continue
                         current_step = (v2s.flow_step or "").strip()
                         if current_step not in WAIT_STEP_SET:
