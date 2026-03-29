@@ -1293,7 +1293,8 @@ def mark_step_without_send(
 
 def normalize_key(text: str) -> str:
     cleaned = normalize_text(text)
-    return re.sub(r"[^\w\s]", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"[^\w\s]", "", cleaned, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 def normalize_phone(text: str) -> str:
