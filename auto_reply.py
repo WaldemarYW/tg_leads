@@ -1683,6 +1683,13 @@ def classify_special_start_policy(lead_info: Optional[dict]) -> str:
     return SPECIAL_START_ELIGIBLE
 
 
+def group_special_skip_status(lead_info: Optional[dict]) -> str:
+    reason = classify_special_start_policy(lead_info)
+    if reason == SPECIAL_START_ELIGIBLE:
+        return ""
+    return SPECIAL_START_STATUS_BY_REASON.get(reason, "")
+
+
 class SheetWriter:
     def __init__(self):
         self.gc = sheets_client(GOOGLE_CREDS)
@@ -5118,17 +5125,6 @@ async def main():
                     print(f"⚠️ SHEETS_DIRECT_WRITE_FAIL group_leads: {type(err).__name__}: {err}")
         except Exception:
             pass
-        if is_no_laptop_value(group_data.get("pc", "")):
-            print("⏭️ Пропускаю контакт: в анкеті немає ПК/ноутбука")
-            if group_data:
-                skip_status = STATUS_NO_PC
-                if not enqueue_sheet_event("group_leads_upsert", {"data": group_data, "status": skip_status}):
-                    try:
-                        group_leads_sheet.upsert(tz, group_data, skip_status)
-                        print("AUTO_REPLY_CONTINUE despite_sheet_error peer=group_lead")
-                    except Exception as err:
-                        print(f"⚠️ SHEETS_DIRECT_WRITE_FAIL group_leads: {type(err).__name__}: {err}")
-            return
         username, phone = extract_contact(text)
         if not username and not phone:
             return
@@ -5150,6 +5146,30 @@ async def main():
             due_at = time.time() + ALT_GROUP_START_DELAY_SEC
             pending_group_autostart[int(entity.id)] = float(due_at)
             print(f"ALT_DELAYED_START_SCHEDULED peer={entity.id} due={int(due_at)}")
+            return
+
+        special_skip_status = group_special_skip_status(group_data)
+        if special_skip_status:
+            if group_data:
+                if not enqueue_sheet_event("group_leads_upsert", {"data": group_data, "status": special_skip_status}):
+                    try:
+                        group_leads_sheet.upsert(tz, group_data, special_skip_status)
+                        print("AUTO_REPLY_CONTINUE despite_sheet_error peer=group_lead")
+                    except Exception as err:
+                        print(f"⚠️ SHEETS_DIRECT_WRITE_FAIL group_leads: {type(err).__name__}: {err}")
+            queue_today_upsert(
+                peer_id=entity.id,
+                name=getattr(entity, "first_name", "") or "Unknown",
+                username=getattr(entity, "username", "") or "",
+                chat_link=build_chat_link_app(entity, entity.id),
+                status=special_skip_status,
+                auto_reply_enabled=False,
+                dialog_mode="OFF",
+                step_snapshot="",
+                tech_step="",
+                event_type_override=f"GROUP_SPECIAL_SKIP ({special_skip_status})",
+            )
+            print(f"GROUP_SPECIAL_SKIP peer={entity.id} status={special_skip_status}")
             return
 
         ok = await start_v2_onboarding(entity, "group")

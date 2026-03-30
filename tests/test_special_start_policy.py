@@ -120,6 +120,30 @@ class SpecialStartPolicyTests(unittest.TestCase):
             auto_reply.STATUS_AGE_RISK_40_PLUS,
         )
 
+    def test_group_special_skip_status_for_no_pc(self):
+        self.assertEqual(
+            auto_reply.group_special_skip_status({"age": "23", "pc": "немає"}),
+            auto_reply.STATUS_NO_PC,
+        )
+
+    def test_group_special_skip_status_for_41_plus(self):
+        self.assertEqual(
+            auto_reply.group_special_skip_status({"age": "41+", "pc": "так"}),
+            auto_reply.STATUS_AGE_RISK_40_PLUS,
+        )
+
+    def test_group_special_skip_status_for_15(self):
+        self.assertEqual(
+            auto_reply.group_special_skip_status({"age": "15", "pc": "так"}),
+            auto_reply.STATUS_AGE_REJECTED,
+        )
+
+    def test_group_special_skip_status_for_eligible_is_empty(self):
+        self.assertEqual(
+            auto_reply.group_special_skip_status({"age": "16-24", "pc": "Так, є"}),
+            "",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
