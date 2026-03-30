@@ -2687,6 +2687,47 @@ class RegistrationSheet:
         except Exception as err:
             print(f"⚠️ Не вдалося оновити заголовки '{REGISTRATION_WORKSHEET}': {err}")
 
+    def _find_row(self, values, source_message_id: str, message_link: str):
+        if not values:
+            return None, None
+        headers = [str(h or "").strip().lower() for h in values[0]]
+        data = values[1:]
+
+        def get_col(name: str):
+            try:
+                return headers.index(name)
+            except ValueError:
+                return None
+
+        message_id_idx = (
+            get_col("id сообщения")
+            if get_col("id сообщения") is not None
+            else get_col("source_message_id")
+        )
+        message_link_idx = (
+            get_col("ссылка на сообщение")
+            if get_col("ссылка на сообщение") is not None
+            else get_col("message_link")
+        )
+        source_message_id = str(source_message_id or "").strip()
+        message_link = str(message_link or "").strip()
+
+        for idx, row in enumerate(data, start=2):
+            if source_message_id and message_id_idx is not None and message_id_idx < len(row):
+                row_message_id = str(row[message_id_idx] or "").strip()
+                if row_message_id == source_message_id:
+                    return idx, row
+            if (
+                not source_message_id
+                and message_link
+                and message_link_idx is not None
+                and message_link_idx < len(row)
+            ):
+                row_message_link = str(row[message_link_idx] or "").strip()
+                if row_message_link == message_link:
+                    return idx, row
+        return None, None
+
     def upsert(self, tz: ZoneInfo, data: dict):
         lock_acquired = False
         for _ in range(30):
@@ -2719,17 +2760,24 @@ class RegistrationSheet:
             except Exception:
                 values = [REGISTRATION_HEADERS[:]]
 
-            next_row = 2
-            for idx, existing in enumerate(values[1:], start=2):
-                row_cells = existing[: len(REGISTRATION_HEADERS)]
-                if all(not (cell or "").strip() for cell in row_cells):
-                    next_row = idx
-                    break
-                next_row = idx + 1
+            row_idx, _ = self._find_row(
+                values,
+                str(data.get("source_message_id", "") or ""),
+                data.get("message_link", ""),
+            )
+            if not row_idx:
+                next_row = 2
+                for idx, existing in enumerate(values[1:], start=2):
+                    row_cells = existing[: len(REGISTRATION_HEADERS)]
+                    if all(not (cell or "").strip() for cell in row_cells):
+                        next_row = idx
+                        break
+                    next_row = idx + 1
+                row_idx = next_row
 
             end_col = col_letter(len(REGISTRATION_HEADERS))
             self.ws.update(
-                range_name=f"A{next_row}:{end_col}{next_row}",
+                range_name=f"A{row_idx}:{end_col}{row_idx}",
                 values=[row],
                 value_input_option="USER_ENTERED",
             )
