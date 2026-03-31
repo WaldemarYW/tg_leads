@@ -130,10 +130,16 @@ class PeerRuntimeState:
     step_wait_step: str = ""
     step_followup_stage: int = 0
     step_followup_last_at: float = 0.0
+    last_followup_text: str = ""
+    last_followup_step: str = ""
     resume_step_after_balance: str = ""
     resume_checkpoint_after_balance: str = ""
     balance_block_shown: bool = False
     balance_block_skipped: bool = False
+    last_candidate_signal: str = ""
+    last_candidate_signal_text: str = ""
+    last_candidate_signal_step: str = ""
+    last_candidate_signal_at: float = 0.0
 
 
 @dataclass

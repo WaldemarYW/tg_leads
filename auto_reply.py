@@ -24,7 +24,6 @@ from tg_to_sheets import (
     build_chat_link_app,
     normalize_username,
     normalize_text,
-    is_script_template,
     acquire_lock,
     release_lock,
     CONTACT_TEXT,
@@ -49,8 +48,6 @@ from tg_to_sheets import (
 from auto_reply_classifiers import (
     Intent,
     classify_intent,
-    classify_format_choice,
-    fallback_format_choice as fallback_format_choice_impl,
     is_continue_phrase as is_continue_phrase_impl,
     is_neutral_ack as is_neutral_ack_impl,
     is_short_neutral_ack,
@@ -60,33 +57,15 @@ from auto_reply_classifiers import (
     message_has_question as message_has_question_impl,
     should_send_question as should_send_question_impl,
     strip_question_trail as strip_question_trail_impl,
-    wants_video as wants_video_impl,
 )
 from auto_reply_flow import (
-    FlowContext,
-    STEP_CLARIFY,
-    STEP_CONTACT,
-    STEP_DATING,
-    STEP_DUTIES,
-    STEP_FORMAT,
-    STEP_FORMAT_QUESTION,
-    STEP_INTEREST,
     STEP_ORDER,
-    STEP_SHIFT_QUESTION,
-    STEP_SHIFTS,
-    STEP_TRAINING,
-    STEP_TRAINING_QUESTION,
-    STEP_VIDEO_FOLLOWUP,
-    STEP_FORM,
-    advance_flow,
     send_message_with_fallback,
 )
 from auto_reply_state import (
     FollowupState as FollowupStateStore,
     LocalPauseStore as LocalPauseStoreStore,
     StepState as StepStateStore,
-    adjust_to_followup_window as adjust_to_followup_window_impl,
-    within_followup_window as within_followup_window_impl,
 )
 from gspread.exceptions import APIError
 from registration_ingest import (
@@ -131,6 +110,7 @@ from faq_service import (
 from content_dispatcher import dispatch_content, validate_content_env
 from candidate_notes import append_candidate_answers
 from faq_learning import build_question_log
+from followup_training import get_return_examples
 from v2_state import V2EnrollmentStore, V2RuntimeStore
 
 load_dotenv("/opt/tg_leads/.env")
@@ -334,6 +314,7 @@ WAIT_STEP_SET = {
     STEP_SCHEDULE_CONFIRM,
     STEP_BALANCE_CONFIRM,
     STEP_TEST_REVIEW,
+    STEP_FORM_FORWARD,
 }
 BALANCE_DETOUR_ALLOWED_STEPS = {
     STEP_COMPANY_INTRO,
@@ -355,6 +336,7 @@ STEP_CLARIFY_TEXTS = {
     STEP_SCHEDULE_CONFIRM: "Якщо по формату роботи все зрозуміло, можемо перейти до блоку про заробіток і навчання. Якщо є сумнів - коротко уточню.",
     STEP_BALANCE_CONFIRM: "Якщо по заробітку та навчанню все зрозуміло, можемо переходити далі. Якщо потрібно, поясню на простому прикладі.",
     STEP_TEST_REVIEW: "Якщо по заробітку та навчанню все зрозуміло, можемо одразу переходити до анкети.",
+    STEP_FORM_FORWARD: "Залишився останній крок перед передачею тімліду - заповнити анкету.",
 }
 STEP_FALLBACK_1_TEXTS = {
     STEP_SCREENING_WAIT: "Повертаюся щодо вакансії: якщо тема ще актуальна, дайте знати, і я коротко проведу Вас далі.",
@@ -364,6 +346,7 @@ STEP_FALLBACK_1_TEXTS = {
     STEP_SCHEDULE_CONFIRM: "Повертаюся щодо формату роботи: якщо все зрозуміло, перейдемо до блоку про заробіток і навчання. Якщо є питання - відповім.",
     STEP_BALANCE_CONFIRM: "Повертаюся щодо блоку про заробіток і навчання: якщо все зрозуміло, можемо рухатися далі. Якщо є питання - поясню.",
     STEP_TEST_REVIEW: "Повертаюся щодо наступного кроку: якщо все зрозуміло, одразу перейдемо до анкети. Якщо є питання - коротко відповім.",
+    STEP_FORM_FORWARD: "Повертаюся щодо анкети: це останній крок перед передачею тімліду.",
 }
 STEP_FALLBACK_2_TEXTS = {
     STEP_SCREENING_WAIT: "Добрий день. Якщо вакансія ще актуальна для Вас, дайте короткий зворотний звʼязок, і я проведу Вас далі по етапах.",
@@ -373,6 +356,7 @@ STEP_FALLBACK_2_TEXTS = {
     STEP_SCHEDULE_CONFIRM: "Добрий день. Якщо по формату роботи все зрозуміло, перейдемо до блоку про заробіток і навчання. Якщо залишилися питання - із радістю відповім.",
     STEP_BALANCE_CONFIRM: "Добрий день. Якщо по заробітку та навчанню все зрозуміло, можемо рухатися далі. Якщо потрібне коротке пояснення - надам.",
     STEP_TEST_REVIEW: "Добрий день. Якщо готові рухатися далі, перейдемо до анкети. Якщо залишилися питання - коротко відповім.",
+    STEP_FORM_FORWARD: "Добрий день. Нагадую про анкету: після неї передаю Вас тімліду.",
 }
 FORMAL_ADDRESS_REPLACEMENTS = [
     (r"\bТи\b", "Ви"),
@@ -515,41 +499,8 @@ TEST_READY_FOLLOWUP_VARIANTS = (
     "Якщо є ще питання по заробітку чи навчанню - із радістю поясню. Якщо все ок, перейдемо до анкети.",
 )
 
-FOLLOWUP_TEMPLATES = [
-    (
-        30 * 60,
-        "Повертаюся до Вас щодо вакансії.\n"
-        "Якщо зручно, напишіть, чи можемо продовжити. Якщо є питання - усе коротко поясню.",
-    ),
-    (
-        24 * 60 * 60,
-        "Доброго дня.\n"
-        "Уточню, будь ласка, чи актуально для Вас продовжити спілкування щодо вакансії. Якщо так, я проведу Вас до наступного кроку без зайвих повідомлень.",
-    ),
-    (
-        3 * 24 * 60 * 60,
-        "Повертаюся до Вас щодо вакансії.\n"
-        "Якщо тема ще актуальна - напишіть, і ми продовжимо. Якщо ні - дайте знати, будь ласка, щоб я більше не турбував.",
-    ),
-]
 TEST_USER_ID = "156414561"
 TEST_START_COMMANDS = {"старт8", "start8"}
-
-TEMPLATE_TO_STEP = {
-    normalize_text(CONTACT_TEXT): STEP_CONTACT,
-    normalize_text(INTEREST_TEXT): STEP_INTEREST,
-    normalize_text(DATING_TEXT): STEP_DATING,
-    normalize_text(DUTIES_TEXT): STEP_DUTIES,
-    normalize_text(CLARIFY_TEXT): STEP_CLARIFY,
-    normalize_text(SHIFTS_TEXT): STEP_SHIFTS,
-    normalize_text(SHIFT_QUESTION_TEXT): STEP_SHIFT_QUESTION,
-    normalize_text(FORMAT_TEXT): STEP_FORMAT,
-    normalize_text(FORMAT_QUESTION_TEXT): STEP_FORMAT_QUESTION,
-    normalize_text(VIDEO_FOLLOWUP_TEXT): STEP_VIDEO_FOLLOWUP,
-    normalize_text(TRAINING_TEXT): STEP_TRAINING,
-    normalize_text(TRAINING_QUESTION_TEXT): STEP_TRAINING_QUESTION,
-    normalize_text(FORM_TEXT): STEP_FORM,
-}
 
 MANUAL_V2_STEP_ORDER = {
     STEP_SCREENING_WAIT: 10,
@@ -1081,6 +1032,220 @@ def is_schedule_not_clear_reply(text: str) -> bool:
     return t in {"ні", "нет", "не", "нi", "неа"}
 
 
+CANDIDATE_SIGNAL_ACK = "ack"
+CANDIDATE_SIGNAL_SOFT_CHOICE = "soft_choice"
+CANDIDATE_SIGNAL_QUESTION = "question"
+CANDIDATE_SIGNAL_DELAY = "delay"
+CANDIDATE_SIGNAL_OBJECTION = "objection"
+
+RETURN_TYPE_CLARIFY = "clarify"
+RETURN_TYPE_FALLBACK_1 = "fallback_1"
+RETURN_TYPE_FALLBACK_2 = "fallback_2"
+
+
+def is_soft_shift_choice(text: str) -> bool:
+    if not parse_shift_choice(text):
+        return False
+    t = normalize_text(text)
+    if not t:
+        return False
+    return any(marker in t for marker in ("думаю", "скоріше", "скорiше", "мабуть", "напевно", "наверно", "наверное"))
+
+
+def is_delay_reply(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    delay_markers = (
+        "пізніше",
+        "позже",
+        "зараз не зручно",
+        "сейчас не удобно",
+        "зараз не можу",
+        "сейчас не могу",
+        "подумаю",
+        "подумаю",
+        "треба подумати",
+        "нужно подумать",
+        "потім",
+        "потом",
+        "завтра",
+        "пізніше напишу",
+        "позже напишу",
+    )
+    return any(marker in t for marker in delay_markers)
+
+
+def is_generic_objection_reply(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    objection_markers = (
+        "не зрозум",
+        "непонят",
+        "не понятно",
+        "не ясно",
+        "не впевн",
+        "не уверен",
+        "сумнів",
+        "сомнен",
+        "складно",
+        "важко",
+        "тяжело",
+        "без ставки",
+    )
+    return any(marker in t for marker in objection_markers)
+
+
+def classify_candidate_signal(step_name: str, text: str, intent_name: str = "") -> str:
+    if not (text or "").strip():
+        return ""
+    if step_name == STEP_SCHEDULE_SHIFT_WAIT and is_soft_shift_choice(text):
+        return CANDIDATE_SIGNAL_SOFT_CHOICE
+    if intent_name == "question" or message_has_question(text):
+        return CANDIDATE_SIGNAL_QUESTION
+    if is_delay_reply(text):
+        return CANDIDATE_SIGNAL_DELAY
+    if is_schedule_shift_objection(text) or is_schedule_not_clear_reply(text) or is_generic_objection_reply(text):
+        return CANDIDATE_SIGNAL_OBJECTION
+    if step_name == STEP_SCHEDULE_SHIFT_WAIT and parse_shift_choice(text):
+        return CANDIDATE_SIGNAL_ACK
+    if intent_name == "ack_continue" or is_yes_reply(text) or is_neutral_ack(text):
+        return CANDIDATE_SIGNAL_ACK
+    return ""
+
+
+def remember_candidate_signal(state: PeerRuntimeState, step_name: str, text: str, intent_name: str = "") -> str:
+    signal = classify_candidate_signal(step_name, text, intent_name=intent_name)
+    if not signal:
+        return ""
+    state.last_candidate_signal = signal
+    state.last_candidate_signal_text = (text or "").strip()[:500]
+    state.last_candidate_signal_step = step_name
+    state.last_candidate_signal_at = time.time()
+    return signal
+
+
+def followup_return_type_for_stage(stage: int) -> str:
+    if int(stage or 0) <= 0:
+        return RETURN_TYPE_CLARIFY
+    if int(stage or 0) == 1:
+        return RETURN_TYPE_FALLBACK_1
+    return RETURN_TYPE_FALLBACK_2
+
+
+def _safe_signal_for_step(state: Optional[PeerRuntimeState], step_name: str) -> Tuple[str, str]:
+    if not state:
+        return "", ""
+    if (state.last_candidate_signal_step or "").strip() != (step_name or "").strip():
+        return "", ""
+    return (
+        (state.last_candidate_signal or "").strip(),
+        (state.last_candidate_signal_text or "").strip(),
+    )
+
+
+def _company_intro_recap(signal_text: str) -> str:
+    t = normalize_text(signal_text)
+    if not t:
+        return ""
+    if "без дзв" in t:
+        return "Так, формат дійсно без дзвінків і відеозвʼязку. "
+    if "віддал" in t:
+        return "Так, робота повністю віддалена. "
+    if "пк" in t or "ноут" in t:
+        return "Так, для роботи потрібен ПК або ноутбук. "
+    if "що саме" in t or "що робити" in t:
+        return "Коротко відповів по задачах у роботі. "
+    return ""
+
+
+def _shift_recap(signal_text: str) -> str:
+    t = normalize_text(signal_text)
+    if "вихід" in t:
+        return "Коротко нагадаю: вихідні можна планувати самостійно. "
+    if "перерв" in t:
+        return "Коротко нагадаю: у зміні є основна перерва і короткі міні-перерви. "
+    if "совмещ" in t or "суміщ" in t or "поєдн" in t:
+        return "Коротко нагадаю: формат full-time, тому стабільність у зміні тут важлива. "
+    return "Коротко відповів по графіку. "
+
+
+def _balance_recap(signal_text: str) -> str:
+    t = normalize_text(signal_text)
+    if "ставк" in t:
+        return "Коротко нагадаю: тут немає фіксованої ставки, дохід формується як відсоток від балансу. "
+    if "виплат" in t or "выплат" in t:
+        return "Коротко нагадаю: виплати привʼязані до проходження стартового етапу та робочого процесу. "
+    if "навчан" in t or "обучен" in t:
+        return "Коротко нагадаю: навчання для кандидата безкоштовне і проходить онлайн. "
+    return "Коротко пояснив по доходу та навчанню. "
+
+
+def build_candidate_aware_followup_text(step_name: str, stage: int, state: Optional[PeerRuntimeState]) -> str:
+    signal, signal_text = _safe_signal_for_step(state, step_name)
+    return_type = followup_return_type_for_stage(stage)
+    shift_choice = ((state.shift_choice or "").strip() if state else "").strip()
+
+    if step_name == STEP_COMPANY_INTRO:
+        recap = _company_intro_recap(signal_text)
+        if signal == CANDIDATE_SIGNAL_QUESTION:
+            return f"{recap}Якщо в цілому формат Вам підходить, можемо перейти далі."
+        if signal == CANDIDATE_SIGNAL_DELAY:
+            return "Якщо зручно, повернемось з цього місця: підкажете, чи підходить Вам формат у цілому?"
+        if signal == CANDIDATE_SIGNAL_OBJECTION:
+            return "Якщо залишився сумнів саме по формату, напишіть що саме, і я коротко уточню."
+        if signal == CANDIDATE_SIGNAL_ACK:
+            return "Якщо в цілому формат Вам підходить, можемо перейти далі."
+
+    if step_name == STEP_SCHEDULE_SHIFT_WAIT:
+        if signal == CANDIDATE_SIGNAL_QUESTION:
+            return f"{_shift_recap(signal_text)}Щоб рухатися далі, підкажіть, будь ласка, яку зміну Вам зручніше розглянути: денну чи нічну?"
+        if signal == CANDIDATE_SIGNAL_DELAY:
+            return "Якщо вакансія ще актуальна, залишилось тільки обрати зміну: денну чи нічну."
+        if signal == CANDIDATE_SIGNAL_OBJECTION:
+            return "Якщо сумнів саме в графіку, коротко підкажу. Якщо в цілому ок, напишіть, яку зміну розглядаєте: денну чи нічну."
+        if signal in {CANDIDATE_SIGNAL_ACK, CANDIDATE_SIGNAL_SOFT_CHOICE}:
+            return "Залишилось тільки зафіксувати зміну: денну чи нічну?"
+
+    if step_name == STEP_SCHEDULE_CONFIRM:
+        shift_prefix = f"Зафіксував {shift_choice} зміну. " if shift_choice else ""
+        if signal == CANDIDATE_SIGNAL_QUESTION:
+            return f"{shift_prefix}Коротко відповів по формату роботи. Якщо в цілому все зрозуміло, рухаємось далі до блоку про дохід і навчання."
+        if signal == CANDIDATE_SIGNAL_DELAY:
+            return f"{shift_prefix}Коли буде зручно, повернемось з цього місця і перейдемо до блоку про дохід і навчання."
+        if signal == CANDIDATE_SIGNAL_OBJECTION:
+            return "Якщо сумнів саме в інтенсивності або full-time форматі, коротко уточню. Якщо в цілому ок, рухаємось далі."
+        if signal == CANDIDATE_SIGNAL_ACK:
+            return f"{shift_prefix}Якщо по формату роботи все зрозуміло, рухаємось далі до блоку про дохід і навчання."
+
+    if step_name == STEP_BALANCE_CONFIRM:
+        if signal == CANDIDATE_SIGNAL_QUESTION:
+            return f"{_balance_recap(signal_text)}Якщо в цілому все зрозуміло, можемо перейти до анкети."
+        if signal == CANDIDATE_SIGNAL_DELAY:
+            return "Коли буде зручно, повернемось з цього місця: після цього блоку залишився лише перехід до анкети."
+        if signal == CANDIDATE_SIGNAL_OBJECTION:
+            return "Якщо залишився сумнів по оплаті або навчанню, коротко відповім. Якщо в цілому ок, перейдемо до анкети."
+        if signal == CANDIDATE_SIGNAL_ACK:
+            return "Коротко підсумую: модель доходу прозора, навчання безкоштовне, далі залишився один короткий крок - анкета."
+
+    if step_name == STEP_FORM_FORWARD:
+        if signal == CANDIDATE_SIGNAL_DELAY:
+            return "Коли буде зручно, просто поверніться до анкети. Це останній крок перед передачею тімліду."
+        if signal == CANDIDATE_SIGNAL_QUESTION:
+            return "Коротко підкажу: зараз потрібна лише анкета. Це останній крок перед передачею тімліду."
+        return "Залишився останній крок перед передачею тімліду - заповнити анкету."
+
+    examples = get_return_examples(step_name, signal, return_type) if signal else []
+    if examples:
+        return str(examples[0].get("operator_return_gold", "")).strip()
+    if return_type == RETURN_TYPE_CLARIFY:
+        return get_step_clarify_text(step_name)
+    if return_type == RETURN_TYPE_FALLBACK_1:
+        return get_step_fallback_text(step_name, 1)
+    return get_step_fallback_text(step_name, 2)
+
+
 def is_voice_not_listened_reply(text: str) -> bool:
     t = normalize_text(text)
     if not t:
@@ -1261,36 +1426,6 @@ def merge_test_answers(existing: List[str], text: str) -> List[str]:
     return answers[:1]
 
 
-def mark_step_without_send(
-    sheet: "SheetWriter",
-    tz: ZoneInfo,
-    entity: User,
-    status: Optional[str],
-    step_state: Optional["StepState"],
-    step_name: Optional[str],
-):
-    if step_state and step_name:
-        step_state.set(entity.id, step_name)
-    name = getattr(entity, "first_name", "") or "Unknown"
-    username = getattr(entity, "username", "") or ""
-    chat_link = build_chat_link_app(entity, entity.id)
-    payload = {
-        "peer_id": entity.id,
-        "name": name,
-        "username": username,
-        "chat_link": chat_link,
-        "status": status,
-        "last_out": None,
-        "tech_step": step_name,
-    }
-    if not enqueue_sheet_event("today_upsert", payload):
-        try:
-            sheet.upsert(tz=tz, **payload)
-            print(f"AUTO_REPLY_CONTINUE despite_sheet_error peer={entity.id}")
-        except Exception as err:
-            print(f"⚠️ SHEETS_DIRECT_WRITE_FAIL peer={entity.id}: {type(err).__name__}: {err}")
-
-
 def normalize_key(text: str) -> str:
     cleaned = normalize_text(text)
     cleaned = re.sub(r"[^\w\s]", "", cleaned, flags=re.IGNORECASE)
@@ -1330,31 +1465,6 @@ def col_letter(col_idx: int) -> str:
         col_idx, rem = divmod(col_idx - 1, 26)
         result.append(chr(ord("A") + rem))
     return "".join(reversed(result))
-
-
-def within_followup_window(dt: datetime) -> bool:
-    return within_followup_window_impl(dt, FOLLOWUP_WINDOW_START_HOUR, FOLLOWUP_WINDOW_END_HOUR)
-
-
-def adjust_to_followup_window(dt: datetime) -> datetime:
-    return adjust_to_followup_window_impl(dt, FOLLOWUP_WINDOW_START_HOUR, FOLLOWUP_WINDOW_END_HOUR)
-
-
-class FollowupState(FollowupStateStore):
-    def __init__(self, path: str):
-        super().__init__(
-            path=path,
-            templates=FOLLOWUP_TEMPLATES,
-            start_hour=FOLLOWUP_WINDOW_START_HOUR,
-            end_hour=FOLLOWUP_WINDOW_END_HOUR,
-            test_user_id=TEST_USER_ID,
-        )
-
-    def schedule_from_now(self, peer_id: int, tz: ZoneInfo):
-        super().schedule_from_now(peer_id, datetime.now(tz))
-
-    def mark_sent_and_advance(self, peer_id: int, tz: ZoneInfo):
-        return super().mark_sent_and_advance(peer_id, datetime.now(tz))
 
 
 class GlobalFallbackQuota:
@@ -1422,6 +1532,8 @@ def arm_step_wait(state: PeerRuntimeState, step_name: str, now_ts: float):
     state.step_wait_step = step_name
     state.step_followup_stage = 0
     state.step_followup_last_at = 0.0
+    state.last_followup_text = ""
+    state.last_followup_step = ""
     if should_log:
         print(f"STEP_WAIT_ARM peer={state.peer_id} step={step_name}")
 
@@ -1431,6 +1543,8 @@ def clear_step_wait(state: PeerRuntimeState):
     state.step_wait_step = ""
     state.step_followup_stage = 0
     state.step_followup_last_at = 0.0
+    state.last_followup_text = ""
+    state.last_followup_step = ""
 
 
 def get_step_clarify_text(step_name: str) -> str:
@@ -1443,6 +1557,23 @@ def get_step_fallback_text(step_name: str, stage: int) -> str:
     if stage == 2:
         return STEP_FALLBACK_2_TEXTS.get(step_name, "")
     return ""
+
+
+def resolve_v2_followup_stage(elapsed: float, stage: int) -> Optional[Tuple[str, int, int]]:
+    current_stage = int(stage or 0)
+    if current_stage == 0 and elapsed >= STEP_CLARIFY_DELAY_SEC:
+        return ("STEP_WAIT_CLARIFY_SENT", 0, 1)
+    if current_stage == 1 and elapsed >= STEP_FALLBACK_1_DELAY_SEC:
+        return ("STEP_WAIT_FALLBACK6H_SENT", 1, 2)
+    return None
+
+
+def is_duplicate_v2_followup(state: PeerRuntimeState, step_name: str, followup_text: str) -> bool:
+    return (
+        (state.last_followup_step or "").strip() == (step_name or "").strip()
+        and normalize_text(state.last_followup_text or "") == normalize_text(followup_text or "")
+        and bool((followup_text or "").strip())
+    )
 
 
 def v2_wait_followup_abort_reason(
@@ -3098,32 +3229,6 @@ async def resolve_contact(client: TelegramClient, username: Optional[str], phone
     return None
 
 
-async def get_last_outgoing_step(client: TelegramClient, entity: User) -> Optional[str]:
-    async for m in client.iter_messages(entity, limit=50):
-        if not m.message or not m.out:
-            continue
-        msg_norm = normalize_text(m.message)
-        for tmpl_norm, step in TEMPLATE_TO_STEP.items():
-            if tmpl_norm and tmpl_norm in msg_norm:
-                return step
-    return None
-
-
-def detect_step_from_text(message_text: str) -> Optional[str]:
-    msg_norm = normalize_text(message_text)
-    if not msg_norm:
-        return None
-    best_step = None
-    best_order = -1
-    for tmpl_norm, step in TEMPLATE_TO_STEP.items():
-        if tmpl_norm and tmpl_norm in msg_norm:
-            order = STEP_ORDER.get(step, -1)
-            if order > best_order:
-                best_order = order
-                best_step = step
-    return best_step
-
-
 def detect_manual_v2_step_from_text(message_text: str) -> Optional[str]:
     msg_norm = normalize_text(message_text)
     if not msg_norm:
@@ -3190,29 +3295,6 @@ def prime_manual_intro_autostart_state(
     state.screening_answers = []
     arm_step_wait(state, STEP_COMPANY_INTRO, current_ts)
     return state
-
-
-async def get_last_step(client: TelegramClient, entity: User, step_state: "StepState") -> Optional[str]:
-    cached = step_state.get(entity.id)
-    if cached:
-        return cached
-    step = await get_last_outgoing_step(client, entity)
-    if step:
-        step_state.set(entity.id, step)
-    return step
-
-
-async def has_outgoing_template(client: TelegramClient, entity: User, step_state: "StepState") -> bool:
-    if step_state.get(entity.id):
-        return True
-    async for m in client.iter_messages(entity, limit=30):
-        if not m.message or not m.out:
-            continue
-        if is_script_template(m.message):
-            return True
-    return False
-
-
 def enforce_formal_address(text: str) -> str:
     out = str(text or "")
     if not out:
@@ -3356,14 +3438,6 @@ async def send_and_update(
     return True if return_success else message_text
 
 
-def wants_video(text: str) -> bool:
-    return wants_video_impl(text)
-
-
-def fallback_format_choice(text: str) -> str:
-    return fallback_format_choice_impl(text)
-
-
 def parse_message_link(link: str) -> Optional[Tuple[object, int]]:
     if not link:
         return None
@@ -3480,23 +3554,6 @@ async def dialog_suggest(
     if suggestions:
         return str(suggestions[0]).strip()
     return None
-
-
-async def detect_format_choice(history: list, text: str) -> str:
-    async def _ai_client(hist: list, last_text: str) -> str:
-        if not DIALOG_FORMAT_URL:
-            return "unknown"
-        payload = {"history": hist, "last_message": last_text}
-        try:
-            data = await asyncio.to_thread(_post_json, DIALOG_FORMAT_URL, payload, DIALOG_FORMAT_TIMEOUT_SEC)
-        except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError) as err:
-            print(f"⚠️ AI format error: {err}")
-            return "unknown"
-        if not data or not data.get("ok"):
-            return "unknown"
-        return (data.get("choice") or "").strip().lower()
-
-    return await classify_format_choice(text, history, ai_client=_ai_client)
 
 
 async def build_ai_history(client: TelegramClient, entity: User, limit: int = 10) -> list:
@@ -3628,11 +3685,15 @@ async def main():
     enabled_peers = set()
     last_reply_at = {}
     last_incoming_at = {}
-    pending_question_resume = {}
     skip_stop_check_once = set()
-    format_delivery_state = {}
     step_state = StepState(STEP_STATE_PATH)
-    followup_state = FollowupState(FOLLOWUP_STATE_PATH)
+    followup_state = FollowupStateStore(
+        FOLLOWUP_STATE_PATH,
+        [],
+        FOLLOWUP_WINDOW_START_HOUR,
+        FOLLOWUP_WINDOW_END_HOUR,
+        TEST_USER_ID,
+    )
     fallback_quota = GlobalFallbackQuota(FALLBACK_QUOTA_PATH, GLOBAL_FALLBACK_DAILY_LIMIT)
     qa_gate_state = {}
     pending_group_autostart: Dict[int, float] = {}
@@ -3826,17 +3887,6 @@ async def main():
     if not video_message:
         print("⚠️ Не знайшов відео у групі для пересилання")
 
-    async def reconcile_dialog_step(entity: User, use_cache: bool = True) -> Tuple[Optional[str], str]:
-        if use_cache:
-            cached = step_state.get(entity.id)
-            if cached:
-                return cached, "state"
-        history_step = await get_last_outgoing_step(client, entity)
-        if history_step:
-            step_state.set(entity.id, history_step)
-            return history_step, "history"
-        return None, "none"
-
     async def send_ai_response(
         entity: User,
         status: Optional[str] = None,
@@ -3920,116 +3970,6 @@ async def main():
         )
         return True
 
-    def peer_format_state(peer_id: int) -> dict:
-        state = format_delivery_state.get(peer_id)
-        if state is None:
-            state = {"video_sent": False, "mini_course_sent": False}
-            format_delivery_state[peer_id] = state
-        return state
-
-    def mark_format_stage_ready(entity: User):
-        step_state.set(entity.id, STEP_VIDEO_FOLLOWUP)
-
-    async def send_video_option(entity: User) -> bool:
-        state = peer_format_state(entity.id)
-        if state.get("video_sent"):
-            return False
-        if not video_message:
-            return False
-        await asyncio.sleep(15)
-        sent = None
-        try:
-            if VIDEO_MESSAGE_LINK:
-                sent = await client.forward_messages(entity, video_message)
-            elif video_message.media:
-                sent = await client.send_file(
-                    entity,
-                    video_message.media,
-                    caption=video_message.message or "",
-                )
-            elif video_message.message:
-                sent = await client.send_message(entity, enforce_formal_address(video_message.message))
-        except Exception:
-            print("⚠️ Не вдалося надіслати відео")
-            return False
-        try:
-            if isinstance(sent, list):
-                for msg in sent:
-                    track_sent_message(entity.id, msg.id)
-            elif sent:
-                track_sent_message(entity.id, sent.id)
-        except Exception:
-            pass
-        mark_format_stage_ready(entity)
-        state["video_sent"] = True
-        return True
-
-    async def send_mini_course_option(entity: User) -> bool:
-        state = peer_format_state(entity.id)
-        if state.get("mini_course_sent"):
-            return False
-        await send_and_update(
-            client,
-            sheet,
-            tz,
-            entity,
-            MINI_COURSE_LINK,
-            status_for_text(MINI_COURSE_LINK) or status_for_text(FORMAT_QUESTION_TEXT),
-            use_ai=False,
-            no_questions=True,
-            draft=MINI_COURSE_LINK,
-            step_state=step_state,
-            followup_state=followup_state,
-        )
-        state["mini_course_sent"] = True
-        mark_format_stage_ready(entity)
-        return True
-
-    async def handle_format_choice(entity: User, choice: str) -> str:
-        state = peer_format_state(entity.id)
-        sent_video = False
-        sent_mini = False
-
-        if choice == "video":
-            sent_video = await send_video_option(entity)
-            if sent_video:
-                last_reply_at[entity.id] = time.time()
-                return "video"
-            return "none"
-
-        if choice == "mini_course":
-            sent_mini = await send_mini_course_option(entity)
-            if sent_mini:
-                last_reply_at[entity.id] = time.time()
-                return "mini_course"
-            return "none"
-
-        if choice == "both":
-            if not state.get("mini_course_sent"):
-                sent_mini = await send_mini_course_option(entity)
-            if not state.get("video_sent"):
-                sent_video = await send_video_option(entity)
-            if sent_mini or sent_video:
-                await send_and_update(
-                    client,
-                    sheet,
-                    tz,
-                    entity,
-                    BOTH_FORMATS_FOLLOWUP_TEXT,
-                    status_for_text(BOTH_FORMATS_FOLLOWUP_TEXT) or status_for_text(FORMAT_QUESTION_TEXT),
-                    use_ai=False,
-                    no_questions=True,
-                    draft=BOTH_FORMATS_FOLLOWUP_TEXT,
-                    step_state=step_state,
-                    followup_state=followup_state,
-                )
-                mark_format_stage_ready(entity)
-                last_reply_at[entity.id] = time.time()
-                return "both"
-            return "none"
-
-        return "unknown"
-
     async def send_v2_message(
         entity: User,
         text: str,
@@ -4101,7 +4041,6 @@ async def main():
         v2_runtime.delete(peer_id)
         last_reply_at.pop(peer_id, None)
         last_incoming_at.pop(peer_id, None)
-        pending_question_resume.pop(peer_id, None)
         processing_peers.discard(peer_id)
         buffered_incoming.pop(peer_id, None)
         name = getattr(entity, "first_name", "") or "Unknown"
@@ -4433,6 +4372,7 @@ async def main():
         state = v2_runtime.get(sender.id)
         step_name = state.flow_step or STEP_SCREENING_WAIT
         now_ts = time.time()
+        remember_candidate_signal(state, step_name, text, intent_name=intent_name)
         if step_name == STEP_FORM_FORWARD and state.form_waiting_photo:
             state.form_waiting_photo = False
             state.form_prompted_at = 0.0
@@ -4909,180 +4849,6 @@ async def main():
             print(f"⚠️ V2 handler returned no-op peer={peer_id} step={v2_state.flow_step}")
         return handled_v2
 
-    async def continue_flow(entity: User, last_step: str, text: str):
-        if is_paused(entity):
-            return
-        flow_actions = advance_flow(last_step, text, FlowContext(is_question=message_has_question))
-        route = flow_actions.route
-
-        if route == "contact_chain":
-            await send_and_update(
-                client,
-                sheet,
-                tz,
-                entity,
-                INTEREST_TEXT,
-                status_for_text(INTEREST_TEXT),
-                use_ai=True,
-                no_questions=True,
-                draft=INTEREST_TEXT,
-                step_state=step_state,
-                step_name=STEP_INTEREST,
-                followup_state=followup_state,
-            )
-            dating_text = await send_and_update(
-                client,
-                sheet,
-                tz,
-                entity,
-                DATING_TEXT,
-                status_for_text(DATING_TEXT),
-                use_ai=True,
-                no_questions=True,
-                draft=DATING_TEXT,
-                step_state=step_state,
-                step_name=STEP_DATING,
-                followup_state=followup_state,
-            )
-            if should_send_question(dating_text, CLARIFY_TEXT):
-                await send_and_update(
-                    client,
-                    sheet,
-                    tz,
-                    entity,
-                    CLARIFY_TEXT,
-                    status_for_text(CLARIFY_TEXT),
-                    use_ai=True,
-                    draft=CLARIFY_TEXT,
-                    delay_before=QUESTION_GAP_SEC,
-                    step_state=step_state,
-                    step_name=STEP_CLARIFY,
-                    followup_state=followup_state,
-                )
-            else:
-                mark_step_without_send(
-                    sheet,
-                    tz,
-                    entity,
-                    status_for_text(CLARIFY_TEXT),
-                    step_state,
-                    STEP_CLARIFY,
-                )
-            last_reply_at[entity.id] = time.time()
-            return
-
-        if route == "clarify_chain":
-            await send_and_update(
-                client,
-                sheet,
-                tz,
-                entity,
-                SHIFTS_TEXT,
-                status_for_text(SHIFTS_TEXT),
-                use_ai=False,
-                draft=SHIFTS_TEXT,
-                step_state=step_state,
-                step_name=STEP_SHIFTS,
-                followup_state=followup_state,
-            )
-            await send_and_update(
-                client,
-                sheet,
-                tz,
-                entity,
-                SHIFT_QUESTION_TEXT,
-                status_for_text(SHIFT_QUESTION_TEXT),
-                use_ai=False,
-                draft=SHIFT_QUESTION_TEXT,
-                delay_before=QUESTION_GAP_SEC,
-                step_state=step_state,
-                step_name=STEP_SHIFT_QUESTION,
-                followup_state=followup_state,
-            )
-            last_reply_at[entity.id] = time.time()
-            return
-
-        if route == "shift_question_chain":
-            await send_and_update(
-                client,
-                sheet,
-                tz,
-                entity,
-                FORMAT_TEXT,
-                status_for_text(FORMAT_TEXT),
-                use_ai=True,
-                no_questions=True,
-                draft=FORMAT_TEXT,
-                step_state=step_state,
-                step_name=STEP_FORMAT,
-                followup_state=followup_state,
-            )
-            await handle_format_choice(entity, "both")
-            mark_format_stage_ready(entity)
-            last_reply_at[entity.id] = time.time()
-            return
-
-        if route == "format_choice":
-            history = await build_ai_history(client, entity, limit=10)
-            choice = await detect_format_choice(history, text)
-            result = await handle_format_choice(entity, choice)
-            if result in {"video", "mini_course", "both"}:
-                return
-            if choice == "unknown" or result == "none":
-                await send_and_update(
-                    client,
-                    sheet,
-                    tz,
-                    entity,
-                    FORMAT_QUESTION_TEXT,
-                    status_for_text(FORMAT_QUESTION_TEXT),
-                    use_ai=False,
-                    draft=FORMAT_QUESTION_TEXT,
-                    step_state=step_state,
-                    step_name=STEP_FORMAT_QUESTION,
-                    followup_state=followup_state,
-                )
-                last_reply_at[entity.id] = time.time()
-                return
-            return
-
-        if route == "video_followup_chain":
-            training_combined_text = f"{TRAINING_TEXT}\n\n{TRAINING_QUESTION_TEXT}"
-            await send_and_update(
-                client,
-                sheet,
-                tz,
-                entity,
-                training_combined_text,
-                status_for_text(TRAINING_QUESTION_TEXT) or status_for_text(TRAINING_TEXT),
-                use_ai=True,
-                no_questions=False,
-                draft=training_combined_text,
-                step_state=step_state,
-                step_name=STEP_TRAINING_QUESTION,
-                followup_state=followup_state,
-            )
-            last_reply_at[entity.id] = time.time()
-            return
-
-        if route == "training_question_chain":
-            await send_and_update(
-                client,
-                sheet,
-                tz,
-                entity,
-                FORM_TEXT,
-                status_for_text(FORM_TEXT),
-                use_ai=False,
-                draft=FORM_TEXT,
-                delay_before=TRAINING_TO_FORM_DELAY_SEC,
-                step_state=step_state,
-                step_name=STEP_FORM,
-                followup_state=followup_state,
-            )
-            last_reply_at[entity.id] = time.time()
-            return
-
     @client.on(events.NewMessage(outgoing=True))
     async def on_outgoing_message(event):
         if not event.is_private:
@@ -5115,11 +4881,8 @@ async def main():
                 enabled_peers.add(peer_id)
                 skip_stop_check_once.add(peer_id)
         else:
-            manual_step = detect_step_from_text(text)
             manual_v2_step = detect_manual_v2_step_from_text(text)
             manual_intro_autostart = is_manual_intro_autostart_text(text)
-            if manual_step:
-                step_state.set(peer_id, manual_step)
             if manual_v2_step:
                 current_v2 = v2_runtime.get(peer_id)
                 if manual_intro_autostart:
@@ -5576,7 +5339,7 @@ async def main():
         username = getattr(sender, "username", "") or ""
         chat_link = build_chat_link_app(sender, sender.id)
         v2_step_snapshot = v2_runtime.get(peer_id).flow_step if FLOW_V2_ENABLED else ""
-        current_step_snapshot = v2_step_snapshot or step_state.get(peer_id) or ""
+        current_step_snapshot = v2_step_snapshot or ""
         pause_status = pause_store.get_status(peer_id, username)
         if pause_status == "PAUSED" or peer_id in paused_peers:
             incoming_mode = "OFF"
@@ -5632,7 +5395,6 @@ async def main():
             v2_runtime.delete(peer_id)
             last_reply_at.pop(peer_id, None)
             last_incoming_at.pop(peer_id, None)
-            pending_question_resume.pop(peer_id, None)
             processing_peers.discard(peer_id)
             buffered_incoming.pop(peer_id, None)
             start_source = "plus_start" if (plus_start_first_message or plus_start) else "group_incoming_start"
@@ -5658,7 +5420,6 @@ async def main():
             v2_runtime.delete(peer_id)
             last_reply_at.pop(peer_id, None)
             last_incoming_at.pop(peer_id, None)
-            pending_question_resume.pop(peer_id, None)
             processing_peers.discard(peer_id)
             buffered_incoming.pop(peer_id, None)
             pause_store.set_status(sender.id, username, name, chat_link, "ACTIVE", updated_by="test")
@@ -5733,7 +5494,6 @@ async def main():
             if FLOW_V2_ENABLED and local_generation != int(restart_generation.get(peer_id, 0)):
                 return
             last_incoming_at[peer_id] = time.time()
-            pending_question_resume.pop(peer_id, None)
             followup_state.clear(peer_id)
             queue_today_upsert(
                 peer_id=sender.id,
@@ -5750,196 +5510,6 @@ async def main():
                 if handled_v2:
                     last_reply_at[peer_id] = time.time()
                 return
-                return
-
-            history = await build_ai_history(client, sender, limit=10)
-            last_step_hint = step_state.get(peer_id)
-            intent = await classify_candidate_intent(history, text, last_step_hint)
-            gate = qa_gate_state.get(peer_id, {})
-            gate_active = bool(gate.get("qa_gate_active"))
-            gate_step = (gate.get("qa_gate_step") or last_step_hint or "").strip() or None
-
-            if last_step_hint == STEP_CLARIFY and intent == Intent.STOP and is_clarify_uncertain_reply(text):
-                await send_and_update(
-                    client,
-                    sheet,
-                    tz,
-                    sender,
-                    CLARIFY_NEGATIVE_FOLLOWUP_TEXT,
-                    status_for_text(CLARIFY_TEXT),
-                    use_ai=True,
-                    draft=CLARIFY_NEGATIVE_FOLLOWUP_TEXT,
-                    step_state=step_state,
-                    step_name=STEP_CLARIFY,
-                    followup_state=followup_state,
-                )
-                last_reply_at[peer_id] = time.time()
-                print(f"ℹ️ Clarify override peer={peer_id}: short negative treated as request to clarify")
-                return
-
-            if gate_active:
-                if intent == Intent.QUESTION:
-                    sent = await send_ai_detailed_answer(sender, history_override=history, step_name=gate_step)
-                    if not sent:
-                        await send_and_update(
-                            client,
-                            sheet,
-                            tz,
-                            sender,
-                            "Дякую за запитання. Уточню деталі коротко нижче 👇",
-                            "знак питання",
-                            use_ai=False,
-                            delay_before=QUESTION_RESPONSE_DELAY_SEC,
-                            step_state=step_state,
-                            step_name=gate_step,
-                            followup_state=followup_state,
-                        )
-                    set_qa_gate(peer_id, gate_step)
-                    last_reply_at[peer_id] = time.time()
-                    return
-                if intent == Intent.ACK_CONTINUE:
-                    clear_qa_gate(peer_id)
-                    resolved_step = gate_step or await get_last_step(client, sender, step_state)
-                    if not resolved_step:
-                        resolved_step = STEP_SHIFT_QUESTION
-                        step_state.set(peer_id, resolved_step)
-                    if CONTINUE_DELAY_SEC > 0:
-                        await asyncio.sleep(CONTINUE_DELAY_SEC)
-                        if is_paused(sender):
-                            return
-                    await continue_flow(sender, resolved_step, text)
-                    return
-                if intent == Intent.OTHER:
-                    set_qa_gate(peer_id, gate_step)
-                    last_reply_at[peer_id] = time.time()
-                    return
-
-            skip_stop_for_this_message = peer_id in skip_stop_check_once
-            if skip_stop_for_this_message:
-                skip_stop_check_once.discard(peer_id)
-                print(f"START1_RECOVER peer={peer_id} source=skip_stop step={step_state.get(peer_id) or ''}")
-            if (not skip_stop_for_this_message) and intent == Intent.STOP:
-                await send_and_update(
-                    client,
-                    sheet,
-                    tz,
-                    sender,
-                    STOP_REPLY_TEXT,
-                    AUTO_STOP_STATUS,
-                    use_ai=True,
-                    draft=STOP_REPLY_TEXT,
-                    auto_reply_enabled=False,
-                    step_state=step_state,
-                    followup_state=followup_state,
-                    schedule_followup=False,
-                )
-                paused_peers.add(peer_id)
-                enabled_peers.discard(peer_id)
-                clear_qa_gate(peer_id)
-                pause_store.set_status(
-                    sender.id,
-                    username,
-                    name,
-                    chat_link,
-                    "PAUSED",
-                    updated_by="auto_stop",
-                )
-                return
-
-            last_step = await get_last_step(client, sender, step_state)
-            if not last_step:
-                reconciled_step, reconcile_source = await reconcile_dialog_step(sender, use_cache=False)
-                if reconciled_step:
-                    last_step = reconciled_step
-                    print(f"START1_RECOVER peer={peer_id} source={reconcile_source} step={last_step}")
-                    queue_today_upsert(
-                        peer_id=sender.id,
-                        name=name,
-                        username=username,
-                        chat_link=chat_link,
-                        tech_step=last_step,
-                    )
-                else:
-                    fallback_step = STEP_SHIFT_QUESTION
-                    print(f"MISSING_STEP_FALLBACK peer={peer_id} chosen={fallback_step}")
-                    step_state.set(peer_id, fallback_step)
-                    queue_today_upsert(
-                        peer_id=sender.id,
-                        name=name,
-                        username=username,
-                        chat_link=chat_link,
-                        tech_step=fallback_step,
-                    )
-                    await send_and_update(
-                        client,
-                        sheet,
-                        tz,
-                        sender,
-                        MISSING_STEP_RECOVERY_TEXT,
-                        status_for_text(SHIFT_QUESTION_TEXT),
-                        use_ai=False,
-                        draft=MISSING_STEP_RECOVERY_TEXT,
-                        step_state=step_state,
-                        step_name=fallback_step,
-                        followup_state=followup_state,
-                    )
-                    last_reply_at[peer_id] = time.time()
-                    return
-
-            if last_step == STEP_FORM:
-                if message_has_question(text):
-                    await send_and_update(
-                        client,
-                        sheet,
-                        tz,
-                        sender,
-                        FORM_LOCK_REPLY_TEXT,
-                        status_for_text(FORM_TEXT),
-                        use_ai=False,
-                        draft=FORM_LOCK_REPLY_TEXT,
-                        step_state=step_state,
-                        step_name=STEP_FORM,
-                        followup_state=followup_state,
-                    )
-                    last_reply_at[peer_id] = time.time()
-                return
-
-            if intent == Intent.QUESTION:
-                sent = await send_ai_detailed_answer(sender, history_override=history, step_name=last_step)
-                if not sent:
-                    print(f"⚠️ AI question-response fallback peer={peer_id}: no detailed AI answer")
-                    await send_and_update(
-                        client,
-                        sheet,
-                        tz,
-                        sender,
-                        "Дякую за запитання. Уточню, будь ласка, що саме цікавить найбільше?",
-                        "знак питання",
-                        use_ai=False,
-                        delay_before=QUESTION_RESPONSE_DELAY_SEC,
-                        step_name=last_step,
-                        step_state=step_state,
-                        followup_state=followup_state,
-                    )
-                set_qa_gate(peer_id, last_step)
-                last_reply_at[peer_id] = time.time()
-                return
-
-            if intent == Intent.ACK_CONTINUE and is_short_neutral_ack(text):
-                print(f"ℹ️ Intent ack_continue peer={peer_id} step={last_step or last_step_hint or ''} text='{text[:40]}'")
-
-            if last_step in {STEP_FORMAT_QUESTION, STEP_VIDEO_FOLLOWUP, STEP_TRAINING, STEP_TRAINING_QUESTION}:
-                format_choice = await detect_format_choice(history, text)
-                if format_choice in {"video", "mini_course", "both"}:
-                    handled = await handle_format_choice(sender, format_choice)
-                    if handled in {"video", "mini_course", "both"}:
-                        return
-
-            if CONTINUE_DELAY_SEC > 0:
-                await asyncio.sleep(CONTINUE_DELAY_SEC)
-                if is_paused(sender):
-                    return
-            await continue_flow(sender, last_step, text)
         finally:
             processing_peers.discard(peer_id)
             if FLOW_V2_ENABLED:
@@ -6005,41 +5575,6 @@ async def main():
                         else:
                             owner_store.release_owner(peer_id, ACCOUNT_KEY)
                             print(f"ALT_DELAYED_START_CANCELLED reason=send_failed peer={peer_id}")
-                if not FLOW_V2_ENABLED:
-                    for peer_id, state in list(qa_gate_state.items()):
-                        if not state.get("qa_gate_active"):
-                            continue
-                        opened_at = float(state.get("qa_gate_opened_at", 0) or 0)
-                        reminder_sent = bool(state.get("qa_gate_reminder_sent"))
-                        if reminder_sent:
-                            continue
-                        if now.timestamp() < opened_at + QA_GATE_REMINDER_DELAY_SEC:
-                            continue
-                        if peer_id not in enabled_peers:
-                            continue
-                        try:
-                            entity = await client.get_entity(peer_id)
-                        except Exception:
-                            continue
-                        if is_paused(entity):
-                            continue
-                        gate_step = (state.get("qa_gate_step") or "").strip() or None
-                        await send_and_update(
-                            client,
-                            sheet,
-                            tz,
-                            entity,
-                            QA_GATE_REMINDER_TEXT,
-                            "знак питання",
-                            use_ai=False,
-                            schedule_followup=False,
-                            step_state=step_state,
-                            step_name=gate_step,
-                            followup_state=followup_state,
-                        )
-                        state["qa_gate_reminder_sent"] = True
-                        qa_gate_state[peer_id] = state
-
                 if FLOW_V2_ENABLED:
                     for peer_id in list(v2_enrollment.data):
                         v2s = v2_runtime.get(peer_id)
@@ -6074,23 +5609,18 @@ async def main():
                             v2_runtime.set(v2s)
                             continue
                         elapsed = now_ts - started
-                        stage = int(v2s.step_followup_stage or 0)
-                        send_text = ""
-                        log_label = ""
-                        next_stage = stage
-                        if stage == 0 and elapsed >= STEP_CLARIFY_DELAY_SEC:
-                            send_text = get_step_clarify_text(current_step)
-                            log_label = "STEP_WAIT_CLARIFY_SENT"
-                            next_stage = 1
-                        elif stage == 1 and elapsed >= STEP_FALLBACK_1_DELAY_SEC:
-                            send_text = get_step_fallback_text(current_step, 1)
-                            log_label = "STEP_WAIT_FALLBACK6H_SENT"
-                            next_stage = 2
-                        elif stage == 2 and elapsed >= STEP_FALLBACK_2_DELAY_SEC:
-                            send_text = get_step_fallback_text(current_step, 2)
-                            log_label = "STEP_WAIT_FALLBACK3D_SENT"
-                            next_stage = 3
+                        followup_plan = resolve_v2_followup_stage(elapsed, int(v2s.step_followup_stage or 0))
+                        if not followup_plan:
+                            continue
+                        log_label, followup_stage, next_stage = followup_plan
+                        send_text = build_candidate_aware_followup_text(current_step, followup_stage, v2s)
                         if not send_text:
+                            continue
+                        if is_duplicate_v2_followup(v2s, current_step, send_text):
+                            print(f"STEP_WAIT_DUPLICATE_SUPPRESSED peer={peer_id} step={current_step}")
+                            v2s.step_followup_stage = 2
+                            v2s.step_wait_started_at = now_ts
+                            v2_runtime.set(v2s)
                             continue
                         is_clarify_stage = (next_stage == 1 and log_label == "STEP_WAIT_CLARIFY_SENT")
                         if not is_clarify_stage and not can_send_global_fallback(now, tz):
@@ -6124,92 +5654,12 @@ async def main():
                         print(f"{log_label} peer={peer_id} step={current_step}")
                         v2s.step_followup_stage = next_stage
                         # Re-arm from the actual send moment so each stage delay is relative
-                        # to the previous reminder (clarify -> +6h -> +3d), not original step start.
+                        # to the previous reminder (clarify -> +6h), not original step start.
                         v2s.step_followup_last_at = sent_at
                         v2s.step_wait_started_at = sent_at
+                        v2s.last_followup_text = final_text
+                        v2s.last_followup_step = current_step
                         v2_runtime.set(v2s)
-
-                if not FLOW_V2_ENABLED:
-                    for key, state in list(followup_state.data.items()):
-                        try:
-                            peer_id = int(key)
-                        except ValueError:
-                            continue
-                        if str(peer_id) == TEST_USER_ID:
-                            continue
-                        next_at = state.get("next_at")
-                        stage = state.get("stage")
-                        if next_at is None or stage is None:
-                            continue
-                        if now.timestamp() < float(next_at):
-                            continue
-                        delay_sec, text = FOLLOWUP_TEMPLATES[int(stage)]
-                        if not within_followup_window(now):
-                            adjusted = adjust_to_followup_window(now)
-                            state["next_at"] = adjusted.timestamp()
-                            followup_state.data[key] = state
-                            followup_state._save()
-                            continue
-                        try:
-                            entity = await client.get_entity(peer_id)
-                        except Exception:
-                            continue
-                        await send_and_update(
-                            client,
-                            sheet,
-                            tz,
-                            entity,
-                            text,
-                            status_for_text(text),
-                            use_ai=False,
-                            schedule_followup=False,
-                            followup_state=followup_state,
-                        )
-                        next_stage, next_dt = followup_state.mark_sent_and_advance(peer_id, tz)
-                        stage_value = str(next_stage + 1) if next_stage is not None else ""
-                        next_value = next_dt.isoformat(timespec="seconds") if next_dt else ""
-                        queue_today_upsert(
-                            peer_id=peer_id,
-                            name=getattr(entity, "first_name", "") or "Unknown",
-                            username=getattr(entity, "username", "") or "",
-                            chat_link=build_chat_link_app(entity, peer_id),
-                            followup_stage=stage_value,
-                            followup_next_at=next_value,
-                            followup_last_sent_at=datetime.now(tz).isoformat(timespec="seconds"),
-                        )
-
-                    for peer_id, state in list(pending_question_resume.items()):
-                        if now.timestamp() < float(state.get("due_at", 0)):
-                            continue
-                        if peer_id in processing_peers:
-                            continue
-                        if peer_id not in enabled_peers:
-                            pending_question_resume.pop(peer_id, None)
-                            continue
-                        baseline_in = float(state.get("last_incoming_at", 0))
-                        latest_in = float(last_incoming_at.get(peer_id, 0))
-                        if latest_in > baseline_in:
-                            pending_question_resume.pop(peer_id, None)
-                            continue
-                        try:
-                            entity = await client.get_entity(peer_id)
-                        except Exception:
-                            continue
-                        if is_paused(entity):
-                            pending_question_resume.pop(peer_id, None)
-                            continue
-                        step_name = state.get("step")
-                        if not step_name:
-                            pending_question_resume.pop(peer_id, None)
-                            continue
-                        processing_peers.add(peer_id)
-                        try:
-                            await continue_flow(entity, step_name, "")
-                        except Exception as err:
-                            print(f"⚠️ Question-resume error: {err}")
-                        finally:
-                            processing_peers.discard(peer_id)
-                            pending_question_resume.pop(peer_id, None)
             except Exception as err:
                 print(f"⚠️ Followup loop error: {err}")
             await asyncio.sleep(FOLLOWUP_CHECK_SEC)
