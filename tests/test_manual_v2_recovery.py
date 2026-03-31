@@ -66,6 +66,10 @@ PeerRuntimeState = auto_reply.PeerRuntimeState
 
 
 class ManualV2RecoveryTests(unittest.TestCase):
+    def test_detects_manual_intro_autostart_text(self):
+        self.assertTrue(auto_reply.is_manual_intro_autostart_text(auto_reply.SCREENING_INTRO_TEXT))
+        self.assertFalse(auto_reply.is_manual_intro_autostart_text(auto_reply.COMPANY_INTRO_TEXT))
+
     def test_detects_company_intro_as_company_step(self):
         self.assertEqual(
             auto_reply.detect_manual_v2_step_from_text(auto_reply.COMPANY_INTRO_TEXT),
@@ -116,6 +120,15 @@ class ManualV2RecoveryTests(unittest.TestCase):
         self.assertEqual(state.flow_step, auto_reply.STEP_FORM_FORWARD)
         self.assertFalse(state.form_waiting_photo)
         self.assertEqual(state.step_wait_step, auto_reply.STEP_FORM_FORWARD)
+
+    def test_prime_manual_intro_autostart_state(self):
+        state = PeerRuntimeState(peer_id=4, auto_mode="OFF", paused=True)
+        auto_reply.prime_manual_intro_autostart_state(state, now_ts=400.0)
+        self.assertEqual(state.flow_step, auto_reply.STEP_COMPANY_INTRO)
+        self.assertEqual(state.auto_mode, "ON")
+        self.assertFalse(state.paused)
+        self.assertEqual(state.step_wait_step, auto_reply.STEP_COMPANY_INTRO)
+        self.assertEqual(state.step_wait_started_at, 400.0)
 
 
 if __name__ == "__main__":

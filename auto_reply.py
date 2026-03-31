@@ -3139,6 +3139,10 @@ def detect_manual_v2_step_from_text(message_text: str) -> Optional[str]:
     return best_step
 
 
+def is_manual_intro_autostart_text(message_text: str) -> bool:
+    return normalize_text(message_text) == normalize_text(SCREENING_INTRO_TEXT)
+
+
 def prime_manual_v2_runtime_state(
     state: PeerRuntimeState,
     step_name: str,
@@ -3166,6 +3170,25 @@ def prime_manual_v2_runtime_state(
         state.step_followup_last_at = 0.0
     else:
         clear_step_wait(state)
+    return state
+
+
+def prime_manual_intro_autostart_state(
+    state: PeerRuntimeState,
+    now_ts: Optional[float] = None,
+) -> PeerRuntimeState:
+    current_ts = float(now_ts if now_ts is not None else time.time())
+    state.flow_step = STEP_COMPANY_INTRO
+    state.auto_mode = "ON"
+    state.paused = False
+    state.qa_gate_active = False
+    state.qa_gate_step = ""
+    state.qa_gate_opened_at = 0.0
+    state.qa_gate_reminder_sent = False
+    state.screening_started_at = 0.0
+    state.screening_last_at = 0.0
+    state.screening_answers = []
+    arm_step_wait(state, STEP_COMPANY_INTRO, current_ts)
     return state
 
 
@@ -5071,6 +5094,7 @@ async def main():
             return
         text = (event.raw_text or "").strip()
         text_lower = text.lower()
+        manual_intro_autostart = False
         def _log_delete_result(task: asyncio.Task):
             try:
                 task.result()
@@ -5093,14 +5117,22 @@ async def main():
         else:
             manual_step = detect_step_from_text(text)
             manual_v2_step = detect_manual_v2_step_from_text(text)
+            manual_intro_autostart = is_manual_intro_autostart_text(text)
             if manual_step:
                 step_state.set(peer_id, manual_step)
             if manual_v2_step:
                 current_v2 = v2_runtime.get(peer_id)
-                prime_manual_v2_runtime_state(current_v2, manual_v2_step, now_ts=time.time())
+                if manual_intro_autostart:
+                    prime_manual_intro_autostart_state(current_v2, now_ts=time.time())
+                else:
+                    prime_manual_v2_runtime_state(current_v2, manual_v2_step, now_ts=time.time())
                 v2_runtime.set(current_v2)
-            paused_peers.add(peer_id)
-            enabled_peers.discard(peer_id)
+            if manual_intro_autostart:
+                paused_peers.discard(peer_id)
+                enabled_peers.add(peer_id)
+            else:
+                paused_peers.add(peer_id)
+                enabled_peers.discard(peer_id)
         try:
             entity = await event.get_chat()
         except Exception:
@@ -5109,14 +5141,26 @@ async def main():
             name = getattr(entity, "first_name", "") or "Unknown"
             username = getattr(entity, "username", "") or ""
             chat_link = build_chat_link_app(entity, entity.id)
-            status = "PAUSED" if text_lower in STOP_COMMANDS or text_lower not in START_COMMANDS else "ACTIVE"
+            status = "ACTIVE" if manual_intro_autostart else ("PAUSED" if text_lower in STOP_COMMANDS or text_lower not in START_COMMANDS else "ACTIVE")
             auto_toggle_value = None
-            if text_lower in START_COMMANDS:
+            if manual_intro_autostart:
+                auto_toggle_value = True
+            elif text_lower in START_COMMANDS:
                 auto_toggle_value = True
             elif text_lower in STOP_COMMANDS:
                 auto_toggle_value = False
             pause_store.set_status(entity.id, username, name, chat_link, status, updated_by="manual")
-            if text_lower in START_COMMANDS:
+            if manual_intro_autostart:
+                clear_qa_gate(entity.id)
+                v2_enrollment.add(entity.id)
+                current_v2 = v2_runtime.get(entity.id)
+                prime_manual_intro_autostart_state(current_v2, now_ts=time.time())
+                v2_runtime.set(current_v2)
+                if not IS_ALT_ACCOUNT:
+                    owner_store.set_owner(entity.id, PRIMARY_ACCOUNT_KEY, "manual_intro", tz)
+                await send_v2_message(entity, COMPANY_INTRO_TEXT, STEP_COMPANY_INTRO, status=STATUS_INTRO_SENT)
+                print(f"MANUAL_INTRO_AUTOSTART peer={entity.id} step={current_v2.flow_step}")
+            elif text_lower in START_COMMANDS:
                 recover_source = "v2"
                 v2_enrollment.add(entity.id)
                 current_v2 = v2_runtime.get(entity.id)
@@ -5145,18 +5189,20 @@ async def main():
                 username=username,
                 chat_link=chat_link,
                 auto_reply_enabled=auto_toggle_value,
-                tech_step=(v2_runtime.get(entity.id).flow_step if text_lower in START_COMMANDS else None),
+                tech_step=(v2_runtime.get(entity.id).flow_step if (text_lower in START_COMMANDS or manual_intro_autostart) else None),
                 sender_role="operator",
-                dialog_mode=("ON" if text_lower in START_COMMANDS else "OFF"),
-                step_snapshot=(v2_runtime.get(entity.id).flow_step if text_lower in START_COMMANDS else ""),
+                dialog_mode=("ON" if (text_lower in START_COMMANDS or manual_intro_autostart) else "OFF"),
+                step_snapshot=(v2_runtime.get(entity.id).flow_step if (text_lower in START_COMMANDS or manual_intro_autostart) else ""),
                 full_text=text,
                 event_type_override=(
-                    f"START1_RECOVER ({recover_source})" if text_lower in START_COMMANDS else None
+                    "MANUAL_INTRO_AUTOSTART" if manual_intro_autostart else (
+                        f"START1_RECOVER ({recover_source})" if text_lower in START_COMMANDS else None
+                    )
                 ),
-                status=(None if text_lower in START_COMMANDS else MANUAL_OFF_STATUS),
+                status=(None if (text_lower in START_COMMANDS or manual_intro_autostart) else MANUAL_OFF_STATUS),
             )
         else:
-            status = "PAUSED" if text_lower in STOP_COMMANDS or text_lower not in START_COMMANDS else "ACTIVE"
+            status = "ACTIVE" if manual_intro_autostart else ("PAUSED" if text_lower in STOP_COMMANDS or text_lower not in START_COMMANDS else "ACTIVE")
             pause_store.set_status(peer_id, None, None, None, status, updated_by="manual")
     @client.on(events.NewMessage(chats=leads_group))
     async def on_lead_message(event):
