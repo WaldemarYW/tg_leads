@@ -65,6 +65,25 @@ auto_reply = importlib.import_module("auto_reply")
 
 
 class SpecialStartPolicyTests(unittest.TestCase):
+    def test_alt_referral_block_matches_any_nonempty_source_name(self):
+        original_alt = auto_reply.IS_ALT_ACCOUNT
+        try:
+            auto_reply.IS_ALT_ACCOUNT = True
+            self.assertTrue(auto_reply.is_alt_referral_blocked({"source_name": "@hr_volodymyr"}))
+            self.assertTrue(auto_reply.is_alt_referral_blocked({"source_name": "@other_hr"}))
+            self.assertTrue(auto_reply.is_alt_referral_blocked({"source_name": "traffic_manager"}))
+            self.assertFalse(auto_reply.is_alt_referral_blocked({"source_name": ""}))
+        finally:
+            auto_reply.IS_ALT_ACCOUNT = original_alt
+
+    def test_alt_referral_block_disabled_for_primary_account(self):
+        original_alt = auto_reply.IS_ALT_ACCOUNT
+        try:
+            auto_reply.IS_ALT_ACCOUNT = False
+            self.assertFalse(auto_reply.is_alt_referral_blocked({"source_name": "@hr_volodymyr"}))
+        finally:
+            auto_reply.IS_ALT_ACCOUNT = original_alt
+
     def test_parse_lead_age_supports_plain_and_plus_values(self):
         self.assertEqual(auto_reply.parse_lead_age("15"), 15)
         self.assertEqual(auto_reply.parse_lead_age("40+"), 40)

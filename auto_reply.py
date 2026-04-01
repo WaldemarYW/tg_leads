@@ -1909,6 +1909,13 @@ def group_special_skip_status(lead_info: Optional[dict]) -> str:
     return SPECIAL_START_STATUS_BY_REASON.get(reason, "")
 
 
+def is_alt_referral_blocked(lead_info: Optional[dict]) -> bool:
+    if not IS_ALT_ACCOUNT:
+        return False
+    source_name = normalize_username(str((lead_info or {}).get("source_name", "") or ""))
+    return bool(source_name)
+
+
 def refusal_reason_from_special_start(special_reason: str) -> str:
     return SPECIAL_START_REFUSAL_REASON.get((special_reason or "").strip(), "")
 
@@ -5186,6 +5193,12 @@ async def main():
             return
 
         if IS_ALT_ACCOUNT:
+            if is_alt_referral_blocked(group_data):
+                print(
+                    f"ALT_DELAYED_START_CANCELLED reason=referral_block "
+                    f"peer={entity.id} source_name={str(group_data.get('source_name', '') or '').strip()}"
+                )
+                return
             if is_peer_owned_by_primary(int(entity.id)):
                 print(f"ALT_DELAYED_START_CANCELLED owner=primary peer={entity.id}")
                 return
