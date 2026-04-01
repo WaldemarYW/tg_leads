@@ -186,6 +186,8 @@ TODAY_HEADERS = [
     "Ссылка на чат",
     "Ссылка на заявку",
     "Статус",
+    "Причина отказа",
+    "Фраза отказа",
     "Пир",
     "Аккаунт",
     "Дата первого старта",
@@ -219,6 +221,8 @@ DIALOG_STOP_URL = os.environ.get("DIALOG_STOP_URL", "http://127.0.0.1:3000/shoul
 DIALOG_STOP_TIMEOUT_SEC = float(os.environ.get("DIALOG_STOP_TIMEOUT_SEC", "15"))
 DIALOG_INTENT_URL = os.environ.get("DIALOG_INTENT_URL", "http://127.0.0.1:3000/intent_classify")
 DIALOG_INTENT_TIMEOUT_SEC = float(os.environ.get("DIALOG_INTENT_TIMEOUT_SEC", "15"))
+DIALOG_REFUSAL_URL = os.environ.get("DIALOG_REFUSAL_URL", "http://127.0.0.1:3000/refusal_reason")
+DIALOG_REFUSAL_TIMEOUT_SEC = float(os.environ.get("DIALOG_REFUSAL_TIMEOUT_SEC", "15"))
 DIALOG_FORMAT_URL = os.environ.get("DIALOG_FORMAT_URL", "http://127.0.0.1:3000/format_choice")
 DIALOG_FORMAT_TIMEOUT_SEC = float(os.environ.get("DIALOG_FORMAT_TIMEOUT_SEC", "15"))
 STEP_STATE_PATH = os.environ.get("AUTO_REPLY_STEP_STATE_PATH", "/opt/tg_leads/.auto_reply.step_state.json")
@@ -282,6 +286,29 @@ STOP_COMMANDS = {"стоп1", "stop1"}
 START_COMMANDS = {"старт1", "start1"}
 AUTO_STOP_STATUS = STATUS_STOPPED
 MANUAL_OFF_STATUS = STATUS_PAUSED
+REFUSAL_REASON_SCHEDULE = "schedule"
+REFUSAL_REASON_INCOME_MODEL = "income_model"
+REFUSAL_REASON_NO_PC = "no_pc"
+REFUSAL_REASON_AGE = "age"
+REFUSAL_REASON_FULL_TIME = "full_time"
+REFUSAL_REASON_NOT_REMOTE_FIT = "not_remote_fit"
+REFUSAL_REASON_NOT_INTERESTED = "not_interested"
+REFUSAL_REASON_LATER = "later"
+REFUSAL_REASON_NO_REPLY_CONTEXT = "no_reply_context"
+REFUSAL_REASON_OTHER = "other"
+REFUSAL_REASON_ALLOWED = {
+    REFUSAL_REASON_SCHEDULE,
+    REFUSAL_REASON_INCOME_MODEL,
+    REFUSAL_REASON_NO_PC,
+    REFUSAL_REASON_AGE,
+    REFUSAL_REASON_FULL_TIME,
+    REFUSAL_REASON_NOT_REMOTE_FIT,
+    REFUSAL_REASON_NOT_INTERESTED,
+    REFUSAL_REASON_LATER,
+    REFUSAL_REASON_NO_REPLY_CONTEXT,
+    REFUSAL_REASON_OTHER,
+}
+REFUSAL_RAW_MAX_LEN = 300
 STOP_REPLY_TEXT = "Розумію, дякую за відповідь. Якщо обставини зміняться, дайте знати."
 CLARIFY_VARIANTS = [
     CLARIFY_TEXT,
@@ -637,8 +664,6 @@ def canonical_sheet_status(
     if raw == CONFIRM_STATUS:
         return STATUS_HANDOFF
     if raw == AUTO_STOP_STATUS:
-        if (step_name or "").strip() in {STEP_SCHEDULE_SHIFT_WAIT, STEP_SCHEDULE_CONFIRM, STEP_SCHEDULE_BLOCK}:
-            return STATUS_SHIFT_MISMATCH
         return STATUS_STOPPED
     if raw in {"👋 Привітання", "🏢 Знайомство з компанією"}:
         return STATUS_INTRO_SENT
@@ -1339,6 +1364,63 @@ def is_hard_stop_message(text: str) -> bool:
     return any(m in t for m in stop_markers)
 
 
+def normalize_refusal_raw(text: str, fallback: str = "") -> str:
+    raw = str(text or fallback or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not raw:
+        return ""
+    return raw[:REFUSAL_RAW_MAX_LEN]
+
+
+def classify_refusal_reason_local(text: str, step_name: Optional[str] = None) -> str:
+    raw = str(text or "").strip()
+    t = normalize_text(raw)
+    step = (step_name or "").strip()
+    if not t:
+        return REFUSAL_REASON_OTHER
+    if any(marker in t for marker in ("пізніше", "позже", "не зараз", "не сейчас", "подумаю", "подумaю", "завтра", "потом", "потім")):
+        return REFUSAL_REASON_LATER
+    if any(marker in t for marker in ("без ноут", "без пк", "немає пк", "немає ноут", "нет пк", "нет ноут", "нету пк")):
+        return REFUSAL_REASON_NO_PC
+    if any(marker in t for marker in ("за віком", "по возрасту", "по віку", "замалий вік", "маленький возраст")):
+        return REFUSAL_REASON_AGE
+    if any(marker in t for marker in ("без ставки", "без ставк", "процент", "відсот", "процента", "баланс", "оплат", "зарплат", "дохід", "доход")):
+        return REFUSAL_REASON_INCOME_MODEL
+    if any(marker in t for marker in ("8 год", "8-год", "8 годин", "full time", "фул тайм", "повний день", "полный день", "не зможу 8")):
+        return REFUSAL_REASON_FULL_TIME
+    if any(marker in t for marker in ("графік", "график", "зміна", "смена", "нічна", "денна", "ночная", "дневная", "вихідн", "выходн")):
+        return REFUSAL_REASON_SCHEDULE
+    if any(marker in t for marker in ("віддален", "удален", "текстове", "текстовое", "формат", "не моє", "не мое", "не підходить формат", "не подходит формат")):
+        return REFUSAL_REASON_NOT_REMOTE_FIT
+    if any(marker in t for marker in ("неактуально", "не актуально", "не цікаво", "не интересно", "не цікава", "не интересна", "передум", "не хочу", "не потрібно", "не нужно")):
+        return REFUSAL_REASON_NOT_INTERESTED
+    if step in {STEP_SCHEDULE_SHIFT_WAIT, STEP_SCHEDULE_CONFIRM, STEP_SCHEDULE_BLOCK} and is_no_reply(raw):
+        return REFUSAL_REASON_SCHEDULE
+    return REFUSAL_REASON_OTHER
+
+
+async def classify_refusal_reason(history: list, text: str, step_name: Optional[str]) -> Dict[str, str]:
+    raw_text = normalize_refusal_raw(text)
+    if not raw_text:
+        return {"reason": REFUSAL_REASON_OTHER, "raw_text": ""}
+    if DIALOG_REFUSAL_URL:
+        payload = {
+            "history": history,
+            "last_message": raw_text,
+            "step_name": (step_name or "").strip(),
+            "allowed_reasons": sorted(REFUSAL_REASON_ALLOWED),
+        }
+        try:
+            data = await asyncio.to_thread(_post_json, DIALOG_REFUSAL_URL, payload, DIALOG_REFUSAL_TIMEOUT_SEC)
+        except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError) as err:
+            print(f"⚠️ AI refusal error: {err}")
+            data = None
+        if data and data.get("ok"):
+            reason_code = str(data.get("reason") or data.get("category") or "").strip().lower()
+            if reason_code in REFUSAL_REASON_ALLOWED:
+                return {"reason": reason_code, "raw_text": raw_text}
+    return {"reason": classify_refusal_reason_local(raw_text, step_name), "raw_text": raw_text}
+
+
 def is_voice_decline(text: str) -> bool:
     t = normalize_text(text)
     if not t:
@@ -1800,6 +1882,12 @@ SPECIAL_START_STATUS_BY_REASON = {
     SPECIAL_START_AGE_40_PLUS: STATUS_AGE_RISK_40_PLUS,
 }
 
+SPECIAL_START_REFUSAL_REASON = {
+    SPECIAL_START_UNDERAGE_15: REFUSAL_REASON_AGE,
+    SPECIAL_START_NO_PC: REFUSAL_REASON_NO_PC,
+    SPECIAL_START_AGE_40_PLUS: REFUSAL_REASON_AGE,
+}
+
 
 def classify_special_start_policy(lead_info: Optional[dict]) -> str:
     if not lead_info:
@@ -1819,6 +1907,17 @@ def group_special_skip_status(lead_info: Optional[dict]) -> str:
     if reason == SPECIAL_START_ELIGIBLE:
         return ""
     return SPECIAL_START_STATUS_BY_REASON.get(reason, "")
+
+
+def refusal_reason_from_special_start(special_reason: str) -> str:
+    return SPECIAL_START_REFUSAL_REASON.get((special_reason or "").strip(), "")
+
+
+def refusal_raw_from_special_start(special_reason: str) -> str:
+    reason = (special_reason or "").strip()
+    if not reason:
+        return ""
+    return f"special_start:{reason}"
 
 
 class SheetWriter:
@@ -1877,22 +1976,38 @@ class SheetWriter:
         title = self._month_title(datetime.now(tz).date())
         if self.today_ws is None:
             self.today_ws = get_or_create_worksheet(self.sh, title, rows=1000, cols=len(TODAY_HEADERS))
-            current = self.today_ws.row_values(1)
-            if current != TODAY_HEADERS:
-                self.today_ws.clear()
-                self.today_ws.append_row(TODAY_HEADERS, value_input_option="USER_ENTERED")
+            self._ensure_today_headers(self.today_ws)
             self.today_key = key
             self._invalidate_ws_cache(self.today_ws)
             return self.today_ws
         if self.today_key != key:
             self.today_ws = get_or_create_worksheet(self.sh, title, rows=1000, cols=len(TODAY_HEADERS))
-            current = self.today_ws.row_values(1)
-            if current != TODAY_HEADERS:
-                self.today_ws.clear()
-                self.today_ws.append_row(TODAY_HEADERS, value_input_option="USER_ENTERED")
+            self._ensure_today_headers(self.today_ws)
             self.today_key = key
             self._invalidate_ws_cache(self.today_ws)
         return self.today_ws
+
+    def _ensure_today_headers(self, ws):
+        values = ws.get_all_values()
+        if not values:
+            ws.append_row(TODAY_HEADERS, value_input_option="USER_ENTERED")
+            self._invalidate_ws_cache(ws)
+            return
+        current_headers = [h.strip() for h in values[0]]
+        if current_headers == TODAY_HEADERS:
+            return
+        data_rows = values[1:]
+        remapped_rows = []
+        for row in data_rows:
+            row_map = {}
+            for idx, header in enumerate(current_headers):
+                row_map[header] = row[idx] if idx < len(row) else ""
+            remapped_rows.append([row_map.get(h, "") for h in TODAY_HEADERS])
+        ws.clear()
+        ws.append_row(TODAY_HEADERS, value_input_option="USER_ENTERED")
+        if remapped_rows:
+            ws.append_rows(remapped_rows, value_input_option="USER_ENTERED")
+        self._invalidate_ws_cache(ws)
 
     def _invalidate_ws_cache(self, ws):
         ws_id = ws.id
@@ -2513,6 +2628,8 @@ class SheetWriter:
         followup_next_at: Optional[str] = None,
         followup_last_sent_at: Optional[str] = None,
         candidate_note_append: Optional[str] = None,
+        refusal_reason: Optional[str] = None,
+        refusal_raw: Optional[str] = None,
     ):
         del auto_reply_enabled, sender_role, dialog_mode, full_text, event_type_override
         del followup_stage, followup_next_at, followup_last_sent_at, candidate_note_append
@@ -2571,6 +2688,10 @@ class SheetWriter:
         )
         if resolved_status:
             set_value("Статус", resolved_status)
+        if refusal_reason is not None:
+            set_value("Причина отказа", str(refusal_reason or "").strip())
+        if refusal_raw is not None:
+            set_value("Фраза отказа", normalize_refusal_raw(refusal_raw))
         set_value("Пир", str(peer_id))
         effective_account = self._owner_account_for_peer(peer_id, existing[col_idx("Аккаунт")] if col_idx("Аккаунт") is not None and col_idx("Аккаунт") < len(existing) else "")
         set_value("Аккаунт", effective_account)
@@ -4023,6 +4144,33 @@ async def main():
         )
         return bool(ok)
 
+    async def classify_candidate_refusal(sender: User, text: str, step_name: Optional[str]) -> Dict[str, str]:
+        history = await build_ai_history(client, sender, limit=8)
+        return await classify_refusal_reason(history, text, step_name)
+
+    def record_refusal_today(
+        entity: User,
+        status: str,
+        refusal_reason: str,
+        refusal_raw: str,
+        step_name: Optional[str] = None,
+        event_type_override: Optional[str] = None,
+    ):
+        queue_today_upsert(
+            peer_id=int(getattr(entity, "id", 0) or 0),
+            name=getattr(entity, "first_name", "") or "Unknown",
+            username=getattr(entity, "username", "") or "",
+            chat_link=build_chat_link_app(entity, int(getattr(entity, "id", 0) or 0)),
+            status=status,
+            auto_reply_enabled=False,
+            dialog_mode="OFF",
+            step_snapshot=(step_name or ""),
+            tech_step=(step_name or ""),
+            refusal_reason=refusal_reason,
+            refusal_raw=refusal_raw,
+            event_type_override=event_type_override,
+        )
+
     async def handle_special_start(
         entity: User,
         lead_info: Optional[dict],
@@ -4065,6 +4213,8 @@ async def main():
             status=status,
             step_snapshot="",
             tech_step="",
+            refusal_reason=refusal_reason_from_special_start(special_reason),
+            refusal_raw=refusal_raw_from_special_start(special_reason),
             event_type_override=f"SPECIAL_START_{special_reason.upper()}",
         )
         print(f"SPECIAL_START peer={peer_id} source={start_source} reason={special_reason}")
@@ -4404,7 +4554,16 @@ async def main():
             return True
 
         if is_hard_stop_message(text) and not voice_not_listened:
+            refusal = await classify_candidate_refusal(sender, text, step_name)
             await send_v2_message(sender, STOP_REPLY_TEXT, step_name, status=AUTO_STOP_STATUS)
+            record_refusal_today(
+                sender,
+                AUTO_STOP_STATUS,
+                refusal.get("reason", REFUSAL_REASON_OTHER),
+                refusal.get("raw_text", ""),
+                step_name=step_name,
+                event_type_override="REFUSAL_CLASSIFIED",
+            )
             state.auto_mode = "OFF"
             state.paused = True
             paused_peers.add(sender.id)
@@ -4529,7 +4688,16 @@ async def main():
                 v2_runtime.set(state)
                 intent_name = "ack_continue"
             elif intent_name == "stop":
+                refusal = await classify_candidate_refusal(sender, text, step_name)
                 await send_v2_message(sender, STOP_REPLY_TEXT, step_name, status=AUTO_STOP_STATUS)
+                record_refusal_today(
+                    sender,
+                    AUTO_STOP_STATUS,
+                    refusal.get("reason", REFUSAL_REASON_OTHER),
+                    refusal.get("raw_text", ""),
+                    step_name=step_name,
+                    event_type_override="REFUSAL_CLASSIFIED",
+                )
                 state.auto_mode = "OFF"
                 state.paused = True
                 paused_peers.add(sender.id)
@@ -4625,7 +4793,16 @@ async def main():
             return True
 
         if intent_name == "stop" and not voice_decline and step_name in WAIT_STEP_SET:
+            refusal = await classify_candidate_refusal(sender, text, step_name)
             await send_v2_message(sender, STOP_REPLY_TEXT, step_name, status=AUTO_STOP_STATUS)
+            record_refusal_today(
+                sender,
+                AUTO_STOP_STATUS,
+                refusal.get("reason", REFUSAL_REASON_OTHER),
+                refusal.get("raw_text", ""),
+                step_name=step_name,
+                event_type_override="REFUSAL_CLASSIFIED",
+            )
             state.auto_mode = "OFF"
             state.paused = True
             paused_peers.add(sender.id)
@@ -4686,7 +4863,19 @@ async def main():
                     v2_runtime.set(state)
                     return True
                 if is_no_reply(text):
+                    refusal = {
+                        "reason": REFUSAL_REASON_SCHEDULE,
+                        "raw_text": normalize_refusal_raw(text),
+                    }
                     await send_v2_message(sender, STOP_REPLY_TEXT, STEP_SCHEDULE_SHIFT_WAIT, status=AUTO_STOP_STATUS)
+                    record_refusal_today(
+                        sender,
+                        AUTO_STOP_STATUS,
+                        refusal["reason"],
+                        refusal["raw_text"],
+                        step_name=STEP_SCHEDULE_SHIFT_WAIT,
+                        event_type_override="REFUSAL_CLASSIFIED",
+                    )
                     state.auto_mode = "OFF"
                     state.paused = True
                     paused_peers.add(sender.id)
@@ -5007,6 +5196,7 @@ async def main():
 
         special_skip_status = group_special_skip_status(group_data)
         if special_skip_status:
+            special_reason = classify_special_start_policy(group_data)
             if group_data:
                 if not enqueue_sheet_event("group_leads_upsert", {"data": group_data, "status": special_skip_status}):
                     try:
@@ -5024,6 +5214,8 @@ async def main():
                 dialog_mode="OFF",
                 step_snapshot="",
                 tech_step="",
+                refusal_reason=refusal_reason_from_special_start(special_reason),
+                refusal_raw=refusal_raw_from_special_start(special_reason),
                 event_type_override=f"GROUP_SPECIAL_SKIP ({special_skip_status})",
             )
             print(f"GROUP_SPECIAL_SKIP peer={entity.id} status={special_skip_status}")
