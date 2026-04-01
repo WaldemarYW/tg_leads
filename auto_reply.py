@@ -180,6 +180,7 @@ TODAY_HEADERS = [
     "Дата",
     "Имя",
     "Username",
+    "Телефон",
     "Возраст",
     "Наличие ПК/ноутбука",
     "Смена",
@@ -2359,12 +2360,14 @@ class SheetWriter:
                 return None
 
             tg_idx = idx_of("tg", "telegram", "тг")
+            phone_idx = idx_of("phone", "телефон")
             age_idx = idx_of("age", "возраст")
             pc_idx = idx_of("pc", "ноутбук", "пк", "пк/ноутбук")
             full_name_idx = idx_of("full_name", "фио", "піб", "имя")
             if tg_idx is not None or full_name_idx is not None:
                 for idx, row in enumerate(values[1:], start=2):
                     row_username = row[tg_idx] if tg_idx is not None and tg_idx < len(row) else ""
+                    row_phone = row[phone_idx] if phone_idx is not None and phone_idx < len(row) else ""
                     row_name = row[full_name_idx] if full_name_idx is not None and full_name_idx < len(row) else ""
                     age = row[age_idx].strip() if age_idx is not None and age_idx < len(row) else ""
                     pc = row[pc_idx].strip() if pc_idx is not None and pc_idx < len(row) else ""
@@ -2373,6 +2376,7 @@ class SheetWriter:
                             "row_idx": idx,
                             "username_norm": normalize_username(row_username),
                             "name_norm": normalize_name(row_name),
+                            "phone": row_phone.strip(),
                             "age": age,
                             "pc": pc,
                         }
@@ -2401,9 +2405,19 @@ class SheetWriter:
         fallback_match = None
         for item in rows:
             if uname and item.get("username_norm", "") == uname:
-                return {"row_idx": item.get("row_idx"), "age": item.get("age", ""), "pc": item.get("pc", "")}
+                return {
+                    "row_idx": item.get("row_idx"),
+                    "phone": item.get("phone", ""),
+                    "age": item.get("age", ""),
+                    "pc": item.get("pc", ""),
+                }
             if not fallback_match and name_norm and names_match(item.get("name_norm", ""), name_norm):
-                fallback_match = {"row_idx": item.get("row_idx"), "age": item.get("age", ""), "pc": item.get("pc", "")}
+                fallback_match = {
+                    "row_idx": item.get("row_idx"),
+                    "phone": item.get("phone", ""),
+                    "age": item.get("age", ""),
+                    "pc": item.get("pc", ""),
+                }
         return fallback_match
 
     def refresh_today_from_group_lead(self, tz: ZoneInfo, group_data: dict) -> int:
@@ -2425,6 +2439,7 @@ class SheetWriter:
 
         username_idx = idx_of("Username")
         name_idx = idx_of("Имя")
+        phone_idx = idx_of("Телефон")
         app_link_idx = idx_of("Ссылка на заявку")
         age_idx = idx_of("Возраст")
         pc_idx = idx_of("Наличие ПК/ноутбука")
@@ -2436,6 +2451,7 @@ class SheetWriter:
             return 0
         app_ws = self._get_group_leads_ws()
         app_link = self._sheet_row_link(app_ws, int(lead_info["row_idx"]), "Открыть заявку")
+        lead_phone = str(lead_info.get("phone", "") or "").strip()
         lead_age = lead_info.get("age", "")
         lead_pc = lead_info.get("pc", "")
         target_uname = normalize_username(group_data.get("tg", ""))
@@ -2458,6 +2474,9 @@ class SheetWriter:
             changed = False
             if row_full[app_link_idx] != app_link:
                 row_full[app_link_idx] = app_link
+                changed = True
+            if phone_idx is not None and lead_phone and row_full[phone_idx] != lead_phone:
+                row_full[phone_idx] = lead_phone
                 changed = True
             if row_full[age_idx] != lead_age:
                 row_full[age_idx] = lead_age
@@ -2620,6 +2639,7 @@ class SheetWriter:
         name: str,
         username: str,
         chat_link: str,
+        phone: Optional[str] = None,
         status: Optional[str] = None,
         shift: Optional[str] = None,
         auto_reply_enabled: Optional[bool] = None,
@@ -2670,6 +2690,9 @@ class SheetWriter:
         set_value("Дата", str(datetime.now(tz).date()))
         set_value("Имя", name)
         set_value("Username", ("@" + username) if username else "")
+        phone_to_write = str(phone or "").strip() if phone is not None else ""
+        if phone_to_write:
+            set_value("Телефон", phone_to_write)
         set_value("Возраст", "")
         set_value("Наличие ПК/ноутбука", "")
         if shift is not None:
@@ -2680,6 +2703,10 @@ class SheetWriter:
             if lead_info:
                 app_ws = self._get_group_leads_ws()
                 set_value("Ссылка на заявку", self._sheet_row_link(app_ws, int(lead_info["row_idx"]), "Открыть заявку"))
+                if not phone_to_write:
+                    phone_to_write = str(lead_info.get("phone", "") or "").strip()
+                    if phone_to_write:
+                        set_value("Телефон", phone_to_write)
                 set_value("Возраст", lead_info.get("age", ""))
                 set_value("Наличие ПК/ноутбука", lead_info.get("pc", ""))
             else:
@@ -4213,6 +4240,7 @@ async def main():
             peer_id=peer_id,
             name=name,
             username=username,
+            phone=(lead_info or {}).get("phone", ""),
             chat_link=chat_link,
             auto_reply_enabled=False,
             sender_role="bot",
@@ -5221,6 +5249,7 @@ async def main():
                 peer_id=entity.id,
                 name=getattr(entity, "first_name", "") or "Unknown",
                 username=getattr(entity, "username", "") or "",
+                phone=(group_data.get("phone", "") or phone or ""),
                 chat_link=build_chat_link_app(entity, entity.id),
                 status=special_skip_status,
                 auto_reply_enabled=False,

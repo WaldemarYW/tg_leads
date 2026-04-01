@@ -105,6 +105,7 @@ class RefusalReasonTrackingTests(unittest.TestCase):
     def test_today_headers_include_refusal_columns(self):
         self.assertIn("Причина отказа", auto_reply.TODAY_HEADERS)
         self.assertIn("Фраза отказа", auto_reply.TODAY_HEADERS)
+        self.assertIn("Телефон", auto_reply.TODAY_HEADERS)
 
     def test_local_refusal_classifier_covers_key_categories(self):
         self.assertEqual(
@@ -139,7 +140,7 @@ class RefusalReasonTrackingTests(unittest.TestCase):
         ws = FakeWorksheet(
             [
                 old_headers,
-                ["2026-04-01", "Test", "@lead", "23", "Так", "", "chat", "app", "Отказ кандидата", "123", "primary", "2026-04-01"],
+                ["2026-04-01", "Test", "@lead", "+380991112233", "23", "Так", "", "chat", "app", "Отказ кандидата", "123", "primary", "2026-04-01"],
             ]
         )
         writer = auto_reply.SheetWriter.__new__(auto_reply.SheetWriter)
@@ -148,6 +149,8 @@ class RefusalReasonTrackingTests(unittest.TestCase):
         self.assertEqual(ws.values[0], auto_reply.TODAY_HEADERS)
         self.assertEqual(ws.values[1][0], "2026-04-01")
         self.assertEqual(ws.values[1][1], "Test")
+        phone_idx = ws.values[0].index("Телефон")
+        self.assertEqual(ws.values[1][phone_idx], "+380991112233")
 
     def test_upsert_preserves_existing_refusal_when_new_payload_is_empty(self):
         ws = FakeWorksheet(
@@ -157,6 +160,7 @@ class RefusalReasonTrackingTests(unittest.TestCase):
                     "2026-04-01",
                     "Lead",
                     "@lead",
+                    "+380991112233",
                     "23",
                     "Так",
                     "",
@@ -194,8 +198,109 @@ class RefusalReasonTrackingTests(unittest.TestCase):
         headers = ws.values[0]
         reason_idx = headers.index("Причина отказа")
         raw_idx = headers.index("Фраза отказа")
+        phone_idx = headers.index("Телефон")
         self.assertEqual(ws.values[1][reason_idx], auto_reply.REFUSAL_REASON_LATER)
         self.assertEqual(ws.values[1][raw_idx], "поки неактуально")
+        self.assertEqual(ws.values[1][phone_idx], "+380991112233")
+
+    def test_upsert_uses_phone_from_payload_and_does_not_erase_with_empty_update(self):
+        ws = FakeWorksheet(
+            [
+                auto_reply.TODAY_HEADERS,
+                ["2026-04-01", "Lead", "@lead", "", "23", "Так", "", "chat", "", "", "", "123", "primary", "2026-04-01"],
+            ]
+        )
+        writer = auto_reply.SheetWriter.__new__(auto_reply.SheetWriter)
+        writer._ensure_today_ws = lambda tz: ws
+        writer._get_headers = lambda ws_obj: list(ws_obj.values[0])
+        writer._find_row_by_peer = lambda ws_obj, peer_id: (2, list(ws_obj.values[1]))
+        writer._find_group_lead_info = lambda username, name: None
+        writer._owner_account_for_peer = lambda peer_id, existing_account="": existing_account or "primary"
+        writer._col_letter = auto_reply.SheetWriter._col_letter.__get__(writer, auto_reply.SheetWriter)
+        writer._invalidate_ws_cache = lambda ws_obj: None
+        writer._row_index_cache = {}
+        writer._next_row_cache = {}
+        writer.upsert(
+            tz=auto_reply.ZoneInfo("Europe/Kiev"),
+            peer_id=123,
+            name="Lead",
+            username="lead",
+            phone="+380501112233",
+            chat_link="chat",
+        )
+        writer.upsert(
+            tz=auto_reply.ZoneInfo("Europe/Kiev"),
+            peer_id=123,
+            name="Lead",
+            username="lead",
+            phone="",
+            chat_link="chat",
+        )
+        phone_idx = ws.values[0].index("Телефон")
+        self.assertEqual(ws.values[1][phone_idx], "+380501112233")
+
+    def test_upsert_backfills_phone_from_group_lead_lookup(self):
+        ws = FakeWorksheet(
+            [
+                auto_reply.TODAY_HEADERS,
+                ["2026-04-01", "Lead", "@lead", "", "23", "Так", "", "chat", "", "", "", "123", "primary", "2026-04-01"],
+            ]
+        )
+        writer = auto_reply.SheetWriter.__new__(auto_reply.SheetWriter)
+        writer._ensure_today_ws = lambda tz: ws
+        writer._get_headers = lambda ws_obj: list(ws_obj.values[0])
+        writer._find_row_by_peer = lambda ws_obj, peer_id: (2, list(ws_obj.values[1]))
+        writer._find_group_lead_info = lambda username, name: {
+            "row_idx": 7,
+            "phone": "+380671234567",
+            "age": "23",
+            "pc": "Так",
+        }
+        writer._get_group_leads_ws = lambda: types.SimpleNamespace(id=55)
+        writer._owner_account_for_peer = lambda peer_id, existing_account="": existing_account or "primary"
+        writer._col_letter = auto_reply.SheetWriter._col_letter.__get__(writer, auto_reply.SheetWriter)
+        writer._invalidate_ws_cache = lambda ws_obj: None
+        writer._row_index_cache = {}
+        writer._next_row_cache = {}
+        writer.upsert(
+            tz=auto_reply.ZoneInfo("Europe/Kiev"),
+            peer_id=123,
+            name="Lead",
+            username="lead",
+            chat_link="chat",
+        )
+        headers = ws.values[0]
+        phone_idx = headers.index("Телефон")
+        self.assertEqual(ws.values[1][phone_idx], "+380671234567")
+
+    def test_refresh_today_from_group_lead_backfills_phone(self):
+        ws = FakeWorksheet(
+            [
+                auto_reply.TODAY_HEADERS,
+                ["2026-04-01", "Lead", "@lead", "", "", "", "", "chat", "", "", "", "123", "primary", "2026-04-01"],
+            ]
+        )
+        writer = auto_reply.SheetWriter.__new__(auto_reply.SheetWriter)
+        writer._ensure_today_ws = lambda tz: ws
+        writer._get_headers = lambda ws_obj: list(ws_obj.values[0])
+        writer._find_group_lead_info = lambda username, name: {
+            "row_idx": 8,
+            "phone": "+380991112233",
+            "age": "19",
+            "pc": "Так, є",
+        }
+        writer._get_group_leads_ws = lambda: types.SimpleNamespace(id=77)
+        writer._sheet_row_link = lambda ws_obj, row_idx, label: f"link:{ws_obj.id}:{row_idx}:{label}"
+        writer._col_letter = auto_reply.SheetWriter._col_letter.__get__(writer, auto_reply.SheetWriter)
+        writer._invalidate_ws_cache = lambda ws_obj: None
+        updated = writer.refresh_today_from_group_lead(
+            auto_reply.ZoneInfo("Europe/Kiev"),
+            {"tg": "@lead", "full_name": "Lead"},
+        )
+        headers = ws.values[0]
+        phone_idx = headers.index("Телефон")
+        self.assertEqual(updated, 1)
+        self.assertEqual(ws.values[1][phone_idx], "+380991112233")
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ class SheetSchemaTextTests(unittest.TestCase):
             '"Дата"',
             '"Имя"',
             '"Username"',
+            '"Телефон"',
             '"Возраст"',
             '"Наличие ПК/ноутбука"',
             '"Смена"',
