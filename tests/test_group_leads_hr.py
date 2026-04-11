@@ -1,8 +1,10 @@
 import importlib
 import os
 import sys
+import tempfile
 import types
 import unittest
+from zoneinfo import ZoneInfo
 
 
 os.environ.setdefault("API_ID", "1")
@@ -64,39 +66,56 @@ sys.modules.setdefault("google.oauth2.service_account", google_service_account_m
 auto_reply = importlib.import_module("auto_reply")
 
 
-class GroupMessageParsingTests(unittest.TestCase):
-    def test_parses_new_group_message_format_with_emojis(self):
-        text = (
-            "✴️ НОВА АНКЕТА\n\n"
-            "ℹ️ Користувач: @dominika_103\n\n"
-            "☎️ Номер телефону: +380991112233\n\n"
-            "⏳ Вік: 16-24\n\n"
-            "💰 Бажаний дохід: 30-50 тис\n\n"
-            "💻 Ноутбук: Так, є\n\n"
-            "🪧 Примітка: Вакансії на дому [123 тут буде айди реферальной примітки]\n\n"
-            "👤 HR: @redfox1378\n\n"
-            "📥 Реферал від: @hr_volodymyr"
+class _FakeWorksheet:
+    def __init__(self):
+        self.values = []
+
+    def row_values(self, row_idx):
+        if row_idx != 1 or not self.values:
+            return []
+        return self.values[0][:]
+
+    def get_all_values(self):
+        return [row[:] for row in self.values]
+
+    def update(self, range_name, values, value_input_option="USER_ENTERED"):
+        del value_input_option
+        start = range_name.split(":")[0]
+        row_idx = int("".join(ch for ch in start if ch.isdigit()))
+        while len(self.values) < row_idx:
+            self.values.append([])
+        self.values[row_idx - 1] = values[0][:]
+
+
+class GroupLeadsHrTests(unittest.TestCase):
+    def test_group_leads_headers_include_hr(self):
+        self.assertIn("HR", auto_reply.GROUP_LEADS_HEADERS)
+
+    def test_upsert_writes_hr_value(self):
+        sheet = auto_reply.GroupLeadsSheet.__new__(auto_reply.GroupLeadsSheet)
+        sheet.ws = _FakeWorksheet()
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        sheet.lock_path = os.path.join(tmpdir.name, "group_leads.lock")
+
+        sheet._ensure_headers_exact = auto_reply.GroupLeadsSheet._ensure_headers_exact.__get__(sheet, auto_reply.GroupLeadsSheet)
+        sheet._find_row = auto_reply.GroupLeadsSheet._find_row.__get__(sheet, auto_reply.GroupLeadsSheet)
+
+        sheet.upsert(
+            ZoneInfo("Europe/Kyiv"),
+            {
+                "full_name": "Test User",
+                "tg": "@testuser",
+                "source_name": "@hr_volodymyr",
+                "hr_username": "@redfox1378",
+                "raw_text": "raw",
+            },
+            "new",
         )
 
-        parsed = auto_reply.parse_group_message(text)
-
-        self.assertEqual(parsed.get("tg"), "@dominika_103")
-        self.assertEqual(parsed.get("phone"), "+380991112233")
-        self.assertEqual(parsed.get("age"), "16-24")
-        self.assertEqual(parsed.get("desired_income"), "30-50 тис")
-        self.assertEqual(parsed.get("pc"), "Так, є")
-        self.assertEqual(
-            parsed.get("note"),
-            "Вакансії на дому [123 тут буде айди реферальной примітки]",
-        )
-        self.assertEqual(parsed.get("hr_username"), "@redfox1378")
-        self.assertEqual(parsed.get("source_name"), "@hr_volodymyr")
-        self.assertEqual(parsed.get("raw_text"), text)
-
-    def test_ignores_header_without_colon(self):
-        parsed = auto_reply.parse_group_message("✴️ НОВА АНКЕТА\n\nℹ️ Користувач: @dominika_103")
-        self.assertNotIn("full_name", parsed)
-        self.assertEqual(parsed.get("tg"), "@dominika_103")
+        self.assertEqual(sheet.ws.values[0], auto_reply.GROUP_LEADS_HEADERS)
+        self.assertEqual(sheet.ws.values[1][11], "@redfox1378")
+        self.assertEqual(sheet.ws.values[1][12], "raw")
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from telethon import TelegramClient
 from telethon.tl.types import User as TgUser
 
 from tg_to_sheets import acquire_lock, release_lock
+from hr_filter_store import HrFilterStore, normalize_target_group
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_ID = int(os.environ["API_ID"])
@@ -141,6 +142,9 @@ ACCOUNTS = load_accounts()
 ACCOUNTS_BY_KEY = {a.key: a for a in ACCOUNTS}
 DEFAULT_ACCOUNT = ACCOUNTS[0]
 ACCOUNTS_STATE_PATH = os.path.join(STATE_DIR, "accounts_state.json")
+HR_FILTERS_STATE_PATH = os.path.join(STATE_DIR, "hr_filters.json")
+HR_FILTER_STORE = HrFilterStore(HR_FILTERS_STATE_PATH, cache_ttl_sec=1.0)
+PENDING_INPUTS: Dict[int, dict] = {}
 
 
 def load_accounts_state() -> Dict[str, bool]:
@@ -186,9 +190,19 @@ def kb_account(acct: AccountConfig):
     kb.add(types.InlineKeyboardButton("▶️ Старт авто", callback_data=f"acct:{acct.key}:auto_start"))
     kb.add(types.InlineKeyboardButton("⏹ Стоп авто", callback_data=f"acct:{acct.key}:auto_stop"))
     kb.add(types.InlineKeyboardButton("📊 Статус авто", callback_data=f"acct:{acct.key}:auto_status"))
+    kb.add(types.InlineKeyboardButton("🧭 HR фільтр", callback_data=f"acct:{acct.key}:hr_filter_menu"))
     toggle_label = "⏼ Вимкнути акаунт" if is_account_enabled(acct) else "⏼ Увімкнути акаунт"
     kb.add(types.InlineKeyboardButton(toggle_label, callback_data=f"acct:{acct.key}:toggle"))
     kb.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="acct:back"))
+    return kb
+
+
+def kb_hr_filter(acct: AccountConfig):
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("➕ Додати правило", callback_data=f"acct:{acct.key}:hr_filter_add"))
+    kb.add(types.InlineKeyboardButton("📋 Список правил", callback_data=f"acct:{acct.key}:hr_filter_list"))
+    kb.add(types.InlineKeyboardButton("🗑 Видалити правило", callback_data=f"acct:{acct.key}:hr_filter_delete"))
+    kb.add(types.InlineKeyboardButton("⬅️ Назад", callback_data=f"acct:{acct.key}:menu"))
     return kb
 
 
@@ -291,6 +305,71 @@ def normalize_message_text(text: str) -> str:
     return " ".join((text or "").split())
 
 
+def clear_pending_input(chat_id: int):
+    PENDING_INPUTS.pop(int(chat_id), None)
+
+
+def set_pending_input(chat_id: int, payload: dict):
+    PENDING_INPUTS[int(chat_id)] = dict(payload)
+
+
+def get_pending_input(chat_id: int) -> Optional[dict]:
+    data = PENDING_INPUTS.get(int(chat_id))
+    return dict(data) if isinstance(data, dict) else None
+
+
+def normalize_hr_username_input(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    raw = raw.replace("https://t.me/", "").replace("http://t.me/", "").strip().strip("/")
+    raw = raw.lstrip("@")
+    if not re.fullmatch(r"[A-Za-z0-9_]{4,}", raw):
+        return ""
+    return f"@{raw.lower()}"
+
+
+async def resolve_target_group(target: str) -> Tuple[Optional[str], Optional[str]]:
+    cleaned = normalize_target_group(target)
+    if not cleaned:
+        return None, "❌ Посилання на групу порожнє."
+    locked_account = None
+    for acct in ACCOUNTS:
+        if acquire_lock(acct.session_lock, ttl_sec=120):
+            locked_account = acct
+            break
+    if locked_account is None:
+        return None, "⏳ Телеграм-сесія зайнята. Зупиніть авто і спробуйте ще раз."
+    client = TelegramClient(locked_account.session_file, API_ID, API_HASH)
+    try:
+        await client.start()
+        entity = await client.get_entity(cleaned)
+        username = getattr(entity, "username", "") or ""
+        if username:
+            return f"@{username}", None
+        return cleaned, None
+    except Exception:
+        return None, "❌ Не вдалося знайти цю групу через Telegram."
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        release_lock(locked_account.session_lock)
+
+
+def format_hr_rules_text() -> str:
+    rules = HR_FILTER_STORE.list_rules(force=True)
+    if not rules:
+        return "HR-фільтр порожній."
+    lines = ["HR-фільтри:"]
+    for item in rules:
+        username = str(item.get("username_raw") or f"@{item.get('username_norm', '')}").strip()
+        target = str(item.get("target_group_link") or "").strip()
+        lines.append(f"{username} -> {target}")
+    return "\n".join(lines)
+
+
 async def export_recent_chats(acct: AccountConfig) -> Tuple[Optional[str], Optional[str]]:
     if not is_account_enabled(acct):
         return None, "Акаунт вимкнено"
@@ -356,6 +435,7 @@ async def export_recent_chats(acct: AccountConfig) -> Tuple[Optional[str], Optio
 
 @dp.message_handler(commands=["start"])
 async def cmd_start(message: types.Message):
+    clear_pending_input(message.chat.id)
     await message.answer("Готово 👇", reply_markup=kb_main())
 
 
@@ -371,6 +451,7 @@ async def cb_account_actions(call: types.CallbackQuery):
         return
 
     if action == "menu":
+        clear_pending_input(call.message.chat.id)
         enabled = is_account_enabled(acct)
         running = auto_reply_running(acct)
         await call.answer()
@@ -381,6 +462,7 @@ async def cb_account_actions(call: types.CallbackQuery):
         return
 
     if action == "toggle":
+        clear_pending_input(call.message.chat.id)
         enabled = is_account_enabled(acct)
         if enabled:
             stop_auto_reply(acct)
@@ -393,24 +475,28 @@ async def cb_account_actions(call: types.CallbackQuery):
         return
 
     if action == "auto_start":
+        clear_pending_input(call.message.chat.id)
         ok, msg = start_auto_reply(acct)
         await call.answer()
         await call.message.reply(msg)
         return
 
     if action == "auto_stop":
+        clear_pending_input(call.message.chat.id)
         ok, msg = stop_auto_reply(acct)
         await call.answer()
         await call.message.reply(msg)
         return
 
     if action == "auto_status":
+        clear_pending_input(call.message.chat.id)
         msg = read_auto_status(acct)
         await call.answer()
         await call.message.reply(msg)
         return
 
     if action == "export_chats":
+        clear_pending_input(call.message.chat.id)
         await call.answer()
         await call.message.reply("⏳ Готую експорт чатів за 3 місяці…")
         path, err = await export_recent_chats(acct)
@@ -421,6 +507,39 @@ async def cb_account_actions(call: types.CallbackQuery):
             await call.message.reply_document(types.InputFile(path), caption="✅ Експорт готовий")
         except Exception:
             await call.message.reply("❌ Не вдалося надіслати файл експорту")
+        return
+
+    if action == "hr_filter_menu":
+        clear_pending_input(call.message.chat.id)
+        await call.answer()
+        await call.message.reply(
+            "HR-фільтр керує пересиланням лідів у групи за полем HR.",
+            reply_markup=kb_hr_filter(acct),
+        )
+        return
+
+    if action == "hr_filter_list":
+        clear_pending_input(call.message.chat.id)
+        await call.answer()
+        await call.message.reply(format_hr_rules_text(), reply_markup=kb_hr_filter(acct))
+        return
+
+    if action == "hr_filter_add":
+        await call.answer()
+        set_pending_input(call.message.chat.id, {"mode": "hr_filter_add_username", "account_key": acct.key})
+        await call.message.reply(
+            "Надішліть username HR-адміна, наприклад `@redfox1378`.",
+            parse_mode="Markdown",
+        )
+        return
+
+    if action == "hr_filter_delete":
+        await call.answer()
+        set_pending_input(call.message.chat.id, {"mode": "hr_filter_delete", "account_key": acct.key})
+        await call.message.reply(
+            "Надішліть username HR-адміна для видалення, наприклад `@redfox1378`.",
+            parse_mode="Markdown",
+        )
         return
 
     await call.answer("Невідома дія", show_alert=True)
@@ -472,6 +591,62 @@ async def cb_export_chats(call: types.CallbackQuery):
         await call.message.reply_document(types.InputFile(path), caption="✅ Експорт готовий")
     except Exception:
         await call.message.reply("❌ Не вдалося надіслати файл експорту")
+
+
+@dp.message_handler(content_types=types.ContentTypes.TEXT)
+async def handle_pending_text(message: types.Message):
+    pending = get_pending_input(message.chat.id)
+    if not pending:
+        return
+    text = (message.text or "").strip()
+    if normalize_message_text(text).lower() in {"скасувати", "отмена", "/cancel", "cancel"}:
+        clear_pending_input(message.chat.id)
+        account_key = pending.get("account_key")
+        acct = ACCOUNTS_BY_KEY.get(account_key, DEFAULT_ACCOUNT)
+        await message.reply("Дію скасовано.", reply_markup=kb_hr_filter(acct))
+        return
+
+    mode = pending.get("mode")
+    account_key = pending.get("account_key")
+    acct = ACCOUNTS_BY_KEY.get(account_key, DEFAULT_ACCOUNT)
+
+    if mode == "hr_filter_add_username":
+        username = normalize_hr_username_input(text)
+        if not username:
+            await message.reply("❌ Некоректний username. Надішліть щось на кшталт `@redfox1378`.", parse_mode="Markdown")
+            return
+        pending["mode"] = "hr_filter_add_group"
+        pending["username"] = username
+        set_pending_input(message.chat.id, pending)
+        await message.reply("Надішліть посилання на групу або `@groupname`.")
+        return
+
+    if mode == "hr_filter_add_group":
+        username = pending.get("username", "")
+        target_group, err = await resolve_target_group(text)
+        if err:
+            await message.reply(err)
+            return
+        rule = HR_FILTER_STORE.upsert_rule(username, target_group)
+        clear_pending_input(message.chat.id)
+        await message.reply(
+            f"✅ Правило збережено: {rule['username_raw']} -> {rule['target_group_link']}",
+            reply_markup=kb_hr_filter(acct),
+        )
+        return
+
+    if mode == "hr_filter_delete":
+        username = normalize_hr_username_input(text)
+        if not username:
+            await message.reply("❌ Некоректний username. Надішліть щось на кшталт `@redfox1378`.", parse_mode="Markdown")
+            return
+        deleted = HR_FILTER_STORE.delete_rule(username)
+        clear_pending_input(message.chat.id)
+        if deleted:
+            await message.reply(f"✅ Правило для {username} видалено.", reply_markup=kb_hr_filter(acct))
+        else:
+            await message.reply(f"Правило для {username} не знайдено.", reply_markup=kb_hr_filter(acct))
+        return
 
 
 if __name__ == "__main__":

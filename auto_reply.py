@@ -112,6 +112,7 @@ from candidate_notes import append_candidate_answers
 from faq_learning import build_question_log
 from followup_training import get_return_examples
 from v2_state import V2EnrollmentStore, V2RuntimeStore
+from hr_filter_store import HrFilterStore, HrForwardDeduper
 
 load_dotenv("/opt/tg_leads/.env")
 
@@ -122,6 +123,7 @@ SESSION_FILE = os.environ.get("AUTO_REPLY_SESSION_FILE", os.environ["SESSION_FIL
 SHEET_NAME = os.environ["SHEET_NAME"]
 GOOGLE_CREDS = os.environ["GOOGLE_CREDS"]
 TIMEZONE = os.environ.get("TIMEZONE", "Europe/Kyiv")
+STATE_DIR = os.environ.get("TG_LEADS_STATE_DIR", "/opt/tg_leads/state")
 
 LEADS_GROUP_TITLE = os.environ.get("LEADS_GROUP_TITLE", "DATING AGENCY | Referral")
 TRAFFIC_GROUP_TITLE = os.environ.get("TRAFFIC_GROUP_TITLE", "ТРАФИК FURIOZA")
@@ -228,6 +230,9 @@ DIALOG_FORMAT_URL = os.environ.get("DIALOG_FORMAT_URL", "http://127.0.0.1:3000/f
 DIALOG_FORMAT_TIMEOUT_SEC = float(os.environ.get("DIALOG_FORMAT_TIMEOUT_SEC", "15"))
 STEP_STATE_PATH = os.environ.get("AUTO_REPLY_STEP_STATE_PATH", "/opt/tg_leads/.auto_reply.step_state.json")
 GROUP_LEADS_WORKSHEET = os.environ.get("GROUP_LEADS_WORKSHEET", "GroupLeads")
+HR_FILTERS_STATE_PATH = os.environ.get("HR_FILTERS_STATE_PATH", os.path.join(STATE_DIR, "hr_filters.json"))
+HR_FILTERS_CACHE_TTL_SEC = float(os.environ.get("HR_FILTERS_CACHE_TTL_SEC", "5"))
+HR_FORWARD_DEDUPE_PATH = os.environ.get("HR_FORWARD_DEDUPE_PATH", os.path.join(STATE_DIR, "hr_filter_forwards.json"))
 REGISTRATION_WORKSHEET = os.environ.get("REGISTRATION_WORKSHEET", "Регистрация")
 REGISTRATION_DRIVE_FOLDER_ID = os.environ.get("REGISTRATION_DRIVE_FOLDER_ID", "").strip()
 REGISTRATION_DOWNLOAD_DIR = os.environ.get("REGISTRATION_DOWNLOAD_DIR", "/opt/tg_leads/registration_docs")
@@ -693,6 +698,7 @@ GROUP_LEADS_HEADERS = [
     "Примечание",
     "ID источника",
     "Источник",
+    "HR",
     "Сырой текст",
 ]
 
@@ -782,6 +788,7 @@ GROUP_KEY_MAP = {
     "профиль пользователя": "profile_link",
     "реферал від": "source_name",
     "реферал от": "source_name",
+    "hr": "hr_username",
     "id": "source_id",
     "name": "source_name",
 }
@@ -1917,6 +1924,15 @@ def is_alt_referral_blocked(lead_info: Optional[dict]) -> bool:
     return bool(source_name)
 
 
+def get_hr_filter_rule(hr_filter_store: Optional[HrFilterStore], lead_info: Optional[dict]) -> Optional[dict]:
+    if hr_filter_store is None or not lead_info:
+        return None
+    hr_username = str((lead_info or {}).get("hr_username", "") or "").strip()
+    if not hr_username:
+        return None
+    return hr_filter_store.match_rule(hr_username)
+
+
 def refusal_reason_from_special_start(special_reason: str) -> str:
     return SPECIAL_START_REFUSAL_REASON.get((special_reason or "").strip(), "")
 
@@ -2807,10 +2823,31 @@ class GroupLeadsSheet:
             current = self.ws.row_values(1)
         except Exception:
             current = []
+        legacy_headers = GROUP_LEADS_HEADERS[:11] + [GROUP_LEADS_HEADERS[12]]
         if not current:
             self.ws.update(
                 range_name=f"A1:{col_letter(len(GROUP_LEADS_HEADERS))}1",
                 values=[GROUP_LEADS_HEADERS],
+                value_input_option="USER_ENTERED",
+            )
+            return
+        if current[: len(legacy_headers)] == legacy_headers and current[: len(GROUP_LEADS_HEADERS)] != GROUP_LEADS_HEADERS:
+            try:
+                values = self.ws.get_all_values()
+            except Exception:
+                values = []
+            migrated = [GROUP_LEADS_HEADERS[:]]
+            for row in values[1:]:
+                base = row[:]
+                prefix = base[:11]
+                raw_text = base[11] if len(base) > 11 else ""
+                suffix = base[12:] if len(base) > 12 else []
+                migrated.append(prefix + [""] + [raw_text] + suffix)
+            width = max(len(GROUP_LEADS_HEADERS), max((len(row) for row in migrated), default=len(GROUP_LEADS_HEADERS)))
+            padded = [row + [""] * (width - len(row)) for row in migrated]
+            self.ws.update(
+                range_name=f"A1:{col_letter(width)}{len(padded)}",
+                values=padded,
                 value_input_option="USER_ENTERED",
             )
             return
@@ -2918,7 +2955,8 @@ class GroupLeadsSheet:
                 take("note", 8),
                 take("source_id", 9),
                 take("source_name", 10),
-                take("raw_text", 11),
+                take("hr_username", 11),
+                take("raw_text", 12),
             ]
             end_col = col_letter(len(GROUP_LEADS_HEADERS))
             if row_idx:
@@ -3789,6 +3827,8 @@ async def main():
     owner_store = CrossAccountOwnerStore(CROSS_ACCOUNT_OWNER_STATE_PATH)
     pause_store = LocalPauseStore(PAUSED_STATE_PATH)
     group_leads_sheet = GroupLeadsSheet()
+    hr_filter_store = HrFilterStore(HR_FILTERS_STATE_PATH, cache_ttl_sec=HR_FILTERS_CACHE_TTL_SEC)
+    hr_forward_deduper = HrForwardDeduper(HR_FORWARD_DEDUPE_PATH)
     faq_questions_sheet = None
     faq_suggestions_sheet = None
     faq_likes_train_sheet = None
@@ -4041,6 +4081,47 @@ async def main():
                 break
     if not video_message:
         print("⚠️ Не знайшов відео у групі для пересилання")
+
+    async def handle_hr_filtered_lead(event, group_data: dict) -> bool:
+        hr_rule = get_hr_filter_rule(hr_filter_store, group_data)
+        if not hr_rule:
+            return False
+        source_chat_id = getattr(event, "chat_id", None)
+        message_id = getattr(event, "id", None)
+        hr_username = str(hr_rule.get("username_raw", "") or "").strip() or str(group_data.get("hr_username", "") or "").strip()
+        target_group_link = str(hr_rule.get("target_group_link", "") or "").strip()
+        print(
+            f"HR_FILTER_MATCH source_chat_id={source_chat_id} message_id={message_id} "
+            f"hr={hr_username} target={target_group_link}"
+        )
+        if not hr_forward_deduper.claim(source_chat_id, message_id, ACCOUNT_KEY):
+            print(
+                f"HR_FILTER_FORWARD_SKIPPED_DUPLICATE source_chat_id={source_chat_id} "
+                f"message_id={message_id} hr={hr_username}"
+            )
+            return True
+        try:
+            target_entity = await client.get_entity(target_group_link)
+            sent = await client.forward_messages(target_entity, event.message)
+            sent_ok = bool(sent)
+            if isinstance(sent, list):
+                sent_ok = bool(sent)
+            if not sent_ok:
+                print(
+                    f"HR_FILTER_FORWARD_FAIL source_chat_id={source_chat_id} "
+                    f"message_id={message_id} hr={hr_username} error=forward_failed"
+                )
+                return True
+            print(
+                f"HR_FILTER_FORWARD_OK source_chat_id={source_chat_id} "
+                f"message_id={message_id} hr={hr_username} target={target_group_link}"
+            )
+        except Exception as err:
+            print(
+                f"HR_FILTER_FORWARD_FAIL source_chat_id={source_chat_id} message_id={message_id} "
+                f"hr={hr_username} error={type(err).__name__}: {err}"
+            )
+        return True
 
     async def send_ai_response(
         entity: User,
@@ -5206,6 +5287,8 @@ async def main():
                     print(f"⚠️ SHEETS_DIRECT_WRITE_FAIL group_leads: {type(err).__name__}: {err}")
         except Exception:
             pass
+        if await handle_hr_filtered_lead(event, group_data):
+            return
         username, phone = extract_contact(text)
         if not username and not phone:
             return
