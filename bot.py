@@ -15,10 +15,12 @@ load_dotenv("/opt/tg_leads/.env")
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from telethon import TelegramClient
+from telethon.tl import functions as tl_functions
 from telethon.tl.types import User as TgUser
 
 from tg_to_sheets import acquire_lock, release_lock
 from hr_filter_store import HrFilterStore, normalize_target_group
+from telegram_group_resolver import resolve_group_target_entity
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_ID = int(os.environ["API_ID"])
@@ -343,13 +345,12 @@ async def resolve_target_group(target: str) -> Tuple[Optional[str], Optional[str
     client = TelegramClient(locked_account.session_file, API_ID, API_HASH)
     try:
         await client.start()
-        entity = await client.get_entity(cleaned)
-        username = getattr(entity, "username", "") or ""
-        if username:
-            return f"@{username}", None
-        return cleaned, None
-    except Exception:
-        return None, "❌ Не вдалося знайти цю групу через Telegram."
+        entity, stable_target, error = await resolve_group_target_entity(client, tl_functions, cleaned)
+        if entity is None:
+            if error == "invite_not_joined":
+                return None, "❌ Для цієї invite-ссилки акаунт ще не є учасником групи."
+            return None, "❌ Не вдалося знайти цю групу через Telegram."
+        return stable_target or cleaned, None
     finally:
         try:
             await client.disconnect()

@@ -562,6 +562,7 @@ python3 tg_to_sheets.py
 
 - `@hr_username -> @target_group`
 - `@hr_username -> https://t.me/<group>`
+- `@hr_username -> https://t.me/+<invite_hash>`
 
 Как это работает:
 

@@ -113,6 +113,7 @@ from faq_learning import build_question_log
 from followup_training import get_return_examples
 from v2_state import V2EnrollmentStore, V2RuntimeStore
 from hr_filter_store import HrFilterStore, HrForwardDeduper
+from telegram_group_resolver import resolve_group_target_entity
 
 load_dotenv("/opt/tg_leads/.env")
 
@@ -4094,14 +4095,20 @@ async def main():
             f"HR_FILTER_MATCH source_chat_id={source_chat_id} message_id={message_id} "
             f"hr={hr_username} target={target_group_link}"
         )
-        if not hr_forward_deduper.claim(source_chat_id, message_id, ACCOUNT_KEY):
-            print(
-                f"HR_FILTER_FORWARD_SKIPPED_DUPLICATE source_chat_id={source_chat_id} "
-                f"message_id={message_id} hr={hr_username}"
-            )
-            return True
         try:
-            target_entity = await client.get_entity(target_group_link)
+            target_entity, stable_target, resolve_error = await resolve_group_target_entity(client, tl_functions, target_group_link)
+            if target_entity is None:
+                print(
+                    f"HR_FILTER_FORWARD_FAIL source_chat_id={source_chat_id} message_id={message_id} "
+                    f"hr={hr_username} error={resolve_error or 'resolve_failed'}"
+                )
+                return True
+            if not hr_forward_deduper.claim(source_chat_id, message_id, ACCOUNT_KEY):
+                print(
+                    f"HR_FILTER_FORWARD_SKIPPED_DUPLICATE source_chat_id={source_chat_id} "
+                    f"message_id={message_id} hr={hr_username}"
+                )
+                return True
             sent = await client.forward_messages(target_entity, event.message)
             sent_ok = bool(sent)
             if isinstance(sent, list):
@@ -4114,7 +4121,7 @@ async def main():
                 return True
             print(
                 f"HR_FILTER_FORWARD_OK source_chat_id={source_chat_id} "
-                f"message_id={message_id} hr={hr_username} target={target_group_link}"
+                f"message_id={message_id} hr={hr_username} target={stable_target or target_group_link}"
             )
         except Exception as err:
             print(
