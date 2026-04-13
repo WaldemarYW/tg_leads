@@ -101,6 +101,17 @@ class FakeWorksheet:
         self.values[row_idx - 1] = list(values[0])
 
 
+def build_row(headers, **overrides):
+    row = [""] * len(headers)
+    for key, value in overrides.items():
+        row[headers.index(key)] = value
+    return row
+
+
+def build_today_row(**overrides):
+    return build_row(auto_reply.TODAY_HEADERS, **overrides)
+
+
 class RefusalReasonTrackingTests(unittest.TestCase):
     def test_today_headers_include_refusal_columns(self):
         self.assertIn("Причина отказа", auto_reply.TODAY_HEADERS)
@@ -140,7 +151,23 @@ class RefusalReasonTrackingTests(unittest.TestCase):
         ws = FakeWorksheet(
             [
                 old_headers,
-                ["2026-04-01", "Test", "@lead", "+380991112233", "23", "Так", "", "chat", "app", "Отказ кандидата", "123", "primary", "2026-04-01"],
+                build_row(
+                    old_headers,
+                    **{
+                        "Дата": "2026-04-01",
+                        "Имя": "Test",
+                        "Username": "@lead",
+                        "Телефон": "+380991112233",
+                        "Возраст": "23",
+                        "Наличие ПК/ноутбука": "Так",
+                        "Ссылка на чат": "chat",
+                        "Ссылка на заявку": "app",
+                        "Статус": "Отказ кандидата",
+                        "Пир": "123",
+                        "Аккаунт": "primary",
+                        "Дата первого старта": "2026-04-01",
+                    }
+                ),
             ]
         )
         writer = auto_reply.SheetWriter.__new__(auto_reply.SheetWriter)
@@ -156,30 +183,31 @@ class RefusalReasonTrackingTests(unittest.TestCase):
         ws = FakeWorksheet(
             [
                 auto_reply.TODAY_HEADERS,
-                [
-                    "2026-04-01",
-                    "Lead",
-                    "@lead",
-                    "+380991112233",
-                    "23",
-                    "Так",
-                    "",
-                    "chat",
-                    "",
-                    auto_reply.STATUS_STOPPED,
-                    auto_reply.REFUSAL_REASON_LATER,
-                    "поки неактуально",
-                    "123",
-                    "primary",
-                    "2026-04-01",
-                ],
+                build_today_row(
+                    **{
+                        "Дата": "2026-04-01",
+                        "Имя": "Lead",
+                        "Username": "@lead",
+                        "Телефон": "+380991112233",
+                        "Возраст": "23",
+                        "Наличие ПК/ноутбука": "Так",
+                        "Ссылка на чат": "chat",
+                        "Статус": auto_reply.STATUS_STOPPED,
+                        "Причина отказа": auto_reply.REFUSAL_REASON_LATER,
+                        "Фраза отказа": "поки неактуально",
+                        "Пир": "123",
+                        "Аккаунт": "primary",
+                        "Дата первого старта": "2026-04-01",
+                    }
+                ),
             ]
         )
         writer = auto_reply.SheetWriter.__new__(auto_reply.SheetWriter)
         writer._ensure_today_ws = lambda tz: ws
         writer._get_headers = lambda ws_obj: list(ws_obj.values[0])
         writer._find_row_by_peer = lambda ws_obj, peer_id: (2, list(ws_obj.values[1]))
-        writer._find_group_lead_info = lambda username, name: None
+        writer._find_group_lead_info = lambda peer_id, username, name: None
+        writer._find_registration_info_by_peer = lambda peer_id: None
         writer._owner_account_for_peer = lambda peer_id, existing_account="": existing_account or "primary"
         writer._col_letter = auto_reply.SheetWriter._col_letter.__get__(writer, auto_reply.SheetWriter)
         writer._invalidate_ws_cache = lambda ws_obj: None
@@ -207,14 +235,27 @@ class RefusalReasonTrackingTests(unittest.TestCase):
         ws = FakeWorksheet(
             [
                 auto_reply.TODAY_HEADERS,
-                ["2026-04-01", "Lead", "@lead", "", "23", "Так", "", "chat", "", "", "", "123", "primary", "2026-04-01"],
+                build_today_row(
+                    **{
+                        "Дата": "2026-04-01",
+                        "Имя": "Lead",
+                        "Username": "@lead",
+                        "Возраст": "23",
+                        "Наличие ПК/ноутбука": "Так",
+                        "Ссылка на чат": "chat",
+                        "Пир": "123",
+                        "Аккаунт": "primary",
+                        "Дата первого старта": "2026-04-01",
+                    }
+                ),
             ]
         )
         writer = auto_reply.SheetWriter.__new__(auto_reply.SheetWriter)
         writer._ensure_today_ws = lambda tz: ws
         writer._get_headers = lambda ws_obj: list(ws_obj.values[0])
         writer._find_row_by_peer = lambda ws_obj, peer_id: (2, list(ws_obj.values[1]))
-        writer._find_group_lead_info = lambda username, name: None
+        writer._find_group_lead_info = lambda peer_id, username, name: None
+        writer._find_registration_info_by_peer = lambda peer_id: None
         writer._owner_account_for_peer = lambda peer_id, existing_account="": existing_account or "primary"
         writer._col_letter = auto_reply.SheetWriter._col_letter.__get__(writer, auto_reply.SheetWriter)
         writer._invalidate_ws_cache = lambda ws_obj: None
@@ -243,19 +284,33 @@ class RefusalReasonTrackingTests(unittest.TestCase):
         ws = FakeWorksheet(
             [
                 auto_reply.TODAY_HEADERS,
-                ["2026-04-01", "Lead", "@lead", "", "23", "Так", "", "chat", "", "", "", "123", "primary", "2026-04-01"],
+                build_today_row(
+                    **{
+                        "Дата": "2026-04-01",
+                        "Имя": "Lead",
+                        "Username": "@lead",
+                        "Возраст": "23",
+                        "Наличие ПК/ноутбука": "Так",
+                        "Ссылка на чат": "chat",
+                        "Пир": "123",
+                        "Аккаунт": "primary",
+                        "Дата первого старта": "2026-04-01",
+                    }
+                ),
             ]
         )
         writer = auto_reply.SheetWriter.__new__(auto_reply.SheetWriter)
         writer._ensure_today_ws = lambda tz: ws
         writer._get_headers = lambda ws_obj: list(ws_obj.values[0])
         writer._find_row_by_peer = lambda ws_obj, peer_id: (2, list(ws_obj.values[1]))
-        writer._find_group_lead_info = lambda username, name: {
+        writer._find_group_lead_info = lambda peer_id, username, name: {
             "row_idx": 7,
             "phone": "+380671234567",
             "age": "23",
             "pc": "Так",
+            "note": "",
         }
+        writer._find_registration_info_by_peer = lambda peer_id: None
         writer._get_group_leads_ws = lambda: types.SimpleNamespace(id=55)
         writer._owner_account_for_peer = lambda peer_id, existing_account="": existing_account or "primary"
         writer._col_letter = auto_reply.SheetWriter._col_letter.__get__(writer, auto_reply.SheetWriter)
@@ -277,18 +332,30 @@ class RefusalReasonTrackingTests(unittest.TestCase):
         ws = FakeWorksheet(
             [
                 auto_reply.TODAY_HEADERS,
-                ["2026-04-01", "Lead", "@lead", "", "", "", "", "chat", "", "", "", "123", "primary", "2026-04-01"],
+                build_today_row(
+                    **{
+                        "Дата": "2026-04-01",
+                        "Имя": "Lead",
+                        "Username": "@lead",
+                        "Ссылка на чат": "chat",
+                        "Пир": "123",
+                        "Аккаунт": "primary",
+                        "Дата первого старта": "2026-04-01",
+                    }
+                ),
             ]
         )
         writer = auto_reply.SheetWriter.__new__(auto_reply.SheetWriter)
         writer._ensure_today_ws = lambda tz: ws
         writer._get_headers = lambda ws_obj: list(ws_obj.values[0])
-        writer._find_group_lead_info = lambda username, name: {
+        writer._find_group_lead_info = lambda peer_id, username, name: {
             "row_idx": 8,
             "phone": "+380991112233",
             "age": "19",
             "pc": "Так, є",
+            "note": "",
         }
+        writer._find_registration_info_by_peer = lambda peer_id: None
         writer._get_group_leads_ws = lambda: types.SimpleNamespace(id=77)
         writer._sheet_row_link = lambda ws_obj, row_idx, label: f"link:{ws_obj.id}:{row_idx}:{label}"
         writer._col_letter = auto_reply.SheetWriter._col_letter.__get__(writer, auto_reply.SheetWriter)

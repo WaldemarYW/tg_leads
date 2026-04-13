@@ -91,6 +91,8 @@ class RegistrationSheetUpsertTests(unittest.TestCase):
         self.sheet.ws = _FakeWorksheet()
         self.sheet.lock_path = "/tmp/test-registration.lock"
         self.sheet._ensure_headers_exact = lambda: None
+        self.sheet._find_sheet_row_link_by_peer = lambda sheet_title, peer_id, label: ""
+        self.sheet._find_group_lead_note = lambda peer_id: ""
         self.tz = ZoneInfo("Europe/Kiev")
         self._orig_acquire = auto_reply.acquire_lock
         self._orig_release = auto_reply.release_lock
@@ -122,11 +124,12 @@ class RegistrationSheetUpsertTests(unittest.TestCase):
         self.sheet.upsert(self.tz, second)
 
         rows = self.sheet.ws.get_all_values()
+        headers = rows[0]
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[1][0], "Candidate Updated")
-        self.assertEqual(rows[1][2], "+380000000000")
-        self.assertEqual(rows[1][13], "10")
-        self.assertEqual(rows[1][11], "second")
+        self.assertEqual(rows[1][headers.index("Телефон")], "+380000000000")
+        self.assertEqual(rows[1][headers.index("ID сообщения")], "10")
+        self.assertEqual(rows[1][headers.index("Сырой текст")], "second")
 
     def test_upsert_falls_back_to_message_link_when_source_message_id_missing(self):
         first = {
@@ -144,10 +147,11 @@ class RegistrationSheetUpsertTests(unittest.TestCase):
         self.sheet.upsert(self.tz, second)
 
         rows = self.sheet.ws.get_all_values()
+        headers = rows[0]
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[1][0], "Candidate Updated")
-        self.assertEqual(rows[1][10], "https://t.me/c/123/11")
-        self.assertEqual(rows[1][11], "second")
+        self.assertEqual(rows[1][headers.index("Ссылка на сообщение")], "https://t.me/c/123/11")
+        self.assertEqual(rows[1][headers.index("Сырой текст")], "second")
 
     def test_different_message_ids_create_separate_rows(self):
         self.sheet.upsert(self.tz, {"full_name": "One", "source_message_id": "10"})

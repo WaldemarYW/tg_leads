@@ -98,6 +98,29 @@ class GroupMessageParsingTests(unittest.TestCase):
         self.assertNotIn("full_name", parsed)
         self.assertEqual(parsed.get("tg"), "@dominika_103")
 
+    def test_keeps_candidate_label_when_hr_usernames_exist_elsewhere(self):
+        text = (
+            "✴️ НОВА АНКЕТА\n\n"
+            "ℹ️ Користувач: Інна Лучка (ID: 2113208211)\n\n"
+            "⏳ Вік: 16-24\n\n"
+            "💰 Бажаний дохід: 30-50 тис\n\n"
+            "💻 Ноутбук: Так, є\n\n"
+            "🪧 Примітка: Дистанційна робота [45]\n\n"
+            "👤 HR: @hr_volodymyr\n\n"
+            "📥 Реферал від: @hr_volodymyr"
+        )
+
+        parsed = auto_reply.parse_group_message(text)
+        username, phone = auto_reply.extract_group_candidate_contact(parsed)
+
+        self.assertEqual(parsed.get("tg"), "Інна Лучка (ID: 2113208211)")
+        self.assertEqual(parsed.get("full_name"), "інна лучка")
+        self.assertEqual(parsed.get("peer_id"), "2113208211")
+        self.assertEqual(parsed.get("hr_username"), "@hr_volodymyr")
+        self.assertEqual(parsed.get("source_name"), "@hr_volodymyr")
+        self.assertIsNone(username)
+        self.assertIsNone(phone)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -100,6 +100,7 @@ class GroupLeadsHrTests(unittest.TestCase):
 
         sheet._ensure_headers_exact = auto_reply.GroupLeadsSheet._ensure_headers_exact.__get__(sheet, auto_reply.GroupLeadsSheet)
         sheet._find_row = auto_reply.GroupLeadsSheet._find_row.__get__(sheet, auto_reply.GroupLeadsSheet)
+        sheet._find_month_link = lambda tz, peer_id: ""
 
         sheet.upsert(
             ZoneInfo("Europe/Kyiv"),
@@ -108,14 +109,17 @@ class GroupLeadsHrTests(unittest.TestCase):
                 "tg": "@testuser",
                 "source_name": "@hr_volodymyr",
                 "hr_username": "@redfox1378",
+                "peer_id": "2113208211",
                 "raw_text": "raw",
             },
             "new",
         )
 
+        headers = sheet.ws.values[0]
         self.assertEqual(sheet.ws.values[0], auto_reply.GROUP_LEADS_HEADERS)
-        self.assertEqual(sheet.ws.values[1][11], "@redfox1378")
-        self.assertEqual(sheet.ws.values[1][12], "raw")
+        self.assertEqual(sheet.ws.values[1][headers.index("HR")], "@redfox1378")
+        self.assertEqual(sheet.ws.values[1][headers.index("Пир")], "2113208211")
+        self.assertEqual(sheet.ws.values[1][headers.index("Сырой текст")], "raw")
 
 
 if __name__ == "__main__":

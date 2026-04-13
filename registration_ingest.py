@@ -5,15 +5,34 @@ ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
 USERNAME_RE = re.compile(r"(?:^|\s)@\s*[\u200b\u200c\u200d\ufeff]*([A-Za-z0-9_]{4,})(?=$|\s)")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 PHONE_RE = re.compile(r"\+?\d[\d\s\-\(\)]{8,}\d")
+DATE_YEAR_RE = re.compile(r"^\d{1,2}\.\d{2}\.(?:\d{2}|\d{4})$")
 DATE_FULL_RE = re.compile(r"\b\d{2}\.\d{2}\.\d{4}\b")
 DATE_SHORT_RE = re.compile(r"\b\d{2}\.\d{2}\b")
+PEER_LINE_RE = re.compile(r"^[^\d]*?(\d{6,})\s*$")
 TIME_RANGE_RE = re.compile(r"\b\d{1,2}\s*(?::\d{2})?\s*(?:до|-|–)\s*\d{1,2}(?::\d{2})?\b", re.IGNORECASE)
+
+
+def _looks_like_valid_numeric_date(line: str) -> bool:
+    raw = str(line or "").strip()
+    if not DATE_YEAR_RE.fullmatch(raw):
+        return False
+    parts = raw.split(".")
+    if len(parts) != 3:
+        return False
+    try:
+        day = int(parts[0])
+        month = int(parts[1])
+    except (TypeError, ValueError):
+        return False
+    return 1 <= day <= 31 and 1 <= month <= 12
 
 
 def _clean_line(line: str) -> str:
     line = ZERO_WIDTH_RE.sub("", (line or "")).strip()
     if not line:
         return ""
+    if _looks_like_valid_numeric_date(line):
+        return line
     # Drop numbering prefixes used in анкета lines.
     line = re.sub(r"^\s*[0-9]\ufe0f?\u20e3\s*", "", line)
     match = re.match(r"^\s*(\d{1,2})[\.)](.+)$", line)
@@ -61,6 +80,8 @@ def _looks_like_schedule(line: str) -> bool:
 def _looks_like_start_date(line: str) -> bool:
     t = line.lower()
     if any(k in t for k in ("сьогодні", "сегодня", "завтра", "з ", "c ")) and DATE_SHORT_RE.search(t):
+        return True
+    if DATE_YEAR_RE.fullmatch(line.strip()):
         return True
     if DATE_SHORT_RE.search(t) and not DATE_FULL_RE.search(t):
         return True
@@ -110,7 +131,16 @@ def parse_registration_message(text: str) -> Dict[str, str]:
     schedule = ""
     city = ""
     full_name = ""
+    peer_id = ""
     used = set()
+
+    for idx in range(len(lines) - 1, -1, -1):
+        line = lines[idx]
+        m = PEER_LINE_RE.match(line)
+        if m:
+            peer_id = m.group(1)
+            used.add(idx)
+            break
 
     for idx, line in enumerate(lines):
         if not email:
@@ -123,16 +153,6 @@ def parse_registration_message(text: str) -> Dict[str, str]:
             m = PHONE_RE.search(line)
             if m:
                 phone = re.sub(r"\s+", "", m.group(0))
-                used.add(idx)
-                continue
-
-    for idx, line in enumerate(lines):
-        if idx in used:
-            continue
-        if not birth_date:
-            m = DATE_FULL_RE.search(line)
-            if m:
-                birth_date = m.group(0)
                 used.add(idx)
                 continue
 
@@ -154,6 +174,40 @@ def parse_registration_message(text: str) -> Dict[str, str]:
             schedule = line
             used.add(idx)
             continue
+
+    schedule_idx = None
+    if schedule:
+        for idx, line in enumerate(lines):
+            if line == schedule:
+                schedule_idx = idx
+                break
+
+    year_date_candidates = [
+        (idx, line)
+        for idx, line in enumerate(lines)
+        if idx not in used and DATE_YEAR_RE.fullmatch(line)
+    ]
+    if year_date_candidates:
+        if schedule_idx is not None:
+            for idx, line in year_date_candidates:
+                if idx > schedule_idx and not start_date:
+                    start_date = line
+                    used.add(idx)
+                    break
+        for idx, line in year_date_candidates:
+            if idx in used:
+                continue
+            if not birth_date:
+                birth_date = line
+                used.add(idx)
+                break
+        for idx, line in year_date_candidates:
+            if idx in used:
+                continue
+            if not start_date:
+                start_date = line
+                used.add(idx)
+                break
 
     for idx, line in enumerate(lines):
         if idx in used:
@@ -189,6 +243,7 @@ def parse_registration_message(text: str) -> Dict[str, str]:
         "start_date": start_date,
         "city": city,
         "admin_tg": admin_tg,
+        "peer_id": peer_id,
         "raw_text": raw_text,
     }
 

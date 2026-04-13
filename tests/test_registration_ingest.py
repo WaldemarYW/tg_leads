@@ -72,6 +72,27 @@ class RegistrationIngestTests(unittest.TestCase):
         self.assertEqual(data["candidate_tg"], "@candidate_user")
         self.assertEqual(data["admin_tg"], "@admin_final")
 
+    def test_parse_peer_and_short_year_dates(self):
+        text = (
+            "Костюк Ольга Іллівна\n"
+            "08.10.85\n"
+            "0505723794\n"
+            "Okost6604@gmail.com\n"
+            "@osya1885\n"
+            "Київ\n"
+            "Денний\n"
+            "1.04.26\n"
+            "@CERBERUS_777\n"
+            "🟢2113208211\n"
+        )
+        data = parse_registration_message(text)
+        self.assertEqual(data["full_name"], "Костюк Ольга Іллівна")
+        self.assertEqual(data["birth_date"], "08.10.85")
+        self.assertEqual(data["start_date"], "1.04.26")
+        self.assertEqual(data["candidate_tg"], "@osya1885")
+        self.assertEqual(data["admin_tg"], "@CERBERUS_777")
+        self.assertEqual(data["peer_id"], "2113208211")
+
     def test_media_filter(self):
         self.assertTrue(is_media_registration_message(_FakeMessage(photo=object())))
         self.assertTrue(is_media_registration_message(_FakeMessage(document=object())))
@@ -85,4 +106,3 @@ class RegistrationIngestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

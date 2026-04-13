@@ -186,9 +186,11 @@ TODAY_HEADERS = [
     "Телефон",
     "Возраст",
     "Наличие ПК/ноутбука",
+    "Примечание",
     "Смена",
     "Ссылка на чат",
     "Ссылка на заявку",
+    "Ссылка на Регистрацию",
     "Статус",
     "Причина отказа",
     "Фраза отказа",
@@ -218,6 +220,7 @@ HISTORY_HEADERS = [
 USERNAME_RE = re.compile(r"(?:@|t\.me/)([A-Za-z0-9_]{5,})")
 PHONE_RE = re.compile(r"\+?\d[\d\s\-\(\)]{9,}\d")
 MESSAGE_LINK_RE = re.compile(r"https?://t\.me/(c/)?([A-Za-z0-9_]+)/(\d+)")
+GROUP_CANDIDATE_ID_RE = re.compile(r"^(?P<name>.+?)\s*\(ID:\s*(?P<peer_id>\d+)\)\s*$", re.IGNORECASE)
 
 DIALOG_AI_URL = os.environ.get("DIALOG_AI_URL", "http://127.0.0.1:3000/dialog_suggest")
 DIALOG_AI_TIMEOUT_SEC = float(os.environ.get("DIALOG_AI_TIMEOUT_SEC", "20"))
@@ -700,6 +703,8 @@ GROUP_LEADS_HEADERS = [
     "ID источника",
     "Источник",
     "HR",
+    "Пир",
+    "Ссылка на месячный лист",
     "Сырой текст",
 ]
 
@@ -715,9 +720,13 @@ REGISTRATION_HEADERS = [
     "Telegram админа",
     "Ссылка на документ (Drive)",
     "Ссылка на сообщение",
+    "Ссылка на месячный лист",
+    "Ссылка на GroupLeads",
     "Сырой текст",
     "Группа-источник",
     "ID сообщения",
+    "Пир",
+    "Примечание",
     "Получено",
 ]
 
@@ -1518,8 +1527,10 @@ def merge_test_answers(existing: List[str], text: str) -> List[str]:
 
 
 def normalize_key(text: str) -> str:
-    cleaned = normalize_text(text)
-    cleaned = re.sub(r"[^\w\s]", "", cleaned, flags=re.IGNORECASE)
+    cleaned = normalize_text(text).replace("’", "'").replace("`", "'")
+    cleaned = cleaned.replace("ℹ", " ")
+    cleaned = cleaned.replace("'", "")
+    cleaned = "".join(ch if (ch.isalnum() or ch.isspace() or ch == "_") else " " for ch in cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
@@ -1556,6 +1567,70 @@ def col_letter(col_idx: int) -> str:
         col_idx, rem = divmod(col_idx - 1, 26)
         result.append(chr(ord("A") + rem))
     return "".join(reversed(result))
+
+
+def build_sheet_row_link(ws, row_idx: int, label: str) -> str:
+    return f'=HYPERLINK("#gid={ws.id}&range=A{int(row_idx)}";"{label}")'
+
+
+def header_index(headers: List[str], *names: str) -> Optional[int]:
+    normalized = [str(h or "").strip() for h in headers]
+    for name in names:
+        try:
+            return normalized.index(name)
+        except ValueError:
+            continue
+    return None
+
+
+def find_row_in_values_by_peer(values: List[List[str]], peer_id: str, header_names: Tuple[str, ...] = ("Пир", "Peer ID")) -> Tuple[Optional[int], Optional[List[str]]]:
+    peer_raw = str(peer_id or "").strip()
+    if not peer_raw or not values:
+        return None, None
+    headers = [str(h or "").strip() for h in values[0]]
+    peer_idx = header_index(headers, *header_names)
+    if peer_idx is None:
+        return None, None
+    for row_idx, row in enumerate(values[1:], start=2):
+        if peer_idx < len(row) and str(row[peer_idx] or "").strip() == peer_raw:
+            return row_idx, row
+    return None, None
+
+
+def remap_rows_by_headers(values: List[List[str]], target_headers: List[str]) -> List[List[str]]:
+    if not values:
+        return [target_headers[:]]
+    current_headers = [str(h or "").strip() for h in values[0]]
+    remapped = [target_headers[:]]
+    for row in values[1:]:
+        row_map = {}
+        for idx, header in enumerate(current_headers):
+            row_map[header] = row[idx] if idx < len(row) else ""
+        remapped.append([row_map.get(header, "") for header in target_headers])
+    return remapped
+
+
+def write_full_worksheet_values(ws, values: List[List[str]]) -> None:
+    if not values:
+        return
+    width = max(len(row) for row in values)
+    padded = [list(row) + [""] * (width - len(row)) for row in values]
+    ws.clear()
+    ws.update(
+        range_name=f"A1:{col_letter(width)}{len(padded)}",
+        values=padded,
+        value_input_option="USER_ENTERED",
+    )
+
+
+def parse_group_candidate_label(raw_value: str) -> Tuple[str, str]:
+    raw = str(raw_value or "").strip()
+    if not raw:
+        return "", ""
+    match = GROUP_CANDIDATE_ID_RE.match(raw)
+    if not match:
+        return "", ""
+    return normalize_name(match.group("name")), str(match.group("peer_id") or "").strip()
 
 
 class GlobalFallbackQuota:
@@ -1814,6 +1889,11 @@ def parse_group_message(text: str) -> dict:
     if username and not data.get("tg"):
         data["tg"] = f"@{username}"
     tg_value = (data.get("tg") or "").strip()
+    extracted_name, extracted_peer_id = parse_group_candidate_label(tg_value)
+    if extracted_name and not str(data.get("full_name", "") or "").strip():
+        data["full_name"] = extracted_name
+    if extracted_peer_id and not str(data.get("peer_id", "") or "").strip():
+        data["peer_id"] = extracted_peer_id
     if tg_value and not tg_value.startswith("@"):
         tg_match = USERNAME_RE.search(tg_value)
         if tg_match:
@@ -1822,6 +1902,28 @@ def parse_group_message(text: str) -> dict:
         data["phone"] = phone
     data["raw_text"] = (text or "").strip()
     return data
+
+
+def extract_group_candidate_contact(group_data: Optional[dict]) -> Tuple[Optional[str], Optional[str]]:
+    if not group_data:
+        return None, None
+    tg_value = str((group_data or {}).get("tg", "") or "").strip()
+    phone_value = str((group_data or {}).get("phone", "") or "").strip()
+
+    username = None
+    if tg_value.startswith("@"):
+        username = tg_value.lstrip("@")
+    elif tg_value:
+        tg_match = USERNAME_RE.search(tg_value)
+        if tg_match:
+            username = tg_match.group(1)
+
+    phone = None
+    if phone_value:
+        phone = normalize_phone(phone_value)
+        if not phone:
+            phone = None
+    return username, phone
 
 
 def is_no_laptop_value(value: str) -> bool:
@@ -2350,13 +2452,16 @@ class SheetWriter:
         return True
 
     def _sheet_row_link(self, ws, row_idx: int, label: str) -> str:
-        return f'=HYPERLINK("#gid={ws.id}&range=A{int(row_idx)}";"{label}")'
+        return build_sheet_row_link(ws, row_idx, label)
 
     def _get_group_leads_ws(self):
         if self._group_leads_ws is not None:
             return self._group_leads_ws
         self._group_leads_ws = self.sh.worksheet(GROUP_LEADS_WORKSHEET)
         return self._group_leads_ws
+
+    def _get_registration_ws(self):
+        return self.sh.worksheet(REGISTRATION_WORKSHEET)
 
     def _get_group_leads_lookup_rows(self):
         now = time.time()
@@ -2381,6 +2486,8 @@ class SheetWriter:
             age_idx = idx_of("age", "возраст")
             pc_idx = idx_of("pc", "ноутбук", "пк", "пк/ноутбук")
             full_name_idx = idx_of("full_name", "фио", "піб", "имя")
+            note_idx = idx_of("примечание", "примітка")
+            peer_idx = idx_of("пир", "peer id")
             if tg_idx is not None or full_name_idx is not None:
                 for idx, row in enumerate(values[1:], start=2):
                     row_username = row[tg_idx] if tg_idx is not None and tg_idx < len(row) else ""
@@ -2388,14 +2495,18 @@ class SheetWriter:
                     row_name = row[full_name_idx] if full_name_idx is not None and full_name_idx < len(row) else ""
                     age = row[age_idx].strip() if age_idx is not None and age_idx < len(row) else ""
                     pc = row[pc_idx].strip() if pc_idx is not None and pc_idx < len(row) else ""
+                    note = row[note_idx].strip() if note_idx is not None and note_idx < len(row) else ""
+                    peer_value = row[peer_idx].strip() if peer_idx is not None and peer_idx < len(row) else ""
                     rows.append(
                         {
                             "row_idx": idx,
+                            "peer_id": peer_value,
                             "username_norm": normalize_username(row_username),
                             "name_norm": normalize_name(row_name),
                             "phone": row_phone.strip(),
                             "age": age,
                             "pc": pc,
+                            "note": note,
                         }
                     )
         self._group_leads_lookup_cache = rows
@@ -2406,13 +2517,10 @@ class SheetWriter:
         self._group_leads_lookup_cache = []
         self._group_leads_lookup_cache_ts = 0.0
 
-    def _find_group_lead_info(self, username: str, name: str) -> Optional[dict]:
+    def _find_group_lead_info(self, peer_id: Optional[str], username: str, name: str) -> Optional[dict]:
+        peer_raw = str(peer_id or "").strip()
         uname = normalize_username(username)
         name_norm = normalize_name(name)
-        if not uname:
-            uname = ""
-        if not name_norm:
-            name_norm = ""
         try:
             rows = self._get_group_leads_lookup_rows()
         except Exception:
@@ -2421,21 +2529,51 @@ class SheetWriter:
             return None
         fallback_match = None
         for item in rows:
-            if uname and item.get("username_norm", "") == uname:
+            if peer_raw and item.get("peer_id", "") == peer_raw:
                 return {
                     "row_idx": item.get("row_idx"),
+                    "peer_id": item.get("peer_id", ""),
                     "phone": item.get("phone", ""),
                     "age": item.get("age", ""),
                     "pc": item.get("pc", ""),
+                    "note": item.get("note", ""),
+                }
+            if uname and item.get("username_norm", "") == uname:
+                return {
+                    "row_idx": item.get("row_idx"),
+                    "peer_id": item.get("peer_id", ""),
+                    "phone": item.get("phone", ""),
+                    "age": item.get("age", ""),
+                    "pc": item.get("pc", ""),
+                    "note": item.get("note", ""),
                 }
             if not fallback_match and name_norm and names_match(item.get("name_norm", ""), name_norm):
                 fallback_match = {
                     "row_idx": item.get("row_idx"),
+                    "peer_id": item.get("peer_id", ""),
                     "phone": item.get("phone", ""),
                     "age": item.get("age", ""),
                     "pc": item.get("pc", ""),
+                    "note": item.get("note", ""),
                 }
         return fallback_match
+
+    def _find_registration_info_by_peer(self, peer_id: Optional[str]) -> Optional[dict]:
+        peer_raw = str(peer_id or "").strip()
+        if not peer_raw:
+            return None
+        try:
+            ws = self._get_registration_ws()
+            values = ws.get_all_values()
+        except Exception:
+            return None
+        row_idx, _ = find_row_in_values_by_peer(values, peer_raw)
+        if not row_idx:
+            return None
+        return {
+            "row_idx": row_idx,
+            "link": self._sheet_row_link(ws, row_idx, "Открыть регистрацию"),
+        }
 
     def refresh_today_from_group_lead(self, tz: ZoneInfo, group_data: dict) -> int:
         ws = self._ensure_today_ws(tz)
@@ -2458,12 +2596,16 @@ class SheetWriter:
         name_idx = idx_of("Имя")
         phone_idx = idx_of("Телефон")
         app_link_idx = idx_of("Ссылка на заявку")
+        registration_link_idx = idx_of("Ссылка на Регистрацию")
         age_idx = idx_of("Возраст")
         pc_idx = idx_of("Наличие ПК/ноутбука")
+        note_idx = idx_of("Примечание")
+        peer_idx = idx_of("Пир")
         if app_link_idx is None or age_idx is None or pc_idx is None:
             return 0
 
-        lead_info = self._find_group_lead_info(group_data.get("tg", ""), group_data.get("full_name", ""))
+        target_peer = str(group_data.get("peer_id", "") or "").strip()
+        lead_info = self._find_group_lead_info(target_peer, group_data.get("tg", ""), group_data.get("full_name", ""))
         if not lead_info:
             return 0
         app_ws = self._get_group_leads_ws()
@@ -2471,16 +2613,21 @@ class SheetWriter:
         lead_phone = str(lead_info.get("phone", "") or "").strip()
         lead_age = lead_info.get("age", "")
         lead_pc = lead_info.get("pc", "")
+        lead_note = str(lead_info.get("note", "") or "").strip()
         target_uname = normalize_username(group_data.get("tg", ""))
         target_name = normalize_name(group_data.get("full_name", ""))
+        registration_info = self._find_registration_info_by_peer(target_peer or lead_info.get("peer_id", ""))
         updated = 0
         end_col = self._col_letter(len(headers))
 
         for idx, row in enumerate(values[1:], start=2):
+            row_peer = row[peer_idx].strip() if peer_idx is not None and peer_idx < len(row) else ""
             row_uname = normalize_username(row[username_idx]) if username_idx is not None and username_idx < len(row) else ""
             row_name = normalize_name(row[name_idx]) if name_idx is not None and name_idx < len(row) else ""
             matches = False
-            if target_uname and row_uname == target_uname:
+            if target_peer and row_peer == target_peer:
+                matches = True
+            elif target_uname and row_uname == target_uname:
                 matches = True
             elif target_name and names_match(row_name, target_name):
                 matches = True
@@ -2501,6 +2648,12 @@ class SheetWriter:
             if row_full[pc_idx] != lead_pc:
                 row_full[pc_idx] = lead_pc
                 changed = True
+            if note_idx is not None and lead_note and row_full[note_idx] != lead_note:
+                row_full[note_idx] = lead_note
+                changed = True
+            if registration_link_idx is not None and registration_info and row_full[registration_link_idx] != registration_info["link"]:
+                row_full[registration_link_idx] = registration_info["link"]
+                changed = True
             if not changed:
                 continue
             ws.update(range_name=f"A{idx}:{end_col}{idx}", values=[row_full], value_input_option="USER_ENTERED")
@@ -2508,6 +2661,38 @@ class SheetWriter:
         if updated:
             self._invalidate_ws_cache(ws)
         return updated
+
+    def refresh_today_from_registration(self, tz: ZoneInfo, registration_data: dict) -> int:
+        peer_raw = str((registration_data or {}).get("peer_id", "") or "").strip()
+        if not peer_raw:
+            return 0
+        ws = self._ensure_today_ws(tz)
+        headers = self._get_headers(ws)
+        try:
+            row_idx, row = self._find_row_by_peer(ws, int(peer_raw))
+        except Exception:
+            row_idx, row = None, None
+        if not row_idx or not row:
+            return 0
+
+        registration_ws = self._get_registration_ws()
+        registration_values = registration_ws.get_all_values()
+        registration_row_idx, _ = find_row_in_values_by_peer(registration_values, peer_raw)
+        if not registration_row_idx:
+            return 0
+
+        link_idx = header_index(headers, "Ссылка на Регистрацию")
+        if link_idx is None:
+            return 0
+        row_full = row[:] + [""] * max(0, len(headers) - len(row))
+        registration_link = self._sheet_row_link(registration_ws, registration_row_idx, "Открыть регистрацию")
+        if row_full[link_idx] == registration_link:
+            return 0
+        row_full[link_idx] = registration_link
+        end_col = self._col_letter(len(headers))
+        ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[row_full], value_input_option="USER_ENTERED")
+        self._invalidate_ws_cache(ws)
+        return 1
 
     def _sort_today_by_updated(self, ws, headers):
         if not SORT_TODAY_BY_UPDATED:
@@ -2716,7 +2901,7 @@ class SheetWriter:
             set_value("Смена", shift)
         set_value("Ссылка на чат", chat_link)
         try:
-            lead_info = self._find_group_lead_info(username, name)
+            lead_info = self._find_group_lead_info(str(peer_id), username, name)
             if lead_info:
                 app_ws = self._get_group_leads_ws()
                 set_value("Ссылка на заявку", self._sheet_row_link(app_ws, int(lead_info["row_idx"]), "Открыть заявку"))
@@ -2726,10 +2911,19 @@ class SheetWriter:
                         set_value("Телефон", phone_to_write)
                 set_value("Возраст", lead_info.get("age", ""))
                 set_value("Наличие ПК/ноутбука", lead_info.get("pc", ""))
+                set_value("Примечание", lead_info.get("note", ""))
             else:
                 set_value("Ссылка на заявку", "")
         except Exception:
             set_value("Ссылка на заявку", "")
+        try:
+            registration_info = self._find_registration_info_by_peer(str(peer_id))
+            if registration_info:
+                set_value("Ссылка на Регистрацию", registration_info["link"])
+            else:
+                set_value("Ссылка на Регистрацию", "")
+        except Exception:
+            set_value("Ссылка на Регистрацию", "")
         resolved_status = canonical_sheet_status(
             incoming_status=status,
             step_name=step_snapshot or tech_step,
@@ -2752,6 +2946,7 @@ class SheetWriter:
             if not str(current_first_start or "").strip():
                 existing[first_start_idx] = now_date
 
+        final_row_idx = row_idx
         try:
             if row_idx:
                 end_col = self._col_letter(len(headers))
@@ -2765,6 +2960,7 @@ class SheetWriter:
                     ws.update(range_name=f"A{row_idx}:{end_col}{row_idx}", values=[existing], value_input_option="USER_ENTERED")
                     self._row_index_cache.setdefault(ws.id, {})[str(peer_id)] = row_idx
                     self._next_row_cache[ws.id] = max(int(self._next_row_cache.get(ws.id, 2)), row_idx + 1)
+                    final_row_idx = row_idx
                 else:
                     ws.append_row(existing, value_input_option="USER_ENTERED")
                     self._invalidate_ws_cache(ws)
@@ -2772,10 +2968,33 @@ class SheetWriter:
                     if appended_row_idx:
                         self._row_index_cache.setdefault(ws.id, {})[str(peer_id)] = appended_row_idx
                         self._next_row_cache[ws.id] = max(int(self._next_row_cache.get(ws.id, 2)), appended_row_idx + 1)
+                        final_row_idx = appended_row_idx
         except Exception as err:
             print(f"⚠️ Не вдалося записати лист '{ws.title}': {err}")
             self._invalidate_ws_cache(ws)
             return
+        try:
+            lead_info = self._find_group_lead_info(str(peer_id), username, name)
+            if lead_info:
+                app_ws = self._get_group_leads_ws()
+                lead_headers = [str(h or "").strip() for h in app_ws.row_values(1)]
+                month_link_idx = header_index(lead_headers, "Ссылка на месячный лист")
+                if month_link_idx is not None:
+                    lead_row_values = app_ws.row_values(int(lead_info["row_idx"]))
+                    lead_row_full = lead_row_values[:] + [""] * max(0, len(lead_headers) - len(lead_row_values))
+                    if final_row_idx:
+                        month_link = self._sheet_row_link(ws, final_row_idx, "Открыть месяц")
+                        if lead_row_full[month_link_idx] != month_link:
+                            lead_row_full[month_link_idx] = month_link
+                            end_col = self._col_letter(len(lead_headers))
+                            app_ws.update(
+                                range_name=f"A{int(lead_info['row_idx'])}:{end_col}{int(lead_info['row_idx'])}",
+                                values=[lead_row_full[: len(lead_headers)]],
+                                value_input_option="USER_ENTERED",
+                            )
+                            self.invalidate_group_leads_lookup_cache()
+        except Exception:
+            pass
 
     def load_enabled_peers(self, tz: ZoneInfo) -> set:
         ws = self._ensure_today_ws(tz)
@@ -2824,7 +3043,6 @@ class GroupLeadsSheet:
             current = self.ws.row_values(1)
         except Exception:
             current = []
-        legacy_headers = GROUP_LEADS_HEADERS[:11] + [GROUP_LEADS_HEADERS[12]]
         if not current:
             self.ws.update(
                 range_name=f"A1:{col_letter(len(GROUP_LEADS_HEADERS))}1",
@@ -2832,44 +3050,17 @@ class GroupLeadsSheet:
                 value_input_option="USER_ENTERED",
             )
             return
-        if current[: len(legacy_headers)] == legacy_headers and current[: len(GROUP_LEADS_HEADERS)] != GROUP_LEADS_HEADERS:
+        if current[: len(GROUP_LEADS_HEADERS)] != GROUP_LEADS_HEADERS:
             try:
                 values = self.ws.get_all_values()
             except Exception:
                 values = []
-            migrated = [GROUP_LEADS_HEADERS[:]]
-            for row in values[1:]:
-                base = row[:]
-                prefix = base[:11]
-                raw_text = base[11] if len(base) > 11 else ""
-                suffix = base[12:] if len(base) > 12 else []
-                migrated.append(prefix + [""] + [raw_text] + suffix)
-            width = max(len(GROUP_LEADS_HEADERS), max((len(row) for row in migrated), default=len(GROUP_LEADS_HEADERS)))
-            padded = [row + [""] * (width - len(row)) for row in migrated]
-            self.ws.update(
-                range_name=f"A1:{col_letter(width)}{len(padded)}",
-                values=padded,
-                value_input_option="USER_ENTERED",
-            )
-            return
-        if current[: len(GROUP_LEADS_HEADERS)] != GROUP_LEADS_HEADERS:
-            self.ws.update(
-                range_name=f"A1:{col_letter(len(GROUP_LEADS_HEADERS))}1",
-                values=[GROUP_LEADS_HEADERS],
-                value_input_option="USER_ENTERED",
-            )
-        if len(current) > len(GROUP_LEADS_HEADERS):
-            extra = len(current) - len(GROUP_LEADS_HEADERS)
-            self.ws.update(
-                range_name=f"{col_letter(len(GROUP_LEADS_HEADERS) + 1)}1:{col_letter(len(current))}1",
-                values=[[""] * extra],
-                value_input_option="USER_ENTERED",
-            )
+            write_full_worksheet_values(self.ws, remap_rows_by_headers(values, GROUP_LEADS_HEADERS))
 
-    def _find_row(self, values, tg_norm: str, phone_norm: str, source_id: str, source_name: str):
+    def _find_row(self, values, peer_id: str, tg_norm: str, phone_norm: str, source_id: str, source_name: str):
         if not values:
             return None, None
-        headers = [h.strip().lower() for h in values[0]]
+        headers = [str(h or "").strip().lower() for h in values[0]]
         data = values[1:]
 
         def get_col(name: str) -> Optional[int]:
@@ -2898,6 +3089,7 @@ class GroupLeadsSheet:
             if get_col("источник") is not None
             else get_col("source")
         )
+        peer_idx = get_col("пир")
         for idx, row in enumerate(data, start=2):
             if source_id and source_id_idx is not None and source_id_idx < len(row):
                 row_source_id = (row[source_id_idx] or "").strip()
@@ -2907,6 +3099,9 @@ class GroupLeadsSheet:
                         if row_source_name and row_source_name != normalize_name(source_name):
                             continue
                     return idx, row
+            if peer_id and peer_idx is not None and peer_idx < len(row):
+                if str(row[peer_idx] or "").strip() == peer_id:
+                    return idx, row
             if tg_idx is not None and tg_idx < len(row) and tg_norm:
                 if normalize_username(row[tg_idx]) == tg_norm:
                     return idx, row
@@ -2914,6 +3109,20 @@ class GroupLeadsSheet:
                 if normalize_phone(row[phone_idx]) == phone_norm:
                     return idx, row
         return None, None
+
+    def _find_month_link(self, tz: ZoneInfo, peer_id: str) -> str:
+        peer_raw = str(peer_id or "").strip()
+        if not peer_raw:
+            return ""
+        try:
+            month_ws = self.sh.worksheet(format_month_sheet_title(datetime.now(tz).date()))
+            values = month_ws.get_all_values()
+        except Exception:
+            return ""
+        row_idx, _ = find_row_in_values_by_peer(values, peer_raw)
+        if not row_idx:
+            return ""
+        return build_sheet_row_link(month_ws, row_idx, "Открыть месяц")
 
     def upsert(self, tz: ZoneInfo, data: dict, status: Optional[str]):
         lock_acquired = False
@@ -2929,14 +3138,16 @@ class GroupLeadsSheet:
             phone_value = data.get("phone", "") or ""
             source_id = str(data.get("source_id", "") or "").strip()
             source_name = str(data.get("source_name", "") or "").strip()
+            peer_id = str(data.get("peer_id", "") or "").strip()
             tg_norm = normalize_username(tg_value)
             phone_norm = normalize_phone(phone_value)
             try:
                 values = self.ws.get_all_values()
             except Exception:
                 values = [GROUP_LEADS_HEADERS[:]]
-            row_idx, existing = self._find_row(values, tg_norm, phone_norm, source_id, source_name)
+            row_idx, existing = self._find_row(values, peer_id, tg_norm, phone_norm, source_id, source_name)
             existing = existing or [""] * len(GROUP_LEADS_HEADERS)
+            month_link = self._find_month_link(tz, peer_id)
 
             def take(key: str, idx: int) -> str:
                 value = data.get(key)
@@ -2957,7 +3168,9 @@ class GroupLeadsSheet:
                 take("source_id", 9),
                 take("source_name", 10),
                 take("hr_username", 11),
-                take("raw_text", 12),
+                take("peer_id", 12),
+                month_link or (existing[13] if 13 < len(existing) else ""),
+                take("raw_text", 14),
             ]
             end_col = col_letter(len(GROUP_LEADS_HEADERS))
             if row_idx:
@@ -2997,22 +3210,15 @@ class RegistrationSheet:
                 )
                 return
             if current[: len(REGISTRATION_HEADERS)] != REGISTRATION_HEADERS:
-                self.ws.update(
-                    range_name=f"A1:{col_letter(len(REGISTRATION_HEADERS))}1",
-                    values=[REGISTRATION_HEADERS],
-                    value_input_option="USER_ENTERED",
-                )
-            if len(current) > len(REGISTRATION_HEADERS):
-                extra = len(current) - len(REGISTRATION_HEADERS)
-                self.ws.update(
-                    range_name=f"{col_letter(len(REGISTRATION_HEADERS) + 1)}1:{col_letter(len(current))}1",
-                    values=[[""] * extra],
-                    value_input_option="USER_ENTERED",
-                )
+                try:
+                    values = self.ws.get_all_values()
+                except Exception:
+                    values = []
+                write_full_worksheet_values(self.ws, remap_rows_by_headers(values, REGISTRATION_HEADERS))
         except Exception as err:
             print(f"⚠️ Не вдалося оновити заголовки '{REGISTRATION_WORKSHEET}': {err}")
 
-    def _find_row(self, values, source_message_id: str, message_link: str):
+    def _find_row(self, values, peer_id: str, source_message_id: str, message_link: str):
         if not values:
             return None, None
         headers = [str(h or "").strip().lower() for h in values[0]]
@@ -3034,10 +3240,15 @@ class RegistrationSheet:
             if get_col("ссылка на сообщение") is not None
             else get_col("message_link")
         )
+        peer_idx = get_col("пир")
+        peer_id = str(peer_id or "").strip()
         source_message_id = str(source_message_id or "").strip()
         message_link = str(message_link or "").strip()
 
         for idx, row in enumerate(data, start=2):
+            if peer_id and peer_idx is not None and peer_idx < len(row):
+                if str(row[peer_idx] or "").strip() == peer_id:
+                    return idx, row
             if source_message_id and message_id_idx is not None and message_id_idx < len(row):
                 row_message_id = str(row[message_id_idx] or "").strip()
                 if row_message_id == source_message_id:
@@ -3053,6 +3264,38 @@ class RegistrationSheet:
                     return idx, row
         return None, None
 
+    def _find_sheet_row_link_by_peer(self, sheet_title: str, peer_id: str, label: str) -> str:
+        peer_raw = str(peer_id or "").strip()
+        if not peer_raw:
+            return ""
+        try:
+            ws = self.sh.worksheet(sheet_title)
+            values = ws.get_all_values()
+        except Exception:
+            return ""
+        row_idx, _ = find_row_in_values_by_peer(values, peer_raw)
+        if not row_idx:
+            return ""
+        return build_sheet_row_link(ws, row_idx, label)
+
+    def _find_group_lead_note(self, peer_id: str) -> str:
+        peer_raw = str(peer_id or "").strip()
+        if not peer_raw:
+            return ""
+        try:
+            ws = self.sh.worksheet(GROUP_LEADS_WORKSHEET)
+            values = ws.get_all_values()
+        except Exception:
+            return ""
+        row_idx, row = find_row_in_values_by_peer(values, peer_raw)
+        if not row_idx or not row:
+            return ""
+        headers = [str(h or "").strip() for h in values[0]]
+        note_idx = header_index(headers, "Примечание")
+        if note_idx is None or note_idx >= len(row):
+            return ""
+        return str(row[note_idx] or "").strip()
+
     def upsert(self, tz: ZoneInfo, data: dict):
         lock_acquired = False
         for _ in range(30):
@@ -3062,6 +3305,18 @@ class RegistrationSheet:
             time.sleep(0.1)
         try:
             self._ensure_headers_exact()
+            peer_id = str(data.get("peer_id", "") or "").strip()
+            month_link = self._find_sheet_row_link_by_peer(
+                format_month_sheet_title(datetime.now(tz).date()),
+                peer_id,
+                "Открыть месяц",
+            )
+            group_leads_link = self._find_sheet_row_link_by_peer(
+                GROUP_LEADS_WORKSHEET,
+                peer_id,
+                "Открыть заявку",
+            )
+            note = self._find_group_lead_note(peer_id)
             row = [
                 data.get("full_name", ""),
                 data.get("birth_date", ""),
@@ -3074,9 +3329,13 @@ class RegistrationSheet:
                 data.get("admin_tg", ""),
                 data.get("document_drive_link", ""),
                 data.get("message_link", ""),
+                month_link,
+                group_leads_link,
                 data.get("raw_text", ""),
                 data.get("source_group", ""),
                 str(data.get("source_message_id", "") or ""),
+                peer_id,
+                note,
                 datetime.now(tz).isoformat(timespec="seconds"),
             ]
 
@@ -3087,6 +3346,7 @@ class RegistrationSheet:
 
             row_idx, _ = self._find_row(
                 values,
+                peer_id,
                 str(data.get("source_message_id", "") or ""),
                 data.get("message_link", ""),
             )
@@ -5296,7 +5556,7 @@ async def main():
             pass
         if await handle_hr_filtered_lead(event, group_data):
             return
-        username, phone = extract_contact(text)
+        username, phone = extract_group_candidate_contact(group_data)
         if not username and not phone:
             return
 
@@ -5443,6 +5703,12 @@ async def main():
         if event.event_type == "registration_upsert":
             if registration_sheet:
                 await asyncio.to_thread(registration_sheet.upsert, tz, payload)
+                try:
+                    updated = await asyncio.to_thread(sheet.refresh_today_from_registration, tz, payload)
+                    if updated:
+                        print(f"SHEETS_REGISTRATION_REFRESH updated={updated} peer={payload.get('peer_id', '')}")
+                except Exception as err:
+                    print(f"⚠️ SHEETS_REGISTRATION_REFRESH_FAIL: {type(err).__name__}: {err}")
             return
         if event.event_type == "faq_question_log":
             if faq_questions_sheet:
@@ -5683,7 +5949,7 @@ async def main():
         lead_info = None
         from_group_lead = False
         try:
-            lead_info = sheet._find_group_lead_info(username, name)
+            lead_info = sheet._find_group_lead_info(str(peer_id), username, name)
             from_group_lead = bool(lead_info)
         except Exception:
             lead_info = None
