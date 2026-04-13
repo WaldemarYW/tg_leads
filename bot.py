@@ -58,6 +58,8 @@ class AccountConfig:
     auto_reply_v2_runtime_path: str
     auto_reply_sheets_queue_path: str
     auto_reply_fallback_quota_path: str
+    form_import_control_path: str
+    form_import_state_path: str
 
 
 def env_key(name: str) -> str:
@@ -66,6 +68,12 @@ def env_key(name: str) -> str:
 
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
+
+
+def env_flag(value: Optional[str], default: bool = False) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def make_account_key(name: str, used: Set[str]) -> str:
@@ -136,6 +144,14 @@ def load_accounts() -> List[AccountConfig]:
                 env_prefix + "AUTO_REPLY_FALLBACK_QUOTA_PATH",
                 os.path.join(state_dir, f"auto_reply_{key}.fallback_quota.json"),
             ),
+            form_import_control_path=os.environ.get(
+                env_prefix + "FORM_IMPORT_CONTROL_PATH",
+                os.path.join(state_dir, f"form_import_{key}.control.json"),
+            ),
+            form_import_state_path=os.environ.get(
+                env_prefix + "FORM_IMPORT_STATE_PATH",
+                os.path.join(state_dir, f"form_import_{key}.state.json"),
+            ),
         ))
     return accounts
 
@@ -175,6 +191,34 @@ def set_account_enabled(account: AccountConfig, enabled: bool):
     save_accounts_state(state)
 
 
+def load_form_import_control(acct: AccountConfig) -> Dict[str, bool]:
+    default_enabled = env_flag(
+        os.environ.get(acct.env_prefix + "FORM_IMPORT_ENABLED"),
+        env_flag(os.environ.get("FORM_IMPORT_ENABLED"), False),
+    )
+    try:
+        with open(acct.form_import_control_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {"enabled": default_enabled}
+    except Exception:
+        return {"enabled": default_enabled}
+
+
+def save_form_import_control(acct: AccountConfig, control: Dict[str, bool]):
+    ensure_dir(os.path.dirname(acct.form_import_control_path) or STATE_DIR)
+    with open(acct.form_import_control_path, "w", encoding="utf-8") as f:
+        json.dump(control, f, ensure_ascii=False)
+
+
+def is_form_import_enabled(acct: AccountConfig) -> bool:
+    control = load_form_import_control(acct)
+    return bool(control.get("enabled", False))
+
+
+def set_form_import_enabled(acct: AccountConfig, enabled: bool):
+    save_form_import_control(acct, {"enabled": bool(enabled)})
+
+
 def kb_main():
     kb = types.InlineKeyboardMarkup()
     for acct in ACCOUNTS:
@@ -192,6 +236,9 @@ def kb_account(acct: AccountConfig):
     kb.add(types.InlineKeyboardButton("▶️ Старт авто", callback_data=f"acct:{acct.key}:auto_start"))
     kb.add(types.InlineKeyboardButton("⏹ Стоп авто", callback_data=f"acct:{acct.key}:auto_stop"))
     kb.add(types.InlineKeyboardButton("📊 Статус авто", callback_data=f"acct:{acct.key}:auto_status"))
+    kb.add(types.InlineKeyboardButton("▶️ Старт імпорт форми", callback_data=f"acct:{acct.key}:form_import_start"))
+    kb.add(types.InlineKeyboardButton("⏹ Стоп імпорт форми", callback_data=f"acct:{acct.key}:form_import_stop"))
+    kb.add(types.InlineKeyboardButton("📊 Статус імпорту", callback_data=f"acct:{acct.key}:form_import_status"))
     kb.add(types.InlineKeyboardButton("🧭 HR фільтр", callback_data=f"acct:{acct.key}:hr_filter_menu"))
     toggle_label = "⏼ Вимкнути акаунт" if is_account_enabled(acct) else "⏼ Увімкнути акаунт"
     kb.add(types.InlineKeyboardButton(toggle_label, callback_data=f"acct:{acct.key}:toggle"))
@@ -236,6 +283,8 @@ def start_auto_reply(acct: AccountConfig) -> Tuple[bool, str]:
         env["AUTO_REPLY_V2_RUNTIME_PATH"] = acct.auto_reply_v2_runtime_path
         env["AUTO_REPLY_SHEETS_QUEUE_PATH"] = acct.auto_reply_sheets_queue_path
         env["AUTO_REPLY_FALLBACK_QUOTA_PATH"] = acct.auto_reply_fallback_quota_path
+        env["FORM_IMPORT_CONTROL_PATH"] = acct.form_import_control_path
+        env["FORM_IMPORT_STATE_PATH"] = acct.form_import_state_path
         env["AUTO_REPLY_ACCOUNT_KEY"] = acct.key
         for key in (
             "BOT_REPLY_DELAY_SEC",
@@ -255,6 +304,10 @@ def start_auto_reply(acct: AccountConfig) -> Tuple[bool, str]:
             "HISTORY_SHEET_PREFIX",
             "GROUP_LEADS_WORKSHEET",
             "HISTORY_RETENTION_MONTHS",
+            "FORM_IMPORT_ENABLED",
+            "FORM_IMPORT_SPREADSHEET_ID",
+            "FORM_IMPORT_WORKSHEET_INDEX",
+            "FORM_IMPORT_POLL_SEC",
         ):
             val = os.environ.get(acct.env_prefix + key)
             if val is not None:
@@ -300,6 +353,37 @@ def read_auto_status(acct: AccountConfig) -> str:
         "📊 Автовідповідач: "
         + ("працює" if running else "зупинено")
         + f"\nОстання відправка: {last_at}\nКому: {who}\nPeer ID: {peer_id}\nТекст: {preview}"
+    )
+
+
+def read_form_import_status(acct: AccountConfig) -> str:
+    enabled = is_form_import_enabled(acct)
+    if not os.path.exists(acct.auto_reply_status_path):
+        return (
+            f"📥 Імпорт форми: {'увімкнено' if enabled else 'вимкнено'}"
+            "\nСтатус runtime ще не збережено"
+        )
+    try:
+        with open(acct.auto_reply_status_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return (
+            f"📥 Імпорт форми: {'увімкнено' if enabled else 'вимкнено'}"
+            "\nНе вдалося прочитати статус"
+        )
+    form_import = data.get("form_import", {}) if isinstance(data.get("form_import"), dict) else {}
+    last_check = str(form_import.get("last_check_at") or "—")
+    last_sent = str(form_import.get("last_sent_at") or "—")
+    last_row = str(form_import.get("last_seen_row_number") or "—")
+    source_title = str(form_import.get("source_title") or "—")
+    last_error = str(form_import.get("last_error") or "").strip() or "—"
+    return (
+        f"📥 Імпорт форми: {'увімкнено' if enabled else 'вимкнено'}"
+        f"\nОстання перевірка: {last_check}"
+        f"\nОстання відправка: {last_sent}"
+        f"\nОстанній рядок: {last_row}"
+        f"\nВкладка: {source_title}"
+        f"\nПомилка: {last_error}"
     )
 
 
@@ -494,6 +578,27 @@ async def cb_account_actions(call: types.CallbackQuery):
         msg = read_auto_status(acct)
         await call.answer()
         await call.message.reply(msg)
+        return
+
+    if action == "form_import_start":
+        clear_pending_input(call.message.chat.id)
+        set_form_import_enabled(acct, True)
+        await call.answer()
+        await call.message.reply("✅ Імпорт форми увімкнено.", reply_markup=kb_account(acct))
+        return
+
+    if action == "form_import_stop":
+        clear_pending_input(call.message.chat.id)
+        set_form_import_enabled(acct, False)
+        await call.answer()
+        await call.message.reply("⏹ Імпорт форми вимкнено.", reply_markup=kb_account(acct))
+        return
+
+    if action == "form_import_status":
+        clear_pending_input(call.message.chat.id)
+        msg = read_form_import_status(acct)
+        await call.answer()
+        await call.message.reply(msg, reply_markup=kb_account(acct))
         return
 
     if action == "export_chats":

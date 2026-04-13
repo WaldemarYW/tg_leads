@@ -178,6 +178,12 @@ ALT_STRICT_GROUP_ONLY = os.environ.get("ALT_STRICT_GROUP_ONLY", "1").strip().low
 ALT_OWNER_CHECK_WITH_SHEET = os.environ.get("ALT_OWNER_CHECK_WITH_SHEET", "1").strip().lower() in {"1", "true", "yes", "on"}
 GROUP_LEADS_UPSERT_LOCK = os.environ.get("GROUP_LEADS_UPSERT_LOCK", "/opt/tg_leads/.group_leads_upsert.lock")
 REGISTRATION_UPSERT_LOCK = os.environ.get("REGISTRATION_UPSERT_LOCK", "/opt/tg_leads/.registration_upsert.lock")
+FORM_IMPORT_ENABLED = os.environ.get("FORM_IMPORT_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+FORM_IMPORT_SPREADSHEET_ID = os.environ.get("FORM_IMPORT_SPREADSHEET_ID", "1ufUPD4tGpbvQWtEZH0QY8FP0_DhyB6FnlO8E7pjTEPc").strip()
+FORM_IMPORT_WORKSHEET_INDEX = int(os.environ.get("FORM_IMPORT_WORKSHEET_INDEX", "0"))
+FORM_IMPORT_POLL_SEC = float(os.environ.get("FORM_IMPORT_POLL_SEC", "30"))
+FORM_IMPORT_STATE_PATH = os.environ.get("FORM_IMPORT_STATE_PATH", os.path.join(STATE_DIR, "form_import_state.json"))
+FORM_IMPORT_CONTROL_PATH = os.environ.get("FORM_IMPORT_CONTROL_PATH", os.path.join(STATE_DIR, "form_import_control.json"))
 
 TODAY_HEADERS = [
     "Дата",
@@ -221,6 +227,7 @@ USERNAME_RE = re.compile(r"(?:@|t\.me/)([A-Za-z0-9_]{5,})")
 PHONE_RE = re.compile(r"\+?\d[\d\s\-\(\)]{9,}\d")
 MESSAGE_LINK_RE = re.compile(r"https?://t\.me/(c/)?([A-Za-z0-9_]+)/(\d+)")
 GROUP_CANDIDATE_ID_RE = re.compile(r"^(?P<name>.+?)\s*\(ID:\s*(?P<peer_id>\d+)\)\s*$", re.IGNORECASE)
+FORM_IMPORT_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{5,}$")
 
 DIALOG_AI_URL = os.environ.get("DIALOG_AI_URL", "http://127.0.0.1:3000/dialog_suggest")
 DIALOG_AI_TIMEOUT_SEC = float(os.environ.get("DIALOG_AI_TIMEOUT_SEC", "20"))
@@ -1527,7 +1534,7 @@ def merge_test_answers(existing: List[str], text: str) -> List[str]:
 
 
 def normalize_key(text: str) -> str:
-    cleaned = normalize_text(text).replace("’", "'").replace("`", "'")
+    cleaned = normalize_text(text).replace("’", "'").replace("ʼ", "'").replace("`", "'")
     cleaned = cleaned.replace("ℹ", " ")
     cleaned = cleaned.replace("'", "")
     cleaned = "".join(ch if (ch.isalnum() or ch.isspace() or ch == "_") else " " for ch in cleaned)
@@ -1631,6 +1638,101 @@ def parse_group_candidate_label(raw_value: str) -> Tuple[str, str]:
     if not match:
         return "", ""
     return normalize_name(match.group("name")), str(match.group("peer_id") or "").strip()
+
+
+def atomic_write_json(path: str, payload: dict) -> None:
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+    os.replace(tmp_path, path)
+
+
+def load_json_file(path: str, default: dict) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else dict(default)
+    except Exception:
+        return dict(default)
+
+
+def update_status_file(patch: dict) -> None:
+    current = load_json_file(STATUS_PATH, {})
+    current.update(patch or {})
+    atomic_write_json(STATUS_PATH, current)
+
+
+def normalize_form_import_header(text: str) -> str:
+    cleaned = normalize_text(text).replace("’", "'").replace("ʼ", "'").replace("`", "'")
+    cleaned = cleaned.replace("'", "")
+    cleaned = "".join(ch if (ch.isalnum() or ch.isspace()) else " " for ch in cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def normalize_form_import_username(raw: str) -> Tuple[str, bool]:
+    value = str(raw or "").strip()
+    if not value:
+        return "", False
+    normalized = value.replace("https://t.me/", "").replace("http://t.me/", "").strip().strip("/")
+    normalized = normalized.lstrip("@")
+    if FORM_IMPORT_USERNAME_RE.fullmatch(normalized):
+        return f"@{normalized}", True
+    return value, False
+
+
+FORM_IMPORT_HEADER_MAP = {
+    "імя": "name",
+    "telegram username": "username",
+    "скільки повних років": "age",
+    "номер телефона": "phone",
+    "наявність пк або ноутбука": "pc",
+}
+
+
+def parse_form_import_row(headers: List[str], row: List[str]) -> dict:
+    mapped = {}
+    for idx, header in enumerate(headers):
+        key = FORM_IMPORT_HEADER_MAP.get(normalize_form_import_header(header))
+        if not key:
+            continue
+        mapped[key] = row[idx].strip() if idx < len(row) else ""
+    username_raw = mapped.get("username", "")
+    username_value, username_valid = normalize_form_import_username(username_raw)
+    phone_value = str(mapped.get("phone", "") or "").strip()
+    return {
+        "name": str(mapped.get("name", "") or "").strip(),
+        "username": username_value,
+        "username_valid": bool(username_valid),
+        "age": str(mapped.get("age", "") or "").strip(),
+        "phone": phone_value,
+        "pc": str(mapped.get("pc", "") or "").strip(),
+    }
+
+
+def build_form_import_message(data: dict) -> str:
+    lines = [
+        "🚹 НОВА АНКЕТА",
+        "",
+        f"❇️ Імʼя: {str(data.get('name', '') or '').strip()}",
+        "",
+        f"ℹ️ Користувач: {str(data.get('username', '') or '').strip()}",
+    ]
+    phone_value = str(data.get("phone", "") or "").strip()
+    if phone_value:
+        lines.extend(["", f"☎️ Номер телефону: {phone_value}"])
+    lines.extend(
+        [
+            "",
+            f"⏳ Вік: {str(data.get('age', '') or '').strip()}",
+            "",
+            f"💻 Ноутбук: {str(data.get('pc', '') or '').strip()}",
+            "",
+            "🪧 Примітка: Facebook",
+        ]
+    )
+    return "\n".join(lines).strip()
 
 
 class GlobalFallbackQuota:
@@ -3829,18 +3931,15 @@ async def send_and_update(
     username = getattr(entity, "username", "") or ""
     chat_link = build_chat_link_app(entity, entity.id)
     try:
-        with open(STATUS_PATH, "w") as f:
-            json.dump(
-                {
-                    "last_sent_at": datetime.now(tz).isoformat(timespec="seconds"),
-                    "peer_id": entity.id,
-                    "username": username or "",
-                    "name": name or "",
-                    "text_preview": message_text[:200],
-                },
-                f,
-                ensure_ascii=True,
-            )
+        update_status_file(
+            {
+                "last_sent_at": datetime.now(tz).isoformat(timespec="seconds"),
+                "peer_id": entity.id,
+                "username": username or "",
+                "name": name or "",
+                "text_preview": message_text[:200],
+            }
+        )
     except Exception:
         pass
     if step_state and step_name:
@@ -4080,6 +4179,44 @@ def status_for_text(text: str) -> Optional[str]:
         if template and template in t:
             return status
     return None
+
+
+def load_form_import_control() -> dict:
+    return load_json_file(FORM_IMPORT_CONTROL_PATH, {"enabled": FORM_IMPORT_ENABLED})
+
+
+def load_form_import_state() -> dict:
+    return load_json_file(
+        FORM_IMPORT_STATE_PATH,
+        {
+            "last_seen_row_number": 0,
+            "last_row_signature": "",
+            "last_sent_at": "",
+        },
+    )
+
+
+def save_form_import_state(state: dict) -> None:
+    atomic_write_json(FORM_IMPORT_STATE_PATH, state)
+
+
+def save_form_import_status_fragment(fragment: dict) -> None:
+    current = load_json_file(STATUS_PATH, {})
+    form_status = current.get("form_import", {}) if isinstance(current.get("form_import"), dict) else {}
+    form_status.update(fragment or {})
+    current["form_import"] = form_status
+    atomic_write_json(STATUS_PATH, current)
+
+
+def fetch_form_import_sheet_values() -> Tuple[str, List[List[str]]]:
+    if not FORM_IMPORT_SPREADSHEET_ID:
+        raise RuntimeError("FORM_IMPORT_SPREADSHEET_ID is empty")
+    gc = sheets_client(GOOGLE_CREDS)
+    sh = gc.open_by_key(FORM_IMPORT_SPREADSHEET_ID)
+    ws = sh.get_worksheet(FORM_IMPORT_WORKSHEET_INDEX)
+    if ws is None:
+        raise RuntimeError(f"Worksheet index {FORM_IMPORT_WORKSHEET_INDEX} not found")
+    return (ws.title or "").strip(), ws.get_all_values()
 
 
 async def main():
@@ -4342,6 +4479,181 @@ async def main():
                 break
     if not video_message:
         print("⚠️ Не знайшов відео у групі для пересилання")
+
+    async def form_import_loop():
+        prev_enabled = None
+        while not stop_event.is_set():
+            check_at = datetime.now(tz).isoformat(timespec="seconds")
+            control = load_form_import_control()
+            enabled = bool(control.get("enabled", FORM_IMPORT_ENABLED))
+            poll_timeout = max(5.0, float(FORM_IMPORT_POLL_SEC or 30.0))
+
+            if not enabled:
+                save_form_import_status_fragment(
+                    {
+                        "enabled": False,
+                        "last_check_at": check_at,
+                        "last_error": "",
+                    }
+                )
+                prev_enabled = False
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=poll_timeout)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
+            try:
+                sheet_title, values = await asyncio.to_thread(fetch_form_import_sheet_values)
+            except Exception as err:
+                save_form_import_status_fragment(
+                    {
+                        "enabled": True,
+                        "last_check_at": check_at,
+                        "last_error": f"{type(err).__name__}: {err}",
+                    }
+                )
+                print(f"⚠️ FORM_IMPORT_FETCH_FAIL: {type(err).__name__}: {err}")
+                prev_enabled = True
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=poll_timeout)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
+            headers = values[0] if values else []
+            normalized_headers = {FORM_IMPORT_HEADER_MAP.get(normalize_form_import_header(header)) for header in headers}
+            missing = [field for field in ("name", "username", "age", "phone", "pc") if field not in normalized_headers]
+            if missing:
+                missing_text = ", ".join(missing)
+                save_form_import_status_fragment(
+                    {
+                        "enabled": True,
+                        "last_check_at": check_at,
+                        "source_title": sheet_title,
+                        "last_error": f"missing_headers:{missing_text}",
+                    }
+                )
+                print(f"⚠️ FORM_IMPORT_MISSING_HEADERS: {missing_text}")
+                prev_enabled = True
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=poll_timeout)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
+            state = load_form_import_state()
+            current_row_number = len(values)
+            last_seen_row_number = int(state.get("last_seen_row_number") or 0)
+            should_baseline = prev_enabled is False or (
+                prev_enabled is None
+                and last_seen_row_number <= 0
+                and not str(state.get("last_sent_at") or "").strip()
+            )
+
+            if should_baseline:
+                state["last_seen_row_number"] = current_row_number
+                state["last_row_signature"] = ""
+                save_form_import_state(state)
+                save_form_import_status_fragment(
+                    {
+                        "enabled": True,
+                        "last_check_at": check_at,
+                        "source_title": sheet_title,
+                        "last_seen_row_number": current_row_number,
+                        "last_error": "",
+                    }
+                )
+                print(f"FORM_IMPORT_BASELINE row={current_row_number} sheet={sheet_title}")
+                prev_enabled = True
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=poll_timeout)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
+            if last_seen_row_number > current_row_number:
+                state["last_seen_row_number"] = current_row_number
+                save_form_import_state(state)
+                save_form_import_status_fragment(
+                    {
+                        "enabled": True,
+                        "last_check_at": check_at,
+                        "source_title": sheet_title,
+                        "last_seen_row_number": current_row_number,
+                        "last_error": "sheet_shrunk",
+                    }
+                )
+                print(
+                    f"⚠️ FORM_IMPORT_SHEET_SHRUNK prev={last_seen_row_number} current={current_row_number} sheet={sheet_title}"
+                )
+                prev_enabled = True
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=poll_timeout)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
+            imported = 0
+            last_error = ""
+            for row_number in range(max(2, last_seen_row_number + 1), current_row_number + 1):
+                row = values[row_number - 1] if row_number - 1 < len(values) else []
+                parsed = parse_form_import_row(headers, row)
+                if parsed.get("username") and not parsed.get("username_valid"):
+                    print(f"⚠️ FORM_IMPORT_INVALID_USERNAME row={row_number} value={parsed.get('username')}")
+                if not parsed.get("username") and not parsed.get("phone"):
+                    print(f"⚠️ FORM_IMPORT_NO_CONTACT row={row_number}")
+                message_text = build_form_import_message(parsed)
+                try:
+                    await client.send_message(leads_group, message_text)
+                except Exception as err:
+                    last_error = f"{type(err).__name__}: {err}"
+                    save_form_import_status_fragment(
+                        {
+                            "enabled": True,
+                            "last_check_at": check_at,
+                            "source_title": sheet_title,
+                            "last_seen_row_number": int(state.get("last_seen_row_number") or 0),
+                            "last_error": last_error,
+                        }
+                    )
+                    print(f"⚠️ FORM_IMPORT_SEND_FAIL row={row_number}: {last_error}")
+                    break
+
+                state["last_seen_row_number"] = row_number
+                state["last_row_signature"] = json.dumps(parsed, ensure_ascii=False, sort_keys=True)
+                state["last_sent_at"] = datetime.now(tz).isoformat(timespec="seconds")
+                save_form_import_state(state)
+                save_form_import_status_fragment(
+                    {
+                        "enabled": True,
+                        "last_check_at": check_at,
+                        "source_title": sheet_title,
+                        "last_seen_row_number": row_number,
+                        "last_sent_at": state["last_sent_at"],
+                        "last_row_signature": state["last_row_signature"],
+                        "last_error": "",
+                    }
+                )
+                imported += 1
+                print(f"FORM_IMPORT_SENT row={row_number} username={parsed.get('username', '')}")
+
+            if imported == 0 and not last_error:
+                save_form_import_status_fragment(
+                    {
+                        "enabled": True,
+                        "last_check_at": check_at,
+                        "source_title": sheet_title,
+                        "last_seen_row_number": int(state.get("last_seen_row_number") or 0),
+                        "last_error": "",
+                    }
+                )
+
+            prev_enabled = True
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=poll_timeout)
+            except asyncio.TimeoutError:
+                pass
 
     async def handle_hr_filtered_lead(event, group_data: dict) -> bool:
         hr_rule = get_hr_filter_rule(hr_filter_store, group_data)
@@ -6256,10 +6568,12 @@ async def main():
 
     sheets_task = None
     followup_task = None
+    form_import_task = None
     try:
         if sheets_queue:
             sheets_task = asyncio.create_task(sheet_flush_loop())
         followup_task = asyncio.create_task(followup_loop())
+        form_import_task = asyncio.create_task(form_import_loop())
         while not stop_event.is_set():
             if sheets_queue and (sheets_task is None or sheets_task.done()):
                 if sheets_task is not None:
@@ -6278,6 +6592,18 @@ async def main():
                 last_queue_heartbeat_at = time.time()
                 last_queue_progress_at = last_queue_heartbeat_at
                 print(f"✅ SHEETS_QUEUE_TASK_RESTART pid={os.getpid()} path={SHEETS_QUEUE_PATH}")
+            if form_import_task is None or form_import_task.done():
+                if form_import_task is not None:
+                    try:
+                        form_import_task.result()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as err:
+                        print(f"⚠️ FORM_IMPORT_TASK_DIED: {type(err).__name__}: {err}")
+                    else:
+                        print("⚠️ FORM_IMPORT_TASK_DIED: task exited")
+                form_import_task = asyncio.create_task(form_import_loop())
+                print("✅ FORM_IMPORT_TASK_RESTART")
             if sheets_queue:
                 now_ts = time.time()
                 if (now_ts - last_queue_stall_log_at) >= max(10.0, min(SHEETS_QUEUE_STALL_SEC, float(SHEETS_QUEUE_LOG_SEC))):
@@ -6317,6 +6643,8 @@ async def main():
                 sheets_task.cancel()
             if followup_task:
                 followup_task.cancel()
+            if form_import_task:
+                form_import_task.cancel()
         except Exception:
             pass
         await client.disconnect()
