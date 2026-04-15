@@ -132,6 +132,16 @@ class CandidateAwareFollowupTests(unittest.TestCase):
         self.assertEqual(state.last_followup_text, "")
         self.assertEqual(state.last_followup_step, "")
         self.assertEqual(state.step_followup_stage, 0)
+        self.assertEqual(state.step_followup_enabled_at, 123.0)
+
+    def test_existing_wait_state_without_opt_in_does_not_send_new_followups(self):
+        state = PeerRuntimeState(
+            peer_id=61,
+            flow_step=auto_reply.STEP_COMPANY_INTRO,
+            step_wait_step=auto_reply.STEP_COMPANY_INTRO,
+            step_wait_started_at=123.0,
+        )
+        self.assertFalse(auto_reply.is_v2_step_followup_enabled(state, auto_reply.STEP_COMPANY_INTRO))
 
     def test_v2_followup_has_only_two_send_stages(self):
         tz = ZoneInfo("Europe/Kyiv")

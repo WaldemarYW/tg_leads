@@ -128,6 +128,7 @@ class PeerRuntimeState:
     form_photo_reminder_sent: bool = False
     step_wait_started_at: float = 0.0
     step_wait_step: str = ""
+    step_followup_enabled_at: float = 0.0
     step_followup_stage: int = 0
     step_followup_last_at: float = 0.0
     last_followup_text: str = ""

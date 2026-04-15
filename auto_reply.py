@@ -1229,6 +1229,17 @@ def mark_v2_peer_followup_sent(state: Optional[PeerRuntimeState]):
     state.reminders_sent_since_inbound = int(state.reminders_sent_since_inbound or 0) + 1
 
 
+def is_v2_step_followup_enabled(state: Optional[PeerRuntimeState], step_name: str) -> bool:
+    if not state:
+        return False
+    current_step = (step_name or "").strip()
+    if current_step not in WAIT_STEP_SET:
+        return False
+    if (state.step_wait_step or "").strip() != current_step:
+        return False
+    return float(state.step_followup_enabled_at or 0.0) > 0
+
+
 def should_skip_v2_step_followup(state: Optional[PeerRuntimeState], step_name: str) -> bool:
     if not state:
         return True
@@ -1880,13 +1891,15 @@ class GlobalFallbackQuota:
 def arm_step_wait(state: PeerRuntimeState, step_name: str, now_ts: float):
     if step_name not in WAIT_STEP_SET:
         return
+    armed_at = float(now_ts or time.time())
     should_log = (
         (state.step_wait_step or "") != step_name
         or int(state.step_followup_stage or 0) != 0
         or float(state.step_wait_started_at or 0) <= 0
     )
-    state.step_wait_started_at = float(now_ts or time.time())
+    state.step_wait_started_at = armed_at
     state.step_wait_step = step_name
+    state.step_followup_enabled_at = armed_at
     state.step_followup_stage = 0
     state.step_followup_last_at = 0.0
     state.last_followup_text = ""
@@ -1898,6 +1911,7 @@ def arm_step_wait(state: PeerRuntimeState, step_name: str, now_ts: float):
 def clear_step_wait(state: PeerRuntimeState):
     state.step_wait_started_at = 0.0
     state.step_wait_step = ""
+    state.step_followup_enabled_at = 0.0
     state.step_followup_stage = 0
     state.step_followup_last_at = 0.0
     state.last_followup_text = ""
@@ -3927,6 +3941,7 @@ def prime_manual_v2_runtime_state(
     elif step_name == STEP_FORM_FORWARD:
         state.step_wait_started_at = current_ts
         state.step_wait_step = step_name
+        state.step_followup_enabled_at = current_ts
         state.step_followup_stage = 0
         state.step_followup_last_at = 0.0
     else:
@@ -5115,11 +5130,8 @@ async def main():
             flow_step=STEP_COMPANY_INTRO,
             auto_mode="ON",
             paused=False,
-            step_wait_started_at=time.time(),
-            step_wait_step=STEP_COMPANY_INTRO,
-            step_followup_stage=0,
-            step_followup_last_at=0.0,
         )
+        arm_step_wait(v2_state, STEP_COMPANY_INTRO, time.time())
         v2_runtime.set(v2_state)
         try:
             intro_ok = await send_v2_message(entity, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status=STATUS_INTRO_SENT)
@@ -5816,11 +5828,8 @@ async def main():
                 flow_step=STEP_COMPANY_INTRO,
                 auto_mode="ON",
                 paused=False,
-                step_wait_started_at=time.time(),
-                step_wait_step=STEP_COMPANY_INTRO,
-                step_followup_stage=0,
-                step_followup_last_at=0.0,
             )
+            arm_step_wait(seeded_state, STEP_COMPANY_INTRO, time.time())
             v2_runtime.set(seeded_state)
             await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status=STATUS_INTRO_SENT)
             await send_v2_message(sender, COMPANY_INTRO_TEXT, STEP_COMPANY_INTRO, status=STATUS_INTRO_SENT)
@@ -6433,11 +6442,8 @@ async def main():
                 flow_step=STEP_COMPANY_INTRO,
                 auto_mode="ON",
                 paused=False,
-                step_wait_started_at=time.time(),
-                step_wait_step=STEP_COMPANY_INTRO,
-                step_followup_stage=0,
-                step_followup_last_at=0.0,
             )
+            arm_step_wait(v2_state, STEP_COMPANY_INTRO, time.time())
             v2_runtime.set(v2_state)
             await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status=STATUS_INTRO_SENT)
             await send_v2_message(sender, COMPANY_INTRO_TEXT, STEP_COMPANY_INTRO, status=STATUS_INTRO_SENT)
@@ -6598,6 +6604,8 @@ async def main():
                             continue
                         current_step = (v2s.flow_step or "").strip()
                         if current_step not in WAIT_STEP_SET:
+                            continue
+                        if not is_v2_step_followup_enabled(v2s, current_step):
                             continue
                         if should_skip_v2_step_followup(v2s, current_step):
                             continue
