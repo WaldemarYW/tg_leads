@@ -3,6 +3,8 @@ import os
 import sys
 import types
 import unittest
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 
 os.environ.setdefault("API_ID", "1")
@@ -116,7 +118,7 @@ class CandidateAwareFollowupTests(unittest.TestCase):
         state.last_candidate_signal_step = auto_reply.STEP_FORM_FORWARD
         text = auto_reply.build_candidate_aware_followup_text(auto_reply.STEP_FORM_FORWARD, 1, state)
         self.assertIn("анкети", text)
-        self.assertIn("останній крок", text)
+        self.assertIn("одним повідомленням", text)
 
     def test_arm_step_wait_clears_followup_antispam_state(self):
         state = PeerRuntimeState(
@@ -125,22 +127,43 @@ class CandidateAwareFollowupTests(unittest.TestCase):
             last_followup_step=auto_reply.STEP_COMPANY_INTRO,
             step_followup_stage=1,
         )
+        auto_reply.reset_v2_followup_antispam(state)
         auto_reply.arm_step_wait(state, auto_reply.STEP_COMPANY_INTRO, 123.0)
         self.assertEqual(state.last_followup_text, "")
         self.assertEqual(state.last_followup_step, "")
         self.assertEqual(state.step_followup_stage, 0)
 
     def test_v2_followup_has_only_two_send_stages(self):
+        tz = ZoneInfo("Europe/Kyiv")
+        started_at = datetime(2026, 2, 19, 10, 0, tzinfo=tz).timestamp()
         self.assertEqual(
-            auto_reply.resolve_v2_followup_stage(auto_reply.STEP_CLARIFY_DELAY_SEC, 0),
-            ("STEP_WAIT_CLARIFY_SENT", 0, 1),
+            auto_reply.resolve_v2_followup_stage(
+                auto_reply.STEP_COMPANY_INTRO,
+                started_at,
+                0,
+                datetime(2026, 2, 19, 12, 0, tzinfo=tz),
+                tz,
+            ),
+            ("STEP_WAIT_NUDGE1_SENT", 0, 1, datetime(2026, 2, 19, 12, 0, tzinfo=tz).timestamp()),
         )
         self.assertEqual(
-            auto_reply.resolve_v2_followup_stage(auto_reply.STEP_FALLBACK_1_DELAY_SEC, 1),
-            ("STEP_WAIT_FALLBACK6H_SENT", 1, 2),
+            auto_reply.resolve_v2_followup_stage(
+                auto_reply.STEP_COMPANY_INTRO,
+                started_at,
+                1,
+                datetime(2026, 2, 20, 10, 0, tzinfo=tz),
+                tz,
+            ),
+            ("STEP_WAIT_NUDGE2_SENT", 1, 2, datetime(2026, 2, 20, 10, 0, tzinfo=tz).timestamp()),
         )
         self.assertIsNone(
-            auto_reply.resolve_v2_followup_stage(auto_reply.STEP_FALLBACK_2_DELAY_SEC + 10, 2)
+            auto_reply.resolve_v2_followup_stage(
+                auto_reply.STEP_COMPANY_INTRO,
+                started_at,
+                2,
+                datetime(2026, 2, 21, 10, 0, tzinfo=tz),
+                tz,
+            )
         )
 
     def test_duplicate_followup_text_is_detected_for_same_step(self):
@@ -173,6 +196,46 @@ class CandidateAwareFollowupTests(unittest.TestCase):
         self.assertGreaterEqual(counts.get(auto_reply.STEP_SCHEDULE_CONFIRM, 0), 15)
         self.assertGreaterEqual(counts.get(auto_reply.STEP_BALANCE_CONFIRM, 0), 15)
         self.assertGreaterEqual(counts.get(auto_reply.STEP_FORM_FORWARD, 0), 10)
+
+    def test_schedule_shift_followup_always_returns_to_concrete_choice(self):
+        state = PeerRuntimeState(peer_id=8)
+        text = auto_reply.build_candidate_aware_followup_text(auto_reply.STEP_SCHEDULE_SHIFT_WAIT, 1, state)
+        self.assertIn("денну чи нічну", text)
+
+    def test_form_followup_does_not_repeat_full_form(self):
+        state = PeerRuntimeState(peer_id=9)
+        text = auto_reply.build_candidate_aware_followup_text(auto_reply.STEP_FORM_FORWARD, 1, state)
+        self.assertNotIn("1. ПІБ", text)
+        self.assertIn("анкети", text)
+
+    def test_form_policy_is_more_patient_than_default(self):
+        default_policy = auto_reply.followup_policy_for_step(auto_reply.STEP_COMPANY_INTRO)
+        form_policy = auto_reply.followup_policy_for_step(auto_reply.STEP_FORM_FORWARD)
+        self.assertEqual(default_policy.first_delay_sec, 2 * 60 * 60)
+        self.assertEqual(default_policy.second_delay_sec, 24 * 60 * 60)
+        self.assertEqual(form_policy.first_delay_sec, 6 * 60 * 60)
+        self.assertEqual(form_policy.second_delay_sec, 48 * 60 * 60)
+
+    def test_quiet_hours_delay_followup_until_window_open(self):
+        tz = ZoneInfo("Europe/Kyiv")
+        started_at = datetime(2026, 2, 19, 21, 0, tzinfo=tz).timestamp()
+        due_at = auto_reply.v2_followup_due_at(auto_reply.STEP_COMPANY_INTRO, started_at, 0, tz)
+        self.assertEqual(datetime.fromtimestamp(due_at, tz).hour, 10)
+
+    def test_peer_antispam_blocks_third_followup_without_new_inbound(self):
+        state = PeerRuntimeState(peer_id=10, reminders_sent_since_inbound=2)
+        self.assertFalse(auto_reply.can_send_v2_peer_followup(state))
+        auto_reply.reset_v2_followup_antispam(state)
+        self.assertTrue(auto_reply.can_send_v2_peer_followup(state))
+
+    def test_qa_gate_blocks_step_followup_for_same_step(self):
+        state = PeerRuntimeState(
+            peer_id=11,
+            flow_step=auto_reply.STEP_SCHEDULE_CONFIRM,
+            qa_gate_active=True,
+            qa_gate_step=auto_reply.STEP_SCHEDULE_CONFIRM,
+        )
+        self.assertTrue(auto_reply.should_skip_v2_step_followup(state, auto_reply.STEP_SCHEDULE_CONFIRM))
 
 
 if __name__ == "__main__":

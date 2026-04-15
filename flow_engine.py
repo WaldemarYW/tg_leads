@@ -132,6 +132,7 @@ class PeerRuntimeState:
     step_followup_last_at: float = 0.0
     last_followup_text: str = ""
     last_followup_step: str = ""
+    reminders_sent_since_inbound: int = 0
     resume_step_after_balance: str = ""
     resume_checkpoint_after_balance: str = ""
     balance_block_shown: bool = False

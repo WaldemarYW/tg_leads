@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Tuple
 from collections import deque
+from dataclasses import dataclass
 import urllib.request
 import urllib.error
 
@@ -66,6 +67,7 @@ from auto_reply_state import (
     FollowupState as FollowupStateStore,
     LocalPauseStore as LocalPauseStoreStore,
     StepState as StepStateStore,
+    adjust_to_followup_window,
 )
 from gspread.exceptions import APIError
 from registration_ingest import (
@@ -148,6 +150,9 @@ STEP_FALLBACK_1_DELAY_SEC = float(os.environ.get("STEP_FALLBACK_1_DELAY_SEC", "2
 STEP_FALLBACK_2_DELAY_SEC = float(os.environ.get("STEP_FALLBACK_2_DELAY_SEC", "259200"))
 STEP_WAIT_FOLLOWUP_GRACE_SEC = float(os.environ.get("STEP_WAIT_FOLLOWUP_GRACE_SEC", "15"))
 GLOBAL_FALLBACK_DAILY_LIMIT = int(os.environ.get("GLOBAL_FALLBACK_DAILY_LIMIT", "30"))
+V2_FOLLOWUP_WINDOW_START_HOUR = int(os.environ.get("V2_FOLLOWUP_WINDOW_START_HOUR", "10"))
+V2_FOLLOWUP_WINDOW_END_HOUR = int(os.environ.get("V2_FOLLOWUP_WINDOW_END_HOUR", "19"))
+V2_MAX_REMINDERS_PER_PEER = int(os.environ.get("V2_MAX_REMINDERS_PER_PEER", "2"))
 SENT_MESSAGE_CACHE_LIMIT = int(os.environ.get("SENT_MESSAGE_CACHE_LIMIT", "200"))
 JOURNAL_MAX_LINES_PER_CHAT = int(os.environ.get("JOURNAL_MAX_LINES_PER_CHAT", "500"))
 JOURNAL_DEDUP_TAIL_LINES = int(os.environ.get("JOURNAL_DEDUP_TAIL_LINES", "10"))
@@ -1093,6 +1098,22 @@ RETURN_TYPE_FALLBACK_1 = "fallback_1"
 RETURN_TYPE_FALLBACK_2 = "fallback_2"
 
 
+@dataclass(frozen=True)
+class WaitFollowupPolicy:
+    first_delay_sec: float
+    second_delay_sec: float
+
+
+DEFAULT_WAIT_POLICY = WaitFollowupPolicy(
+    first_delay_sec=2 * 60 * 60,
+    second_delay_sec=24 * 60 * 60,
+)
+FORM_WAIT_POLICY = WaitFollowupPolicy(
+    first_delay_sec=6 * 60 * 60,
+    second_delay_sec=48 * 60 * 60,
+)
+
+
 def is_soft_shift_choice(text: str) -> bool:
     if not parse_shift_choice(text):
         return False
@@ -1184,6 +1205,59 @@ def followup_return_type_for_stage(stage: int) -> str:
     return RETURN_TYPE_FALLBACK_2
 
 
+def followup_policy_for_step(step_name: str) -> WaitFollowupPolicy:
+    if (step_name or "").strip() == STEP_FORM_FORWARD:
+        return FORM_WAIT_POLICY
+    return DEFAULT_WAIT_POLICY
+
+
+def reset_v2_followup_antispam(state: Optional[PeerRuntimeState]):
+    if not state:
+        return
+    state.reminders_sent_since_inbound = 0
+
+
+def can_send_v2_peer_followup(state: Optional[PeerRuntimeState]) -> bool:
+    if not state:
+        return False
+    return int(state.reminders_sent_since_inbound or 0) < max(0, int(V2_MAX_REMINDERS_PER_PEER))
+
+
+def mark_v2_peer_followup_sent(state: Optional[PeerRuntimeState]):
+    if not state:
+        return
+    state.reminders_sent_since_inbound = int(state.reminders_sent_since_inbound or 0) + 1
+
+
+def should_skip_v2_step_followup(state: Optional[PeerRuntimeState], step_name: str) -> bool:
+    if not state:
+        return True
+    if not bool(state.qa_gate_active):
+        return False
+    qa_step = (state.qa_gate_step or state.flow_step or "").strip()
+    return qa_step == (step_name or "").strip()
+
+
+def v2_followup_due_at(step_name: str, wait_started_at: float, stage: int, tzinfo: ZoneInfo) -> Optional[float]:
+    if float(wait_started_at or 0) <= 0:
+        return None
+    current_stage = int(stage or 0)
+    policy = followup_policy_for_step(step_name)
+    if current_stage <= 0:
+        delay_sec = float(policy.first_delay_sec)
+    elif current_stage == 1:
+        delay_sec = float(policy.second_delay_sec)
+    else:
+        return None
+    base_dt = datetime.fromtimestamp(float(wait_started_at), tzinfo)
+    target_dt = adjust_to_followup_window(
+        base_dt + timedelta(seconds=max(0.0, delay_sec)),
+        V2_FOLLOWUP_WINDOW_START_HOUR,
+        V2_FOLLOWUP_WINDOW_END_HOUR,
+    )
+    return target_dt.timestamp()
+
+
 def _safe_signal_for_step(state: Optional[PeerRuntimeState], step_name: str) -> Tuple[str, str]:
     if not state:
         return "", ""
@@ -1234,66 +1308,81 @@ def _balance_recap(signal_text: str) -> str:
 
 def build_candidate_aware_followup_text(step_name: str, stage: int, state: Optional[PeerRuntimeState]) -> str:
     signal, signal_text = _safe_signal_for_step(state, step_name)
-    return_type = followup_return_type_for_stage(stage)
+    stage_num = int(stage or 0)
+    return_type = followup_return_type_for_stage(stage_num)
     shift_choice = ((state.shift_choice or "").strip() if state else "").strip()
 
     if step_name == STEP_COMPANY_INTRO:
         recap = _company_intro_recap(signal_text)
+        if stage_num <= 0:
+            if signal == CANDIDATE_SIGNAL_QUESTION:
+                return f"{recap}Якщо в цілому формат Вам підходить, можемо перейти далі."
+            if signal == CANDIDATE_SIGNAL_DELAY:
+                return "Коли буде зручно, повернемось до цього місця. Підкажіть, будь ласка, чи підходить Вам формат у цілому?"
+            if signal == CANDIDATE_SIGNAL_OBJECTION:
+                return "Якщо сумнів залишився саме по формату, напишіть що саме, і я коротко уточню."
+            return "Повертаюсь до цього етапу: якщо формат у цілому підходить, можемо перейти далі."
         if signal == CANDIDATE_SIGNAL_QUESTION:
-            return f"{recap}Якщо в цілому формат Вам підходить, можемо перейти далі."
-        if signal == CANDIDATE_SIGNAL_DELAY:
-            return "Якщо зручно, повернемось з цього місця: підкажете, чи підходить Вам формат у цілому?"
-        if signal == CANDIDATE_SIGNAL_OBJECTION:
-            return "Якщо залишився сумнів саме по формату, напишіть що саме, і я коротко уточню."
-        if signal == CANDIDATE_SIGNAL_ACK:
-            return "Якщо в цілому формат Вам підходить, можемо перейти далі."
+            return f"{recap}Якщо тема ще актуальна, можемо коротко продовжити з цього місця."
+        return "Повертаюсь щодо вакансії. Якщо формат Вам підходить, можемо продовжити далі."
 
     if step_name == STEP_SCHEDULE_SHIFT_WAIT:
+        if stage_num <= 0:
+            if signal == CANDIDATE_SIGNAL_QUESTION:
+                return f"{_shift_recap(signal_text)}Щоб рухатися далі, підкажіть, будь ласка, яку зміну Вам зручніше розглянути: денну чи нічну?"
+            if signal == CANDIDATE_SIGNAL_DELAY:
+                return "Якщо вакансія ще актуальна, залишилось тільки обрати зміну: денну чи нічну."
+            if signal == CANDIDATE_SIGNAL_OBJECTION:
+                return "Якщо сумнів саме в графіку, коротко підкажу. Якщо в цілому ок, напишіть, яку зміну розглядаєте: денну чи нічну."
+            return "Підкажіть, будь ласка, яку зміну Вам зручніше розглянути: денну чи нічну?"
         if signal == CANDIDATE_SIGNAL_QUESTION:
-            return f"{_shift_recap(signal_text)}Щоб рухатися далі, підкажіть, будь ласка, яку зміну Вам зручніше розглянути: денну чи нічну?"
-        if signal == CANDIDATE_SIGNAL_DELAY:
-            return "Якщо вакансія ще актуальна, залишилось тільки обрати зміну: денну чи нічну."
-        if signal == CANDIDATE_SIGNAL_OBJECTION:
-            return "Якщо сумнів саме в графіку, коротко підкажу. Якщо в цілому ок, напишіть, яку зміну розглядаєте: денну чи нічну."
-        if signal in {CANDIDATE_SIGNAL_ACK, CANDIDATE_SIGNAL_SOFT_CHOICE}:
-            return "Залишилось тільки зафіксувати зміну: денну чи нічну?"
+            return f"{_shift_recap(signal_text)}Коли буде зручно, просто напишіть одну зміну: денну чи нічну."
+        return "Повертаюсь щодо графіка. Щоб продовжити, достатньо написати одну зміну: денну чи нічну."
 
     if step_name == STEP_SCHEDULE_CONFIRM:
         shift_prefix = f"Зафіксував {shift_choice} зміну. " if shift_choice else ""
-        if signal == CANDIDATE_SIGNAL_QUESTION:
-            return f"{shift_prefix}Коротко відповів по формату роботи. Якщо в цілому все зрозуміло, рухаємось далі до блоку про дохід і навчання."
-        if signal == CANDIDATE_SIGNAL_DELAY:
-            return f"{shift_prefix}Коли буде зручно, повернемось з цього місця і перейдемо до блоку про дохід і навчання."
-        if signal == CANDIDATE_SIGNAL_OBJECTION:
-            return "Якщо сумнів саме в інтенсивності або full-time форматі, коротко уточню. Якщо в цілому ок, рухаємось далі."
-        if signal == CANDIDATE_SIGNAL_ACK:
+        if stage_num <= 0:
+            if signal == CANDIDATE_SIGNAL_QUESTION:
+                return f"{shift_prefix}Коротко відповів по формату роботи. Якщо в цілому все зрозуміло, рухаємось далі до блоку про дохід і навчання."
+            if signal == CANDIDATE_SIGNAL_DELAY:
+                return f"{shift_prefix}Коли буде зручно, повернемось до цього місця. Якщо формат роботи в цілому зрозумілий, підемо далі."
+            if signal == CANDIDATE_SIGNAL_OBJECTION:
+                return "Якщо сумнів саме в інтенсивності або full-time форматі, коротко уточню. Якщо в цілому ок, рухаємось далі."
             return f"{shift_prefix}Якщо по формату роботи все зрозуміло, рухаємось далі до блоку про дохід і навчання."
+        if signal == CANDIDATE_SIGNAL_QUESTION:
+            return f"{shift_prefix}Повертаюсь щодо формату роботи. Якщо в цілому все ок, рухаємось далі до блоку про дохід і навчання."
+        return f"{shift_prefix}Повертаюсь до цього кроку. Якщо формат роботи в цілому зрозумілий, можемо йти далі."
 
     if step_name == STEP_BALANCE_CONFIRM:
+        if stage_num <= 0:
+            if signal == CANDIDATE_SIGNAL_QUESTION:
+                return f"{_balance_recap(signal_text)}Якщо в цілому все зрозуміло, можемо перейти до анкети."
+            if signal == CANDIDATE_SIGNAL_DELAY:
+                return "Коли буде зручно, повернемось до цього місця: після цього блоку залишився лише перехід до анкети."
+            if signal == CANDIDATE_SIGNAL_OBJECTION:
+                return "Якщо залишився сумнів по оплаті або навчанню, коротко відповім. Якщо в цілому ок, перейдемо до анкети."
+            return "Коротко підсумую: модель доходу прозора, навчання безкоштовне, далі залишився лише перехід до анкети."
         if signal == CANDIDATE_SIGNAL_QUESTION:
-            return f"{_balance_recap(signal_text)}Якщо в цілому все зрозуміло, можемо перейти до анкети."
-        if signal == CANDIDATE_SIGNAL_DELAY:
-            return "Коли буде зручно, повернемось з цього місця: після цього блоку залишився лише перехід до анкети."
-        if signal == CANDIDATE_SIGNAL_OBJECTION:
-            return "Якщо залишився сумнів по оплаті або навчанню, коротко відповім. Якщо в цілому ок, перейдемо до анкети."
-        if signal == CANDIDATE_SIGNAL_ACK:
-            return "Коротко підсумую: модель доходу прозора, навчання безкоштовне, далі залишився один короткий крок - анкета."
+            return f"{_balance_recap(signal_text)}Після цього блоку залишився тільки перехід до анкети."
+        return "Повертаюсь щодо цього етапу. Якщо в цілому все ок, далі залишився тільки перехід до анкети."
 
-    if step_name == STEP_FORM_FORWARD:
-        if signal == CANDIDATE_SIGNAL_DELAY:
-            return "Коли буде зручно, просто поверніться до анкети. Це останній крок перед передачею тімліду."
-        if signal == CANDIDATE_SIGNAL_QUESTION:
-            return "Коротко підкажу: зараз потрібна лише анкета. Це останній крок перед передачею тімліду."
-        return "Залишився останній крок перед передачею тімліду - заповнити анкету."
+    if step_name in {STEP_TEST_REVIEW, STEP_FORM_FORWARD}:
+        if step_name == STEP_TEST_REVIEW:
+            if stage_num <= 0:
+                return "Якщо в цілому все зрозуміло по заробітку та навчанню, далі залишився тільки перехід до анкети."
+            return "Повертаюсь до цього етапу: якщо все ок, можемо одразу переходити до анкети."
+        if stage_num <= 0:
+            if signal == CANDIDATE_SIGNAL_QUESTION:
+                return "Коротко підкажу: зараз потрібна лише анкета. Це останній крок перед передачею тімліду."
+            return "Залишився останній крок перед передачею тімліду — анкета."
+        return "Повертаюсь щодо анкети: коли буде зручно, просто надішліть її одним повідомленням."
 
     examples = get_return_examples(step_name, signal, return_type) if signal else []
     if examples:
         return str(examples[0].get("operator_return_gold", "")).strip()
-    if return_type == RETURN_TYPE_CLARIFY:
+    if stage_num <= 0:
         return get_step_clarify_text(step_name)
-    if return_type == RETURN_TYPE_FALLBACK_1:
-        return get_step_fallback_text(step_name, 1)
-    return get_step_fallback_text(step_name, 2)
+    return get_step_fallback_text(step_name, 1)
 
 
 def is_voice_not_listened_reply(text: str) -> bool:
@@ -1827,12 +1916,23 @@ def get_step_fallback_text(step_name: str, stage: int) -> str:
     return ""
 
 
-def resolve_v2_followup_stage(elapsed: float, stage: int) -> Optional[Tuple[str, int, int]]:
+def resolve_v2_followup_stage(
+    step_name: str,
+    wait_started_at: float,
+    stage: int,
+    now_dt: datetime,
+    tzinfo: ZoneInfo,
+) -> Optional[Tuple[str, int, int, float]]:
     current_stage = int(stage or 0)
-    if current_stage == 0 and elapsed >= STEP_CLARIFY_DELAY_SEC:
-        return ("STEP_WAIT_CLARIFY_SENT", 0, 1)
-    if current_stage == 1 and elapsed >= STEP_FALLBACK_1_DELAY_SEC:
-        return ("STEP_WAIT_FALLBACK6H_SENT", 1, 2)
+    due_at = v2_followup_due_at(step_name, wait_started_at, current_stage, tzinfo)
+    if due_at is None:
+        return None
+    if now_dt.timestamp() < due_at:
+        return None
+    if current_stage == 0:
+        return ("STEP_WAIT_NUDGE1_SENT", 0, 1, due_at)
+    if current_stage == 1:
+        return ("STEP_WAIT_NUDGE2_SENT", 1, 2, due_at)
     return None
 
 
@@ -4135,7 +4235,7 @@ async def rewrite_wait_followup_with_ai(
     raw_base = (base_text or "").strip()
     if not raw_base:
         return base_text
-    stage_name = {0: "clarify", 1: "fallback_6h", 2: "fallback_3d"}.get(int(stage), "followup")
+    stage_name = {0: "nudge_1", 1: "nudge_2"}.get(int(stage), "followup")
     history = await build_ai_history(client, entity, limit=8)
     seed = int(time.time() * 1000) % 1000000
     draft = (
@@ -5727,6 +5827,8 @@ async def main():
             print(f"✅ V2 auto-enrolled peer={peer_id}")
             return True
         v2_state = v2_runtime.get(peer_id)
+        reset_v2_followup_antispam(v2_state)
+        v2_runtime.set(v2_state)
         v2_intent = await resolve_v2_intent(sender, text, v2_state.flow_step)
         handled_v2 = await handle_v2_message(sender, text, v2_intent, has_photo=has_photo)
         if not handled_v2:
@@ -6497,9 +6599,13 @@ async def main():
                         current_step = (v2s.flow_step or "").strip()
                         if current_step not in WAIT_STEP_SET:
                             continue
+                        if should_skip_v2_step_followup(v2s, current_step):
+                            continue
                         if peer_id in processing_peers:
                             continue
                         if buffered_incoming.get(peer_id):
+                            continue
+                        if not can_send_v2_peer_followup(v2s):
                             continue
                         now_ts = time.time()
                         last_in_ts = float(last_incoming_at.get(peer_id, 0.0) or 0.0)
@@ -6510,22 +6616,26 @@ async def main():
                             arm_step_wait(v2s, current_step, now_ts)
                             v2_runtime.set(v2s)
                             continue
-                        elapsed = now_ts - started
-                        followup_plan = resolve_v2_followup_stage(elapsed, int(v2s.step_followup_stage or 0))
+                        followup_plan = resolve_v2_followup_stage(
+                            current_step,
+                            started,
+                            int(v2s.step_followup_stage or 0),
+                            now,
+                            tz,
+                        )
                         if not followup_plan:
                             continue
-                        log_label, followup_stage, next_stage = followup_plan
+                        log_label, followup_stage, next_stage, due_at = followup_plan
                         send_text = build_candidate_aware_followup_text(current_step, followup_stage, v2s)
                         if not send_text:
                             continue
                         if is_duplicate_v2_followup(v2s, current_step, send_text):
                             print(f"STEP_WAIT_DUPLICATE_SUPPRESSED peer={peer_id} step={current_step}")
-                            v2s.step_followup_stage = 2
+                            v2s.step_followup_stage = next_stage
                             v2s.step_wait_started_at = now_ts
                             v2_runtime.set(v2s)
                             continue
-                        is_clarify_stage = (next_stage == 1 and log_label == "STEP_WAIT_CLARIFY_SENT")
-                        if not is_clarify_stage and not can_send_global_fallback(now, tz):
+                        if not can_send_global_fallback(now, tz):
                             print(f"FALLBACK_DAILY_LIMIT_HIT peer={peer_id} step={current_step}")
                             continue
                         rewrite_started_at = time.time()
@@ -6533,7 +6643,7 @@ async def main():
                             client,
                             entity,
                             current_step,
-                            stage,
+                            followup_stage,
                             send_text,
                         )
                         latest_state = v2_runtime.get(peer_id)
@@ -6551,12 +6661,12 @@ async def main():
                             continue
                         await send_v2_message(entity, final_text, current_step, status=status_for_text(final_text) or "знак питання")
                         sent_at = time.time()
-                        if not is_clarify_stage:
-                            mark_global_fallback_sent(now, tz)
+                        mark_global_fallback_sent(now, tz)
+                        mark_v2_peer_followup_sent(v2s)
                         print(f"{log_label} peer={peer_id} step={current_step}")
                         v2s.step_followup_stage = next_stage
                         # Re-arm from the actual send moment so each stage delay is relative
-                        # to the previous reminder (clarify -> +6h), not original step start.
+                        # to the previous reminder, not the original step start.
                         v2s.step_followup_last_at = sent_at
                         v2s.step_wait_started_at = sent_at
                         v2s.last_followup_text = final_text

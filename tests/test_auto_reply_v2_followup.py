@@ -3,6 +3,8 @@ import os
 import sys
 import types
 import unittest
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 
 os.environ.setdefault("API_ID", "1")
@@ -99,6 +101,46 @@ class AutoReplyV2FollowupTests(unittest.TestCase):
             paused_in_sheet=False,
         )
         self.assertIsNone(reason)
+
+    def test_default_step_first_followup_after_two_hours(self):
+        tz = ZoneInfo("Europe/Kyiv")
+        started_at = datetime(2026, 2, 19, 10, 0, tzinfo=tz).timestamp()
+        plan = auto_reply.resolve_v2_followup_stage(
+            auto_reply.STEP_SCHEDULE_SHIFT_WAIT,
+            started_at,
+            0,
+            datetime(2026, 2, 19, 11, 59, tzinfo=tz),
+            tz,
+        )
+        self.assertIsNone(plan)
+        plan = auto_reply.resolve_v2_followup_stage(
+            auto_reply.STEP_SCHEDULE_SHIFT_WAIT,
+            started_at,
+            0,
+            datetime(2026, 2, 19, 12, 0, tzinfo=tz),
+            tz,
+        )
+        self.assertEqual(plan[:3], ("STEP_WAIT_NUDGE1_SENT", 0, 1))
+
+    def test_form_step_second_followup_after_forty_eight_hours(self):
+        tz = ZoneInfo("Europe/Kyiv")
+        started_at = datetime(2026, 2, 19, 10, 0, tzinfo=tz).timestamp()
+        plan = auto_reply.resolve_v2_followup_stage(
+            auto_reply.STEP_FORM_FORWARD,
+            started_at,
+            1,
+            datetime(2026, 2, 21, 9, 59, tzinfo=tz),
+            tz,
+        )
+        self.assertIsNone(plan)
+        plan = auto_reply.resolve_v2_followup_stage(
+            auto_reply.STEP_FORM_FORWARD,
+            started_at,
+            1,
+            datetime(2026, 2, 21, 10, 0, tzinfo=tz),
+            tz,
+        )
+        self.assertEqual(plan[:3], ("STEP_WAIT_NUDGE2_SENT", 1, 2))
 
 
 if __name__ == "__main__":
