@@ -315,6 +315,11 @@ REFUSAL_REASON_AGE = "age"
 REFUSAL_REASON_FULL_TIME = "full_time"
 REFUSAL_REASON_NOT_REMOTE_FIT = "not_remote_fit"
 REFUSAL_REASON_NOT_INTERESTED = "not_interested"
+REFUSAL_REASON_ETHICS_LEGALITY = "ethics_legality"
+REFUSAL_REASON_TRUST_SCAM = "trust_scam"
+REFUSAL_REASON_SALARY_CADENCE = "salary_cadence"
+REFUSAL_REASON_GENERIC_MISMATCH = "generic_mismatch"
+REFUSAL_REASON_TOO_VAGUE_OR_NOT_UNDERSTOOD = "too_vague_or_not_understood"
 REFUSAL_REASON_LATER = "later"
 REFUSAL_REASON_NO_REPLY_CONTEXT = "no_reply_context"
 REFUSAL_REASON_OTHER = "other"
@@ -326,6 +331,11 @@ REFUSAL_REASON_ALLOWED = {
     REFUSAL_REASON_FULL_TIME,
     REFUSAL_REASON_NOT_REMOTE_FIT,
     REFUSAL_REASON_NOT_INTERESTED,
+    REFUSAL_REASON_ETHICS_LEGALITY,
+    REFUSAL_REASON_TRUST_SCAM,
+    REFUSAL_REASON_SALARY_CADENCE,
+    REFUSAL_REASON_GENERIC_MISMATCH,
+    REFUSAL_REASON_TOO_VAGUE_OR_NOT_UNDERSTOOD,
     REFUSAL_REASON_LATER,
     REFUSAL_REASON_NO_REPLY_CONTEXT,
     REFUSAL_REASON_OTHER,
@@ -1495,20 +1505,103 @@ def classify_refusal_reason_local(text: str, step_name: Optional[str] = None) ->
         return REFUSAL_REASON_OTHER
     if any(marker in t for marker in ("пізніше", "позже", "не зараз", "не сейчас", "подумаю", "подумaю", "завтра", "потом", "потім")):
         return REFUSAL_REASON_LATER
+    if any(
+        marker in t
+        for marker in (
+            "законно",
+            "законно ли",
+            "легально",
+            "легально ли",
+            "кримінал",
+            "криминал",
+            "онліфанс",
+            "onlyfans",
+            "амораль",
+            "неетично",
+            "неэтично",
+        )
+    ):
+        return REFUSAL_REASON_ETHICS_LEGALITY
+    if any(
+        marker in t
+        for marker in (
+            "це бот",
+            "это бот",
+            "ви бот",
+            "вы бот",
+            "развод",
+            "лохотрон",
+            "мошен",
+            "скам",
+            "скамно",
+            "небезпечно",
+            "небезопасно",
+            "не довіряю",
+            "не доверяю",
+            "подозр",
+        )
+    ):
+        return REFUSAL_REASON_TRUST_SCAM
     if any(marker in t for marker in ("без ноут", "без пк", "немає пк", "немає ноут", "нет пк", "нет ноут", "нету пк")):
         return REFUSAL_REASON_NO_PC
     if any(marker in t for marker in ("за віком", "по возрасту", "по віку", "замалий вік", "маленький возраст")):
         return REFUSAL_REASON_AGE
+    if any(
+        marker in t
+        for marker in (
+            "коли зарплата",
+            "когда зарплата",
+            "коли виплата",
+            "когда выплата",
+            "не щодня",
+            "не ежедневно",
+            "раз в місяць",
+            "раз в месяц",
+            "8 по 15",
+            "8-15",
+            "раз на місяць",
+            "раз в месяц",
+        )
+    ):
+        return REFUSAL_REASON_SALARY_CADENCE
     if any(marker in t for marker in ("без ставки", "без ставк", "процент", "відсот", "процента", "баланс", "оплат", "зарплат", "дохід", "доход")):
         return REFUSAL_REASON_INCOME_MODEL
     if any(marker in t for marker in ("8 год", "8-год", "8 годин", "full time", "фул тайм", "повний день", "полный день", "не зможу 8")):
         return REFUSAL_REASON_FULL_TIME
     if any(marker in t for marker in ("графік", "график", "зміна", "смена", "нічна", "денна", "ночная", "дневная", "вихідн", "выходн")):
         return REFUSAL_REASON_SCHEDULE
+    if any(
+        marker in t
+        for marker in (
+            "не зрозум",
+            "не понял",
+            "не поняла",
+            "непонят",
+            "не понятно",
+            "не ясно",
+            "незрозуміло",
+            "занадто розмито",
+            "слишком размыто",
+            "що саме треба робити не зрозуміло",
+        )
+    ):
+        return REFUSAL_REASON_TOO_VAGUE_OR_NOT_UNDERSTOOD
     if any(marker in t for marker in ("віддален", "удален", "текстове", "текстовое", "формат", "не моє", "не мое", "не підходить формат", "не подходит формат")):
         return REFUSAL_REASON_NOT_REMOTE_FIT
     if any(marker in t for marker in ("неактуально", "не актуально", "не цікаво", "не интересно", "не цікава", "не интересна", "передум", "не хочу", "не потрібно", "не нужно")):
         return REFUSAL_REASON_NOT_INTERESTED
+    if any(
+        marker in t
+        for marker in (
+            "не підходить",
+            "не подходит",
+            "мені не підходить",
+            "мне не подходит",
+            "мені таке не підходить",
+            "мені це не підходить",
+        )
+    ):
+        return REFUSAL_REASON_GENERIC_MISMATCH
     if step in {STEP_SCHEDULE_SHIFT_WAIT, STEP_SCHEDULE_CONFIRM, STEP_SCHEDULE_BLOCK} and is_no_reply(raw):
         return REFUSAL_REASON_SCHEDULE
     return REFUSAL_REASON_OTHER

@@ -132,6 +132,28 @@ class RefusalReasonTrackingTests(unittest.TestCase):
             auto_reply.REFUSAL_REASON_LATER,
         )
 
+    def test_local_refusal_classifier_covers_expanded_categories(self):
+        self.assertEqual(
+            auto_reply.classify_refusal_reason_local("Наскільки це законно? Не хочу в таке лізти", auto_reply.STEP_COMPANY_INTRO),
+            auto_reply.REFUSAL_REASON_ETHICS_LEGALITY,
+        )
+        self.assertEqual(
+            auto_reply.classify_refusal_reason_local("Це схоже на скам, я не довіряю такому формату", auto_reply.STEP_COMPANY_INTRO),
+            auto_reply.REFUSAL_REASON_TRUST_SCAM,
+        )
+        self.assertEqual(
+            auto_reply.classify_refusal_reason_local("Мені не підходить, що виплати тільки раз в місяць", auto_reply.STEP_BALANCE_CONFIRM),
+            auto_reply.REFUSAL_REASON_SALARY_CADENCE,
+        )
+        self.assertEqual(
+            auto_reply.classify_refusal_reason_local("Щось занадто розмито, я не зрозуміла що саме треба робити", auto_reply.STEP_COMPANY_INTRO),
+            auto_reply.REFUSAL_REASON_TOO_VAGUE_OR_NOT_UNDERSTOOD,
+        )
+        self.assertEqual(
+            auto_reply.classify_refusal_reason_local("Мені таке не підходить", auto_reply.STEP_COMPANY_INTRO),
+            auto_reply.REFUSAL_REASON_GENERIC_MISMATCH,
+        )
+
     def test_special_start_reason_maps_to_refusal_payload(self):
         self.assertEqual(
             auto_reply.refusal_reason_from_special_start(auto_reply.SPECIAL_START_NO_PC),
