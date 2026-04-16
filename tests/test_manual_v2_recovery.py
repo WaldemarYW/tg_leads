@@ -94,6 +94,20 @@ class ManualV2RecoveryTests(unittest.TestCase):
             auto_reply.STEP_FORM_FORWARD,
         )
 
+    def test_recognizes_new_single_message_form_payload(self):
+        payload = (
+            "1️⃣ Крістіна Іваненко\n"
+            "2️⃣ 01.02.1999\n"
+            "3️⃣ +380501234567\n"
+            "4️⃣ example@gmail.com\n"
+            "5️⃣ @kristina_test\n"
+            "6️⃣ Київ\n"
+            "7️⃣ Денна 14:00–23:00\n"
+            "8️⃣ 15.05.2026\n"
+            "9️⃣ Паспорт додаю окремим фото"
+        )
+        self.assertTrue(auto_reply.is_filled_form_text(payload))
+
     def test_non_script_manual_message_has_no_v2_recovery_step(self):
         self.assertIsNone(auto_reply.detect_manual_v2_step_from_text("Добрий день, пишу вручну без шаблону"))
 
