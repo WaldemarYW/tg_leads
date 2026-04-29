@@ -24,8 +24,8 @@ class FAQServiceTests(unittest.TestCase):
 
     def test_sales_script_loaded(self):
         script = load_sales_script_context()
-        self.assertIn("Premium HR Sales Script", script)
-        self.assertIn("Voice Recap 1", script)
+        self.assertIn("Furioza Company HR Sales Script", script)
+        self.assertIn("Документ і ГПД", script)
 
 
 if __name__ == "__main__":

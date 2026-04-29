@@ -109,7 +109,7 @@ class CandidateAwareFollowupTests(unittest.TestCase):
         state.last_candidate_signal_step = auto_reply.STEP_BALANCE_CONFIRM
         state.last_candidate_signal_text = "А якщо тут без ставки?"
         text = auto_reply.build_candidate_aware_followup_text(auto_reply.STEP_BALANCE_CONFIRM, 0, state)
-        self.assertIn("немає фіксованої ставки", text)
+        self.assertIn("гарантована ставка 300", text)
         self.assertIn("анкети", text)
 
     def test_form_delay_followup_stays_on_last_step(self):

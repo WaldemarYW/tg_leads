@@ -90,9 +90,20 @@ class ManualV2RecoveryTests(unittest.TestCase):
 
     def test_detects_form_as_form_forward(self):
         self.assertEqual(
-            auto_reply.detect_manual_v2_step_from_text(auto_reply.FORM_TEXT),
+            auto_reply.detect_manual_v2_step_from_text(auto_reply.V2_FORM_TEXT),
             auto_reply.STEP_FORM_FORWARD,
         )
+
+    def test_document_question_uses_gpd_answer(self):
+        self.assertTrue(auto_reply.is_document_purpose_question("Навіщо потрібен паспорт або Дія?"))
+        self.assertIn("договором ГПД", auto_reply.DOCUMENT_PURPOSE_REPLY_TEXT)
+
+    def test_runtime_tracks_form_text_and_photo_separately(self):
+        state = PeerRuntimeState(peer_id=10)
+        self.assertFalse(state.form_text_received)
+        self.assertFalse(state.form_photo_received)
+        self.assertEqual(state.form_text_received_at, 0.0)
+        self.assertEqual(state.form_photo_received_at, 0.0)
 
     def test_recognizes_new_single_message_form_payload(self):
         payload = (

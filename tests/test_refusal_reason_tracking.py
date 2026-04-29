@@ -154,6 +154,34 @@ class RefusalReasonTrackingTests(unittest.TestCase):
             auto_reply.REFUSAL_REASON_GENERIC_MISMATCH,
         )
 
+    def test_local_refusal_classifier_covers_live_april_phrases(self):
+        self.assertEqual(
+            auto_reply.classify_refusal_reason_local("Мені онлі фанс не підходить", auto_reply.STEP_COMPANY_INTRO),
+            auto_reply.REFUSAL_REASON_ETHICS_LEGALITY,
+        )
+        self.assertEqual(
+            auto_reply.classify_refusal_reason_local("Разводить лохов на бабки имеете ввиду", auto_reply.STEP_COMPANY_INTRO),
+            auto_reply.REFUSAL_REASON_TRUST_SCAM,
+        )
+        self.assertEqual(
+            auto_reply.classify_refusal_reason_local("Дякую за інформацію, шукаю роботу лише з фіксованою ставкою", auto_reply.STEP_BALANCE_CONFIRM),
+            auto_reply.REFUSAL_REASON_INCOME_MODEL,
+        )
+        self.assertEqual(
+            auto_reply.classify_refusal_reason_local("У меня телефон", auto_reply.STEP_COMPANY_INTRO),
+            auto_reply.REFUSAL_REASON_NO_PC,
+        )
+        self.assertEqual(
+            auto_reply.classify_refusal_reason_local("Не понятно, что именно нужно делать", auto_reply.STEP_COMPANY_INTRO),
+            auto_reply.REFUSAL_REASON_TOO_VAGUE_OR_NOT_UNDERSTOOD,
+        )
+
+    def test_local_refusal_classifier_prioritizes_schedule_over_generic_mismatch(self):
+        self.assertEqual(
+            auto_reply.classify_refusal_reason_local("Не підходить по часу", auto_reply.STEP_SCHEDULE_SHIFT_WAIT),
+            auto_reply.REFUSAL_REASON_SCHEDULE,
+        )
+
     def test_special_start_reason_maps_to_refusal_payload(self):
         self.assertEqual(
             auto_reply.refusal_reason_from_special_start(auto_reply.SPECIAL_START_NO_PC),

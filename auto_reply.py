@@ -353,8 +353,9 @@ MISSING_STEP_RECOVERY_TEXT = (
     "Підкажіть, будь ласка, яку зміну Вам зручніше розглянути: денну чи нічну?"
 )
 FORM_LOCK_REPLY_TEXT = (
-    "Ми вже на фінальному етапі - заповненні анкети.\n"
-    "Після отримання анкети передаю Вас тімліду на старт."
+    "Ми вже на фінальному етапі - анкеті.\n"
+    "Можна надіслати дані одним повідомленням, а документ окремо.\n"
+    "Після анкети передаю Вас тімліду на старт."
 )
 CLARIFY_NEGATIVE_FOLLOWUP_TEXT = (
     "Розумію.\n"
@@ -364,6 +365,14 @@ CLARIFY_NEGATIVE_FOLLOWUP_TEXT = (
 QA_GATE_REMINDER_TEXT = "Якщо залишилися питання — напишіть, я коротко поясню. Коли будете готові, продовжимо."
 VOICE_FALLBACK_TEXT = "Якщо після цього блоку лишилися питання, напишіть одним повідомленням - усе коротко поясню і підкажу, що далі."
 V2_GATE_REMINDER_TEXT = "Якщо щось залишилося незрозумілим, напишіть одним повідомленням — я все уточню."
+MID_FUNNEL_YES_CLOSE_TEXT = (
+    "Чудово. Скажіть, будь ласка, чи наразі все зрозуміло щодо вакансії? "
+    "Чи зрозуміла сама специфіка роботи? Хочу, щоб перед початком співпраці все було максимально прозоро."
+)
+PROCESS_CONFIRM_PROMPT_TEXT = (
+    "Якщо з процесом оформлення, навчанням і передачею адміністратору все зрозуміло, "
+    "напишіть, будь ласка, чи можемо переходити до оформлення."
+)
 AI_FOLLOWUP_REWRITE_ENABLED = os.environ.get("AI_FOLLOWUP_REWRITE_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 WAIT_STEP_SET = {
     STEP_SCREENING_WAIT,
@@ -388,34 +397,34 @@ BALANCE_RESUME_CHECKPOINTS = {
     BALANCE_CHECKPOINT_AFTER_SCHEDULE_CONFIRM_QUESTION,
 }
 STEP_CLARIFY_TEXTS = {
-    STEP_SCREENING_WAIT: "Якщо вакансія для Вас ще актуальна, дайте короткий зворотний звʼязок, і я проведу Вас далі по етапах.",
-    STEP_COMPANY_INTRO: "Якщо такий формат Вам у цілому підходить, можемо перейти далі. Якщо є питання - коротко поясню.",
+    STEP_SCREENING_WAIT: "Якщо вакансія для Вас ще актуальна, дайте короткий зворотний звʼязок, і я зорієнтую Вас по умовах.",
+    STEP_COMPANY_INTRO: MID_FUNNEL_YES_CLOSE_TEXT,
     STEP_VOICE_WAIT: "Підкажіть, будь ласка, чи вдалося ознайомитися з коротким поясненням. Якщо зручніше, продовжу все текстом.",
     STEP_SCHEDULE_SHIFT_WAIT: "Підкажіть, будь ласка, яку зміну Вам зручніше розглянути: денну чи нічну.",
     STEP_SCHEDULE_CONFIRM: "Якщо по формату роботи все зрозуміло, можемо перейти до блоку про заробіток і навчання. Якщо є сумнів - коротко уточню.",
-    STEP_BALANCE_CONFIRM: "Якщо по заробітку та навчанню все зрозуміло, можемо переходити далі. Якщо потрібно, поясню на простому прикладі.",
-    STEP_TEST_REVIEW: "Якщо по заробітку та навчанню все зрозуміло, можемо одразу переходити до анкети.",
-    STEP_FORM_FORWARD: "Залишився останній крок перед передачею тімліду - заповнити анкету.",
+    STEP_BALANCE_CONFIRM: PROCESS_CONFIRM_PROMPT_TEXT,
+    STEP_TEST_REVIEW: "Якщо все зрозуміло, можемо одразу перейти до оформлення.",
+    STEP_FORM_FORWARD: "Залишився останній крок перед передачею адміністратору - анкета та документ.",
 }
 STEP_FALLBACK_1_TEXTS = {
-    STEP_SCREENING_WAIT: "Повертаюся щодо вакансії: якщо тема ще актуальна, дайте знати, і я коротко проведу Вас далі.",
-    STEP_COMPANY_INTRO: "Повертаюся щодо вакансії: якщо формат для Вас ще цікавий, дайте знати, і ми перейдемо до наступного кроку.",
+    STEP_SCREENING_WAIT: "Повертаюся щодо вакансії: якщо тема ще актуальна, дайте знати, і я коротко зорієнтую Вас по умовах.",
+    STEP_COMPANY_INTRO: "Повертаюся щодо вакансії: якщо умови Вам підходять і все зрозуміло, можемо перейти до процесу оформлення.",
     STEP_VOICE_WAIT: "Повертаюся щодо пояснення вакансії. Якщо зручніше, продовжу все коротко текстом.",
     STEP_SCHEDULE_SHIFT_WAIT: "Повертаюся щодо графіка: якщо вакансія ще актуальна, напишіть, будь ласка, яку зміну Вам зручніше розглянути.",
     STEP_SCHEDULE_CONFIRM: "Повертаюся щодо формату роботи: якщо все зрозуміло, перейдемо до блоку про заробіток і навчання. Якщо є питання - відповім.",
-    STEP_BALANCE_CONFIRM: "Повертаюся щодо блоку про заробіток і навчання: якщо все зрозуміло, можемо рухатися далі. Якщо є питання - поясню.",
-    STEP_TEST_REVIEW: "Повертаюся щодо наступного кроку: якщо все зрозуміло, одразу перейдемо до анкети. Якщо є питання - коротко відповім.",
-    STEP_FORM_FORWARD: "Повертаюся щодо анкети: це останній крок перед передачею тімліду.",
+    STEP_BALANCE_CONFIRM: "Повертаюся щодо оформлення: якщо процес зрозумілий, можемо перейти до анкети. Якщо є питання - поясню.",
+    STEP_TEST_REVIEW: "Повертаюся щодо наступного кроку: якщо все зрозуміло, одразу перейдемо до анкети.",
+    STEP_FORM_FORWARD: "Повертаюся щодо анкети: це останній крок перед передачею адміністратору.",
 }
 STEP_FALLBACK_2_TEXTS = {
-    STEP_SCREENING_WAIT: "Добрий день. Якщо вакансія ще актуальна для Вас, дайте короткий зворотний звʼязок, і я проведу Вас далі по етапах.",
-    STEP_COMPANY_INTRO: "Добрий день. Якщо формат вакансії ще цікавий для Вас, дайте короткий зворотний звʼязок, і ми перейдемо далі.",
+    STEP_SCREENING_WAIT: "Добрий день. Якщо вакансія ще актуальна для Вас, дайте короткий зворотний звʼязок, і я зорієнтую Вас по умовах.",
+    STEP_COMPANY_INTRO: "Добрий день. Якщо вакансія ще цікава і умови зрозумілі, можемо рухатися до оформлення.",
     STEP_VOICE_WAIT: "Добрий день. Повертаюся щодо вакансії чат-менеджера: якщо зручніше, продовжу все коротко текстом.",
     STEP_SCHEDULE_SHIFT_WAIT: "Добрий день. Щоб продовжити, потрібно зафіксувати зміну. Підкажіть, будь ласка, яку зміну Вам зручніше розглянути.",
     STEP_SCHEDULE_CONFIRM: "Добрий день. Якщо по формату роботи все зрозуміло, перейдемо до блоку про заробіток і навчання. Якщо залишилися питання - із радістю відповім.",
-    STEP_BALANCE_CONFIRM: "Добрий день. Якщо по заробітку та навчанню все зрозуміло, можемо рухатися далі. Якщо потрібне коротке пояснення - надам.",
-    STEP_TEST_REVIEW: "Добрий день. Якщо готові рухатися далі, перейдемо до анкети. Якщо залишилися питання - коротко відповім.",
-    STEP_FORM_FORWARD: "Добрий день. Нагадую про анкету: після неї передаю Вас тімліду.",
+    STEP_BALANCE_CONFIRM: "Добрий день. Якщо по оформленню та старту все зрозуміло, можемо переходити до анкети.",
+    STEP_TEST_REVIEW: "Добрий день. Якщо готові рухатися далі, перейдемо до анкети.",
+    STEP_FORM_FORWARD: "Добрий день. Нагадую про анкету та документ: після них передаю Вас адміністратору.",
 }
 FORMAL_ADDRESS_REPLACEMENTS = [
     (r"\bТи\b", "Ви"),
@@ -448,11 +457,47 @@ FORMAL_ADDRESS_REPLACEMENTS = [
     (r"\bтвои\b", "Ваши"),
 ]
 SCREENING_INTRO_TEXT = (
-    "Доброго дня.\n"
-    "Ви залишали відгук на вакансію чат-менеджера.\n"
-    "Щоб Вам було простіше одразу зорієнтуватися, коротко скажу головне: це віддалена робота в чаті, тільки текстовий формат, full-time 8 годин і робота лише з ПК або ноутбука."
+    "Доброго дня. Мене звати Володимир. Ви залишали заявку на роботу в нашому чат-боті. "
+    "Зараз я коротко розповім про компанію та вакансію акаунт-менеджера, на яку ми Вас розглядаємо. 😊"
 )
-MID_FUNNEL_YES_CLOSE_TEXT = "Якщо такий формат Вам у цілому підходить, можемо перейти далі?"
+COMPANY_OVERVIEW_TEXT = (
+    "📌 Наша компанія Furioza Company працює понад 10 років і співпрацює з більш ніж 3000 акаунт-менеджерами. "
+    "Зараз ми працюємо з міжнародною дейтінговою платформою.\n\n"
+    "📌 Суть роботи: ведення текстового спілкування від імені клієнтки з користувачами сайту "
+    "(без дзвінків і продажів). Теми — повсякденні: хобі, подорожі, мистецтво тощо. "
+    "Робота повністю віддалена, достатньо базового рівня англійської.\n\n"
+    "📌 Перед початком роботи ви проходите навчання з адміністратором (вашим керівником), "
+    "який супроводжує вас у процесі. Після навчання — 2 тижні стажування з подальшою першою виплатою."
+)
+EARNINGS_OVERVIEW_TEXT = (
+    "💰 Заробіток формується у відсотках від активності користувачів:\n"
+    "• 1-й місяць — гарантована ставка 300 $ + 48% базових + 20% бонусних (за подарунки 20–27%)\n"
+    "• З 2-го місяця — 40% базових із можливістю зростання до 45–47% за KPI + бонуси\n\n"
+    "Середній дохід:\n"
+    "1 місяць — 300–400 $\n"
+    "2 місяць — 600–800 $\n"
+    "3 місяць — 1000–1200 $"
+)
+SCHEDULE_OVERVIEW_TEXT = (
+    "📌 Графік: денна або нічна зміна (денна — з 14:00 до 23:00, нічна — з 23:00 до 08:00; "
+    "нічна — з найвищим трафіком і доходом). Змінити графік можна один раз.\n"
+    "📌 5–7 плаваючих вихідних на місяць.\n"
+    "📌 Виплати: аванс — 20–30% у будь-який день, повний розрахунок — з 8 по 15 число. "
+    "Переказ на картку або електронний гаманець."
+)
+PC_REQUIREMENT_TEXT = (
+    "💻 Важливо\n"
+    "Працювати можна лише з комп’ютера або ноутбука. Із телефону працювати не можна, "
+    "оскільки сайт містить багато функцій, які не підтримуються мобільними пристроями."
+)
+INITIAL_INTEREST_PROMPT_TEXT = (
+    "Скажіть, будь ласка, чи зацікавила вас вакансія? Чи все зрозуміло щодо системи виплат, "
+    "графіка та самої специфіки роботи? Можливо, у вас є якісь додаткові запитання — із радістю відповім. 😊"
+)
+MID_FUNNEL_YES_CLOSE_TEXT = (
+    "Чудово. Скажіть, будь ласка, чи наразі все зрозуміло щодо вакансії? "
+    "Чи зрозуміла сама специфіка роботи? Хочу, щоб перед початком співпраці все було максимально прозоро."
+)
 SCREENING_TO_INTRO_BRIDGE_TEXT = "Дякую. Тоді коротко покажу, як влаштована вакансія і що буде далі."
 REFERRAL_AFTER_REJECT_TEXT = (
     "Також хочу повідомити, що в нашій компанії діє реферальна програма 💰\n"
@@ -464,17 +509,48 @@ REFERRAL_AFTER_REJECT_TEXT = (
     "Якщо серед ваших знайомих є люди,\n"
     "яким може бути цікава така робота — сміливо рекомендуйте 🙂"
 )
-COMPANY_INTRO_TEXT = (
-    "Коротко розповім, у чому суть роботи.\n\n"
-    "Це віддалений формат на дейтинг-платформі: потрібно вести текстові чати, листи та інвайти від імені анкети. Без дзвінків і без відео.\n\n"
-    "На старті є навчання і підтримка тімліда, тому Вас не залишають сам на сам із процесом.\n\n"
-    f"{MID_FUNNEL_YES_CLOSE_TEXT}"
+COMPANY_INTRO_TEXT = INITIAL_INTEREST_PROMPT_TEXT
+COMPANY_INTRO_TIMEOUT_TEXT = MID_FUNNEL_YES_CLOSE_TEXT
+PROCESS_EXPLAINER_TEXT = (
+    "Супер 😊 Давайте коротко поясню, як буде проходити процес. Спочатку мені потрібно вас оформити — "
+    "якщо вам цікава вакансія, підходять умови і ви готові до співпраці, необхідно підтвердити вашу особу. "
+    "Після цього я передаю ваші дані адміністратору, з яким ви будете проходити навчання та стажування. "
+    "Навчання доволі швидке — буквально за кілька годин ви його проходите і зможете приступити до роботи. "
+    "Адміністратор буде постійно з вами на зв’язку, допомагатиме та підказуватиме, тому самі ви не залишитеся. "
+    "Також я завжди на зв’язку, тож якщо виникатимуть будь-які запитання — сміливо пишіть."
 )
-COMPANY_INTRO_TIMEOUT_TEXT = (
-    "Коротко розповім, у чому суть роботи. "
-    "Це віддалений формат на дейтинг-платформі: потрібно вести текстові чати, листи та інвайти від імені анкети. Без дзвінків і без відео.\n\n"
-    "На старті є навчання і підтримка тімліда, тому Вас не залишають сам на сам із процесом.\n\n"
-    f"{MID_FUNNEL_YES_CLOSE_TEXT}"
+PROCESS_CONFIRM_PROMPT_TEXT = (
+    "Якщо з процесом оформлення, навчанням і передачею адміністратору все зрозуміло, "
+    "напишіть, будь ласка, чи можемо переходити до оформлення."
+)
+FORM_TRANSITION_TEXT = "Супер. Тоді можемо переходити до оформлення"
+DOCUMENT_PURPOSE_REPLY_TEXT = (
+    "Документ потрібен для оформлення за договором ГПД, створення доступів і підтвердження, "
+    "що в системі використовуються саме Ваші дані. Договір фіксує умови співпраці та виплат, "
+    "а дані не використовуються без Вашої згоди і залишаються конфіденційними."
+)
+V2_FORM_TEXT = (
+    "Для оформлення, будь ласка, надайте наступне:\n\n"
+    "1️⃣ Документ, що підтверджує вашу особу – будь-який, крім свідоцтва, наприклад, паспорт. "
+    "Мають бути чітко видими: ім’я, прізвище та дата народження. Також це може бути просто скріншот "
+    "будь-якого вашого документа з додатка «Дія», щоб ми могли підтвердити вашу особу.\n\n"
+    "2️⃣ Telegram-нік (приклад: @username)\n\n"
+    "3️⃣ Номер телефону – ваш актуальний контакт.\n\n"
+    "4️⃣ Електронна пошта – для зв’язку та отримання інформації.\n\n"
+    "5️⃣ Місце проживання – місто, де ви перебуваєте.\n\n"
+    "6️⃣ Обрана зміна – оберіть одну:\n"
+    "🌞 Денна: 14:00–23:00\n"
+    "🌙 Нічна: 23:00–08:00\n\n"
+    "Це потрібно тільки для того, щоб переконатися, що в системі використовуються ваші власні дані, а не чужі. "
+    "Ваші дані ніде не будуть використані без вашої згоди — ми гарантуємо конфіденційність."
+)
+FORM_MISSING_PHOTO_TEXT = (
+    "Дякую, анкету отримав. Залишився документ або скрін з Дії для підтвердження особи.\n\n"
+    f"{DOCUMENT_PURPOSE_REPLY_TEXT}"
+)
+FORM_MISSING_TEXT_TEXT = (
+    "Дякую, документ отримав. Тепер, будь ласка, надішліть анкету з Telegram-ніком, телефоном, email, "
+    "містом проживання та обраною зміною."
 )
 SCHEDULE_SHIFT_TEXT = (
     "По графіку одразу уточню важливий момент: у нас тільки full-time формат і одна зміна на постійній основі.\n\n"
@@ -565,8 +641,16 @@ MANUAL_V2_STEP_ORDER = {
 
 MANUAL_V2_TEMPLATE_TO_STEP = {
     normalize_text(SCREENING_INTRO_TEXT): STEP_SCREENING_WAIT,
+    normalize_text(COMPANY_OVERVIEW_TEXT): STEP_COMPANY_INTRO,
+    normalize_text(EARNINGS_OVERVIEW_TEXT): STEP_COMPANY_INTRO,
+    normalize_text(SCHEDULE_OVERVIEW_TEXT): STEP_COMPANY_INTRO,
+    normalize_text(PC_REQUIREMENT_TEXT): STEP_COMPANY_INTRO,
+    normalize_text(INITIAL_INTEREST_PROMPT_TEXT): STEP_COMPANY_INTRO,
     normalize_text(COMPANY_INTRO_TEXT): STEP_COMPANY_INTRO,
     normalize_text(COMPANY_INTRO_TIMEOUT_TEXT): STEP_COMPANY_INTRO,
+    normalize_text(PROCESS_EXPLAINER_TEXT): STEP_BALANCE_CONFIRM,
+    normalize_text(PROCESS_CONFIRM_PROMPT_TEXT): STEP_BALANCE_CONFIRM,
+    normalize_text(FORM_TRANSITION_TEXT): STEP_FORM_FORWARD,
     normalize_text(SCHEDULE_SHIFT_TEXT): STEP_SCHEDULE_SHIFT_WAIT,
     normalize_text(SCHEDULE_DETAILS_TEXT): STEP_SCHEDULE_CONFIRM,
     normalize_text(SCHEDULE_CONFIRM_TEXT): STEP_SCHEDULE_CONFIRM,
@@ -574,6 +658,7 @@ MANUAL_V2_TEMPLATE_TO_STEP = {
     normalize_text(EARNINGS_EXPLAINER_TEXT_2): STEP_BALANCE_CONFIRM,
     normalize_text(EARNINGS_EXPLAINER_TEXT_3): STEP_BALANCE_CONFIRM,
     normalize_text(BALANCE_CONFIRM_TEXT): STEP_BALANCE_CONFIRM,
+    normalize_text(V2_FORM_TEXT): STEP_FORM_FORWARD,
     normalize_text(FORM_TEXT): STEP_FORM_FORWARD,
     normalize_text(FORM_LOCK_REPLY_TEXT): STEP_FORM_FORWARD,
 }
@@ -596,6 +681,16 @@ RU_MONTHS = {
 }
 
 STATUS_BY_TEMPLATE = {
+    normalize_text(SCREENING_INTRO_TEXT): STATUS_INTRO_SENT,
+    normalize_text(COMPANY_OVERVIEW_TEXT): STATUS_INTRO_SENT,
+    normalize_text(EARNINGS_OVERVIEW_TEXT): STATUS_INTRO_SENT,
+    normalize_text(SCHEDULE_OVERVIEW_TEXT): STATUS_INTRO_SENT,
+    normalize_text(PC_REQUIREMENT_TEXT): STATUS_INTRO_SENT,
+    normalize_text(INITIAL_INTEREST_PROMPT_TEXT): STATUS_INTRO_SENT,
+    normalize_text(PROCESS_EXPLAINER_TEXT): STATUS_EARNINGS_EXPLAINED,
+    normalize_text(PROCESS_CONFIRM_PROMPT_TEXT): STATUS_EARNINGS_EXPLAINED,
+    normalize_text(FORM_TRANSITION_TEXT): STATUS_FORM_REQUESTED,
+    normalize_text(V2_FORM_TEXT): STATUS_FORM_REQUESTED,
     normalize_text(CONTACT_TEXT): STATUS_INTRO_SENT,
     normalize_text(INTEREST_TEXT): STATUS_INTRO_SENT,
     normalize_text(DATING_TEXT): STATUS_INTRO_SENT,
@@ -896,6 +991,70 @@ def is_filled_form_text(text: str) -> bool:
     score += 1 if date_lines >= 2 else 0
     score += 1 if has_schedule_line else 0
     return score >= 3
+
+
+def is_document_purpose_question(text: str) -> bool:
+    t = normalize_text(text)
+    if not t:
+        return False
+    doc_markers = (
+        "документ",
+        "паспорт",
+        "дія",
+        "дия",
+        "верифікац",
+        "верификац",
+        "підтвердити особу",
+        "подтвердить личность",
+        "гпд",
+        "договор",
+        "договір",
+    )
+    purpose_markers = (
+        "навіщо",
+        "зачем",
+        "чому",
+        "почему",
+        "для чого",
+        "для чего",
+        "обов",
+        "обяз",
+        "потріб",
+        "нуж",
+    )
+    return any(marker in t for marker in doc_markers) and (
+        any(marker in t for marker in purpose_markers) or message_has_question(text)
+    )
+
+
+def onboarding_question_return_prompt(state: Optional[PeerRuntimeState], step_name: str) -> str:
+    if step_name == STEP_BALANCE_CONFIRM:
+        idx = int((state.balance_confirm_clarify_count if state else 0) or 0)
+        variants = (
+            "Якщо по процесу оформлення та навчанню тепер усе зрозуміло, напишіть, будь ласка, чи можемо переходити до оформлення.",
+            "Чи залишилися ще питання саме по старту або передачі адміністратору, чи вже можемо перейти до оформлення?",
+            "Якщо цей етап зрозумілий, можемо рухатися до анкети для оформлення.",
+        )
+        if state:
+            state.balance_confirm_clarify_count = idx + 1
+        return variants[idx % len(variants)]
+    idx = int((state.schedule_confirm_clarify_count if state else 0) or 0)
+    variants = (
+        MID_FUNNEL_YES_CLOSE_TEXT,
+        "Підкажіть, будь ласка, чи після пояснення все зрозуміло по вакансії, графіку, виплатах і специфіці роботи?",
+        "Якщо додаткових питань немає і умови Вам підходять, можемо перейти до наступного кроку.",
+    )
+    if state:
+        state.schedule_confirm_clarify_count = idx + 1
+    return variants[idx % len(variants)]
+
+
+def combine_answer_with_return_prompt(answer_text: str, return_prompt: str) -> str:
+    answer = (answer_text or "").strip()
+    prompt = (return_prompt or "").strip()
+    if answer and prompt:
+        return f"{answer}\n\n{prompt}"
+    return answer or prompt
 
 
 def is_stop_phrase(text: str) -> bool:
@@ -1291,6 +1450,10 @@ def _company_intro_recap(signal_text: str) -> str:
         return "Так, робота повністю віддалена. "
     if "пк" in t or "ноут" in t:
         return "Так, для роботи потрібен ПК або ноутбук. "
+    if "телефон" in t:
+        return "З телефона цей формат не підійде: потрібен саме ПК або ноутбук. "
+    if "ставк" in t or "фикс" in t or "фікс" in t:
+        return "Коротко нагадаю: у перший місяць є гарантована ставка 300 $ плюс відсотки та бонуси. "
     if "що саме" in t or "що робити" in t:
         return "Коротко відповів по задачах у роботі. "
     return ""
@@ -1310,11 +1473,11 @@ def _shift_recap(signal_text: str) -> str:
 def _balance_recap(signal_text: str) -> str:
     t = normalize_text(signal_text)
     if "ставк" in t:
-        return "Коротко нагадаю: тут немає фіксованої ставки, дохід формується як відсоток від балансу. "
+        return "Коротко нагадаю: у перший місяць є гарантована ставка 300 $, а далі дохід формується з відсотків і бонусів. "
     if "виплат" in t or "выплат" in t:
-        return "Коротко нагадаю: виплати привʼязані до проходження стартового етапу та робочого процесу. "
+        return "Коротко нагадаю: аванс можливий у будь-який день, а повний розрахунок проходить з 8 по 15 число. "
     if "навчан" in t or "обучен" in t:
-        return "Коротко нагадаю: навчання для кандидата безкоштовне і проходить онлайн. "
+        return "Коротко нагадаю: навчання займає кілька годин, після нього йде стажування з адміністратором. "
     return "Коротко пояснив по доходу та навчанню. "
 
 
@@ -1515,6 +1678,9 @@ def classify_refusal_reason_local(text: str, step_name: Optional[str] = None) ->
             "кримінал",
             "криминал",
             "онліфанс",
+            "онлі фанс",
+            "онлифанс",
+            "онли фанс",
             "onlyfans",
             "амораль",
             "неетично",
@@ -1530,6 +1696,8 @@ def classify_refusal_reason_local(text: str, step_name: Optional[str] = None) ->
             "ви бот",
             "вы бот",
             "развод",
+            "разводить",
+            "лох",
             "лохотрон",
             "мошен",
             "скам",
@@ -1542,7 +1710,26 @@ def classify_refusal_reason_local(text: str, step_name: Optional[str] = None) ->
         )
     ):
         return REFUSAL_REASON_TRUST_SCAM
-    if any(marker in t for marker in ("без ноут", "без пк", "немає пк", "немає ноут", "нет пк", "нет ноут", "нету пк")):
+    if any(
+        marker in t
+        for marker in (
+            "без ноут",
+            "без пк",
+            "немає пк",
+            "немає ноут",
+            "нет пк",
+            "нет ноут",
+            "нету пк",
+            "тільки телефон",
+            "только телефон",
+            "лише телефон",
+            "у меня телефон",
+            "в мене телефон",
+            "у мене телефон",
+            "з телефона",
+            "с телефона",
+        )
+    ):
         return REFUSAL_REASON_NO_PC
     if any(marker in t for marker in ("за віком", "по возрасту", "по віку", "замалий вік", "маленький возраст")):
         return REFUSAL_REASON_AGE
@@ -1561,14 +1748,34 @@ def classify_refusal_reason_local(text: str, step_name: Optional[str] = None) ->
             "8-15",
             "раз на місяць",
             "раз в месяц",
+            "не щотижня",
+            "не еженедельно",
         )
     ):
         return REFUSAL_REASON_SALARY_CADENCE
-    if any(marker in t for marker in ("без ставки", "без ставк", "процент", "відсот", "процента", "баланс", "оплат", "зарплат", "дохід", "доход")):
+    if any(
+        marker in t
+        for marker in (
+            "без ставки",
+            "без ставк",
+            "фиксирован",
+            "фіксован",
+            "процент",
+            "відсот",
+            "процента",
+            "баланс",
+            "оплат",
+            "зарплат",
+            "дохід",
+            "доход",
+        )
+    ):
         return REFUSAL_REASON_INCOME_MODEL
     if any(marker in t for marker in ("8 год", "8-год", "8 годин", "full time", "фул тайм", "повний день", "полный день", "не зможу 8")):
         return REFUSAL_REASON_FULL_TIME
     if any(marker in t for marker in ("графік", "график", "зміна", "смена", "нічна", "денна", "ночная", "дневная", "вихідн", "выходн")):
+        return REFUSAL_REASON_SCHEDULE
+    if step in {STEP_SCHEDULE_SHIFT_WAIT, STEP_SCHEDULE_CONFIRM} and any(marker in t for marker in ("час", "часу", "время", "времени")):
         return REFUSAL_REASON_SCHEDULE
     if any(
         marker in t
@@ -5114,13 +5321,58 @@ async def main():
         print(f"SPECIAL_START peer={peer_id} source={start_source} reason={special_reason}")
         return True
 
+    async def send_v2_onboarding_sequence(sender: User) -> bool:
+        messages = (
+            (SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT),
+            (COMPANY_OVERVIEW_TEXT, STEP_COMPANY_INTRO),
+            (EARNINGS_OVERVIEW_TEXT, STEP_COMPANY_INTRO),
+            (SCHEDULE_OVERVIEW_TEXT, STEP_COMPANY_INTRO),
+            (PC_REQUIREMENT_TEXT, STEP_COMPANY_INTRO),
+            (INITIAL_INTEREST_PROMPT_TEXT, STEP_COMPANY_INTRO),
+        )
+        sent_any = False
+        for idx, (message_text, step_snapshot) in enumerate(messages):
+            ok = await send_v2_message(sender, message_text, step_snapshot, status=STATUS_INTRO_SENT)
+            sent_any = sent_any or ok
+            if BOT_REPLY_DELAY_SEC > 0 and idx < len(messages) - 1:
+                await asyncio.sleep(BOT_REPLY_DELAY_SEC)
+        return sent_any
+
+    async def send_v2_onboarding_tail(sender: User) -> bool:
+        messages = (
+            COMPANY_OVERVIEW_TEXT,
+            EARNINGS_OVERVIEW_TEXT,
+            SCHEDULE_OVERVIEW_TEXT,
+            PC_REQUIREMENT_TEXT,
+            INITIAL_INTEREST_PROMPT_TEXT,
+        )
+        sent_any = False
+        for idx, message_text in enumerate(messages):
+            ok = await send_v2_message(sender, message_text, STEP_COMPANY_INTRO, status=STATUS_INTRO_SENT)
+            sent_any = sent_any or ok
+            if BOT_REPLY_DELAY_SEC > 0 and idx < len(messages) - 1:
+                await asyncio.sleep(BOT_REPLY_DELAY_SEC)
+        return sent_any
+
+    async def send_process_explainer(sender: User, state: PeerRuntimeState) -> bool:
+        await send_v2_message(sender, PROCESS_EXPLAINER_TEXT, STEP_BALANCE_CONFIRM, status=STATUS_EARNINGS_EXPLAINED)
+        if BOT_REPLY_DELAY_SEC > 0:
+            await asyncio.sleep(BOT_REPLY_DELAY_SEC)
+        await send_v2_message(sender, PROCESS_CONFIRM_PROMPT_TEXT, STEP_BALANCE_CONFIRM, status=STATUS_EARNINGS_EXPLAINED)
+        state.flow_step = STEP_BALANCE_CONFIRM
+        state.balance_confirm_clarify_count = 0
+        state.qa_gate_active = False
+        state.qa_gate_step = ""
+        state.qa_gate_opened_at = 0.0
+        state.qa_gate_reminder_sent = False
+        arm_step_wait(state, STEP_BALANCE_CONFIRM, time.time())
+        return True
+
     async def send_form_handoff_content(sender: User, state: PeerRuntimeState) -> bool:
-        if FORM_MESSAGE_LINK:
-            ok = await dispatch_v2_content(sender, FORM_MESSAGE_LINK, STEP_FORM_FORWARD, STATUS_FORM_REQUESTED)
-            if not ok:
-                await send_v2_message(sender, FORM_TEXT, STEP_FORM_FORWARD, status=STATUS_FORM_REQUESTED)
-        else:
-            await send_v2_message(sender, FORM_TEXT, STEP_FORM_FORWARD, status=STATUS_FORM_REQUESTED)
+        await send_v2_message(sender, FORM_TRANSITION_TEXT, STEP_FORM_FORWARD, status=STATUS_FORM_REQUESTED)
+        if BOT_REPLY_DELAY_SEC > 0:
+            await asyncio.sleep(BOT_REPLY_DELAY_SEC)
+        await send_v2_message(sender, V2_FORM_TEXT, STEP_FORM_FORWARD, status=STATUS_FORM_REQUESTED)
         state.flow_step = STEP_FORM_FORWARD
         state.test_answers = []
         state.test_help_sent = False
@@ -5131,6 +5383,10 @@ async def main():
         state.form_waiting_photo = False
         state.form_prompted_at = 0.0
         state.form_photo_reminder_sent = False
+        state.form_text_received = False
+        state.form_photo_received = False
+        state.form_text_received_at = 0.0
+        state.form_photo_received_at = 0.0
         arm_step_wait(state, STEP_FORM_FORWARD, time.time())
         return True
 
@@ -5218,12 +5474,11 @@ async def main():
         arm_step_wait(v2_state, STEP_COMPANY_INTRO, time.time())
         v2_runtime.set(v2_state)
         try:
-            intro_ok = await send_v2_message(entity, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status=STATUS_INTRO_SENT)
-            q1_ok = await send_v2_message(entity, COMPANY_INTRO_TEXT, STEP_COMPANY_INTRO, status=STATUS_INTRO_SENT)
+            sent_ok = await send_v2_onboarding_sequence(entity)
         except Exception as err:
             print(f"⚠️ ONBOARDING_SEND_FAIL peer={peer_id} source={start_source} err={type(err).__name__}: {err}")
             return False
-        if not (intro_ok or q1_ok):
+        if not sent_ok:
             print(f"⚠️ ONBOARDING_SEND_FAIL peer={peer_id} source={start_source} err=no_messages_sent")
             return False
         if not IS_ALT_ACCOUNT:
@@ -5378,6 +5633,8 @@ async def main():
         question_text: str,
         fallback_text: str,
     ) -> str:
+        if is_document_purpose_question(question_text):
+            return DOCUMENT_PURPOSE_REPLY_TEXT
         trained = await resolve_trained_answer(sender, step_name, question_text)
         if trained:
             return trained
@@ -5414,17 +5671,135 @@ async def main():
         step_name = state.flow_step or STEP_SCREENING_WAIT
         now_ts = time.time()
         remember_candidate_signal(state, step_name, text, intent_name=intent_name)
-        if step_name == STEP_FORM_FORWARD and state.form_waiting_photo:
-            state.form_waiting_photo = False
-            state.form_prompted_at = 0.0
-            state.form_photo_reminder_sent = False
-            v2_runtime.set(state)
         if step_name in WAIT_STEP_SET:
             arm_step_wait(state, step_name, now_ts)
         voice_decline = step_name == STEP_COMPANY_INTRO and is_voice_decline(text)
         shift_selected = bool((state.shift_choice or "").strip())
         voice_not_listened = step_name == STEP_VOICE_WAIT and is_voice_not_listened_reply(text)
         balance_interest_question = intent_name == "question" and is_balance_interest_question(text)
+
+        if is_hard_stop_message(text) and not voice_not_listened:
+            refusal = await classify_candidate_refusal(sender, text, step_name)
+            await send_v2_message(sender, STOP_REPLY_TEXT, step_name, status=AUTO_STOP_STATUS)
+            record_refusal_today(
+                sender,
+                AUTO_STOP_STATUS,
+                refusal.get("reason", REFUSAL_REASON_OTHER),
+                refusal.get("raw_text", ""),
+                step_name=step_name,
+                event_type_override="REFUSAL_CLASSIFIED",
+            )
+            state.auto_mode = "OFF"
+            state.paused = True
+            paused_peers.add(sender.id)
+            enabled_peers.discard(sender.id)
+            state.qa_gate_active = False
+            state.qa_gate_step = ""
+            state.qa_gate_opened_at = 0.0
+            state.qa_gate_reminder_sent = False
+            clear_step_wait(state)
+            v2_runtime.set(state)
+            return True
+
+        if step_name in {STEP_VOICE_WAIT, STEP_SCHEDULE_SHIFT_WAIT, STEP_SCHEDULE_CONFIRM, STEP_TEST_REVIEW, STEP_PROOF_FORWARD}:
+            state.flow_step = STEP_BALANCE_CONFIRM
+            await send_process_explainer(sender, state)
+            v2_runtime.set(state)
+            return True
+
+        if step_name in {STEP_COMPANY_INTRO, STEP_BALANCE_CONFIRM} and intent_name == "question":
+            answer_text = await answer_with_training_or_faq(
+                sender,
+                step_name,
+                text,
+                "Уточню коротко: якщо питання стосується умов, графіка, виплат або оформлення, поясню по суті.",
+            )
+            return_prompt = onboarding_question_return_prompt(state, step_name)
+            final_answer = combine_answer_with_return_prompt(answer_text, return_prompt)
+            await send_v2_message(
+                sender,
+                final_answer,
+                step_name,
+                status="знак питання",
+                delay_before=QUESTION_RESPONSE_DELAY_SEC,
+            )
+            state.qa_gate_active = False
+            state.qa_gate_step = ""
+            state.qa_gate_opened_at = 0.0
+            state.qa_gate_reminder_sent = False
+            arm_step_wait(state, step_name, time.time())
+            v2_runtime.set(state)
+            enqueue_faq_question(sender.id, step_name, text, final_answer)
+            return True
+
+        if step_name == STEP_COMPANY_INTRO:
+            if intent_name == "ack_continue" or is_yes_reply(text) or is_neutral_ack(text):
+                await send_process_explainer(sender, state)
+                v2_runtime.set(state)
+                return True
+            await send_v2_message(sender, onboarding_question_return_prompt(state, STEP_COMPANY_INTRO), STEP_COMPANY_INTRO, status=STATUS_INTRO_SENT)
+            arm_step_wait(state, STEP_COMPANY_INTRO, time.time())
+            v2_runtime.set(state)
+            return True
+
+        if step_name == STEP_BALANCE_CONFIRM:
+            if intent_name == "ack_continue" or is_yes_reply(text) or is_neutral_ack(text):
+                sent_form = await send_form_handoff_content(sender, state)
+                if sent_form:
+                    v2_runtime.set(state)
+                return True
+            await send_v2_message(sender, onboarding_question_return_prompt(state, STEP_BALANCE_CONFIRM), STEP_BALANCE_CONFIRM, status=STATUS_EARNINGS_EXPLAINED)
+            arm_step_wait(state, STEP_BALANCE_CONFIRM, time.time())
+            v2_runtime.set(state)
+            return True
+
+        if step_name == STEP_FORM_FORWARD:
+            text_is_form = bool(text.strip()) and is_filled_form_text(text) and not message_has_question(text)
+            if text.strip():
+                enqueue_candidate_note(sender, text)
+            if has_photo:
+                state.form_photo_received = True
+                state.form_photo_received_at = time.time()
+            if text_is_form:
+                state.form_text_received = True
+                state.form_text_received_at = time.time()
+            state.form_waiting_photo = bool(state.form_text_received and not state.form_photo_received)
+            if state.form_text_received and state.form_photo_received:
+                queue_today_upsert(
+                    peer_id=sender.id,
+                    name=getattr(sender, "first_name", "") or "Unknown",
+                    username=getattr(sender, "username", "") or "",
+                    chat_link=build_chat_link_app(sender, sender.id),
+                    status=STATUS_FORM_RECEIVED,
+                    step_snapshot=STEP_FORM_FORWARD,
+                    tech_step=STEP_FORM_FORWARD,
+                )
+                state.flow_step = STEP_HANDOFF
+                state.form_waiting_photo = False
+                state.form_prompted_at = 0.0
+                state.form_photo_reminder_sent = False
+                clear_step_wait(state)
+                v2_runtime.set(state)
+                return True
+            if intent_name == "question" or is_document_purpose_question(text):
+                answer_text = await answer_with_training_or_faq(sender, STEP_FORM_FORWARD, text, DOCUMENT_PURPOSE_REPLY_TEXT)
+                if state.form_text_received and not state.form_photo_received:
+                    answer_text = combine_answer_with_return_prompt(answer_text, "Коли буде зручно, надішліть, будь ласка, документ або скрін з Дії.")
+                elif state.form_photo_received and not state.form_text_received:
+                    answer_text = combine_answer_with_return_prompt(answer_text, "Також очікую анкету з контактами, містом і обраною зміною.")
+                await send_v2_message(sender, answer_text, STEP_FORM_FORWARD, status="знак питання", delay_before=QUESTION_RESPONSE_DELAY_SEC)
+                enqueue_faq_question(sender.id, STEP_FORM_FORWARD, text, answer_text)
+            elif state.form_text_received and not state.form_photo_received:
+                state.form_prompted_at = time.time()
+                state.form_photo_reminder_sent = False
+            elif state.form_photo_received and not state.form_text_received:
+                state.form_prompted_at = time.time()
+                state.form_photo_reminder_sent = False
+            else:
+                await send_v2_message(sender, FORM_LOCK_REPLY_TEXT, STEP_FORM_FORWARD, status=STATUS_FORM_REQUESTED)
+            arm_step_wait(state, STEP_FORM_FORWARD, time.time())
+            v2_runtime.set(state)
+            return True
 
         if should_replace_voice_with_text(step_name, text):
             recap_blocks = build_voice_text_recap_blocks()
@@ -5915,8 +6290,7 @@ async def main():
             )
             arm_step_wait(seeded_state, STEP_COMPANY_INTRO, time.time())
             v2_runtime.set(seeded_state)
-            await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status=STATUS_INTRO_SENT)
-            await send_v2_message(sender, COMPANY_INTRO_TEXT, STEP_COMPANY_INTRO, status=STATUS_INTRO_SENT)
+            await send_v2_onboarding_sequence(sender)
             print(f"✅ V2 auto-enrolled peer={peer_id}")
             return True
         v2_state = v2_runtime.get(peer_id)
@@ -6000,7 +6374,7 @@ async def main():
                 v2_runtime.set(current_v2)
                 if not IS_ALT_ACCOUNT:
                     owner_store.set_owner(entity.id, PRIMARY_ACCOUNT_KEY, "manual_intro", tz)
-                await send_v2_message(entity, COMPANY_INTRO_TEXT, STEP_COMPANY_INTRO, status=STATUS_INTRO_SENT)
+                await send_v2_onboarding_tail(entity)
                 print(f"MANUAL_INTRO_AUTOSTART peer={entity.id} step={current_v2.flow_step}")
             elif text_lower in START_COMMANDS:
                 recover_source = "v2"
@@ -6529,8 +6903,7 @@ async def main():
             )
             arm_step_wait(v2_state, STEP_COMPANY_INTRO, time.time())
             v2_runtime.set(v2_state)
-            await send_v2_message(sender, SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT, status=STATUS_INTRO_SENT)
-            await send_v2_message(sender, COMPANY_INTRO_TEXT, STEP_COMPANY_INTRO, status=STATUS_INTRO_SENT)
+            await send_v2_onboarding_sequence(sender)
             print(f"✅ START8 switched to V2 flow peer={peer_id}")
             return
         is_test = is_test_user(sender)
@@ -6680,12 +7053,31 @@ async def main():
                             continue
                         if is_paused(entity):
                             continue
-                        if (v2s.flow_step or "").strip() == STEP_FORM_FORWARD and v2s.form_waiting_photo:
-                            v2s.form_waiting_photo = False
-                            v2s.form_prompted_at = 0.0
-                            v2s.form_photo_reminder_sent = False
-                            v2_runtime.set(v2s)
-                            continue
+                        if (v2s.flow_step or "").strip() == STEP_FORM_FORWARD:
+                            missing_photo = bool(v2s.form_text_received and not v2s.form_photo_received)
+                            missing_text = bool(v2s.form_photo_received and not v2s.form_text_received)
+                            if missing_photo or missing_text:
+                                prompted_at = float(v2s.form_prompted_at or 0.0)
+                                if prompted_at <= 0:
+                                    v2s.form_prompted_at = time.time()
+                                    v2_runtime.set(v2s)
+                                    continue
+                                if (
+                                    not bool(v2s.form_photo_reminder_sent)
+                                    and time.time() - prompted_at >= max(0.0, FORM_PHOTO_REMINDER_DELAY_SEC)
+                                ):
+                                    reminder_text = FORM_MISSING_PHOTO_TEXT if missing_photo else FORM_MISSING_TEXT_TEXT
+                                    await send_v2_message(entity, reminder_text, STEP_FORM_FORWARD, status=STATUS_FORM_REQUESTED)
+                                    v2s.form_photo_reminder_sent = True
+                                    v2s.form_waiting_photo = missing_photo
+                                    v2_runtime.set(v2s)
+                                    continue
+                            elif v2s.form_waiting_photo:
+                                v2s.form_waiting_photo = False
+                                v2s.form_prompted_at = 0.0
+                                v2s.form_photo_reminder_sent = False
+                                v2_runtime.set(v2s)
+                                continue
                         current_step = (v2s.flow_step or "").strip()
                         if current_step not in WAIT_STEP_SET:
                             continue
