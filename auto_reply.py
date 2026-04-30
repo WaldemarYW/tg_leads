@@ -1057,6 +1057,18 @@ def combine_answer_with_return_prompt(answer_text: str, return_prompt: str) -> s
     return answer or prompt
 
 
+def v2_incoming_buffer_reason(peer_id: int, sending_peers, processing_peers) -> str:
+    if int(peer_id or 0) in sending_peers:
+        return "send_lock"
+    if int(peer_id or 0) in processing_peers:
+        return "processing"
+    return ""
+
+
+def v2_question_response_messages(answer_text: str, return_prompt: str) -> Tuple[str, str]:
+    return (str(answer_text or "").strip(), str(return_prompt or "").strip())
+
+
 def is_stop_phrase(text: str) -> bool:
     return is_stop_phrase_impl(text)
 
@@ -4678,6 +4690,7 @@ async def main():
         print("⚠️ REGISTRATION_DRIVE_FOLDER_ID не задано: документи не будуть завантажуватись у Drive")
     client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
     processing_peers = set()
+    v2_sending_peers = set()
     buffered_incoming: Dict[int, deque] = {}
     restart_generation: Dict[int, int] = {}
     paused_peers = set()
@@ -5321,74 +5334,138 @@ async def main():
         print(f"SPECIAL_START peer={peer_id} source={start_source} reason={special_reason}")
         return True
 
+    def buffer_v2_incoming(peer_id: int, text: str, has_photo: bool, reason: str) -> None:
+        bucket = buffered_incoming.setdefault(int(peer_id), deque())
+        bucket.append((int(restart_generation.get(peer_id, 0)), text, bool(has_photo)))
+        print(f"BUFFER account={ACCOUNT_KEY} peer={peer_id} reason={reason} size={len(bucket)}")
+
+    async def drain_v2_buffered_incoming(entity: User) -> None:
+        peer_id = int(getattr(entity, "id", 0) or 0)
+        if not peer_id or peer_id in v2_sending_peers or peer_id in processing_peers:
+            return
+        while True:
+            queued = buffered_incoming.get(peer_id)
+            if not queued:
+                break
+            item = queued.popleft()
+            if not queued:
+                buffered_incoming.pop(peer_id, None)
+            if isinstance(item, tuple):
+                if len(item) >= 3:
+                    msg_generation, next_text, next_has_photo = item[0], item[1], bool(item[2])
+                else:
+                    msg_generation, next_text = item
+                    next_has_photo = False
+            else:
+                msg_generation, next_text = int(restart_generation.get(peer_id, 0)), str(item)
+                next_has_photo = False
+            if int(msg_generation) != int(restart_generation.get(peer_id, 0)):
+                continue
+            if peer_id in v2_sending_peers:
+                buffer_v2_incoming(peer_id, str(next_text), bool(next_has_photo), "send_lock_requeue")
+                break
+            processing_peers.add(peer_id)
+            try:
+                await process_v2_turn(entity, str(next_text), has_photo=bool(next_has_photo))
+                last_reply_at[peer_id] = time.time()
+            except Exception as err:
+                print(f"⚠️ Buffered V2 process error peer={peer_id}: {type(err).__name__}: {err}")
+            finally:
+                processing_peers.discard(peer_id)
+
+    async def run_v2_send_batch(sender: User, expected_step: str, send_batch) -> bool:
+        peer_id = int(getattr(sender, "id", 0) or 0)
+        if peer_id:
+            v2_sending_peers.add(peer_id)
+        try:
+            return bool(await send_batch())
+        finally:
+            if peer_id:
+                v2_sending_peers.discard(peer_id)
+                current = v2_runtime.get(peer_id)
+                if expected_step:
+                    current.flow_step = expected_step
+                    v2_runtime.set(current)
+                await drain_v2_buffered_incoming(sender)
+
     async def send_v2_onboarding_sequence(sender: User) -> bool:
-        messages = (
-            (SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT),
-            (COMPANY_OVERVIEW_TEXT, STEP_COMPANY_INTRO),
-            (EARNINGS_OVERVIEW_TEXT, STEP_COMPANY_INTRO),
-            (SCHEDULE_OVERVIEW_TEXT, STEP_COMPANY_INTRO),
-            (PC_REQUIREMENT_TEXT, STEP_COMPANY_INTRO),
-            (INITIAL_INTEREST_PROMPT_TEXT, STEP_COMPANY_INTRO),
-        )
-        sent_any = False
-        for idx, (message_text, step_snapshot) in enumerate(messages):
-            ok = await send_v2_message(sender, message_text, step_snapshot, status=STATUS_INTRO_SENT)
-            sent_any = sent_any or ok
-            if BOT_REPLY_DELAY_SEC > 0 and idx < len(messages) - 1:
-                await asyncio.sleep(BOT_REPLY_DELAY_SEC)
-        return sent_any
+        async def _send():
+            messages = (
+                (SCREENING_INTRO_TEXT, STEP_SCREENING_WAIT),
+                (COMPANY_OVERVIEW_TEXT, STEP_COMPANY_INTRO),
+                (EARNINGS_OVERVIEW_TEXT, STEP_COMPANY_INTRO),
+                (SCHEDULE_OVERVIEW_TEXT, STEP_COMPANY_INTRO),
+                (PC_REQUIREMENT_TEXT, STEP_COMPANY_INTRO),
+                (INITIAL_INTEREST_PROMPT_TEXT, STEP_COMPANY_INTRO),
+            )
+            sent_any = False
+            for idx, (message_text, step_snapshot) in enumerate(messages):
+                ok = await send_v2_message(sender, message_text, step_snapshot, status=STATUS_INTRO_SENT)
+                sent_any = sent_any or ok
+                if BOT_REPLY_DELAY_SEC > 0 and idx < len(messages) - 1:
+                    await asyncio.sleep(BOT_REPLY_DELAY_SEC)
+            return sent_any
+        return await run_v2_send_batch(sender, STEP_COMPANY_INTRO, _send)
 
     async def send_v2_onboarding_tail(sender: User) -> bool:
-        messages = (
-            COMPANY_OVERVIEW_TEXT,
-            EARNINGS_OVERVIEW_TEXT,
-            SCHEDULE_OVERVIEW_TEXT,
-            PC_REQUIREMENT_TEXT,
-            INITIAL_INTEREST_PROMPT_TEXT,
-        )
-        sent_any = False
-        for idx, message_text in enumerate(messages):
-            ok = await send_v2_message(sender, message_text, STEP_COMPANY_INTRO, status=STATUS_INTRO_SENT)
-            sent_any = sent_any or ok
-            if BOT_REPLY_DELAY_SEC > 0 and idx < len(messages) - 1:
-                await asyncio.sleep(BOT_REPLY_DELAY_SEC)
-        return sent_any
+        async def _send():
+            messages = (
+                COMPANY_OVERVIEW_TEXT,
+                EARNINGS_OVERVIEW_TEXT,
+                SCHEDULE_OVERVIEW_TEXT,
+                PC_REQUIREMENT_TEXT,
+                INITIAL_INTEREST_PROMPT_TEXT,
+            )
+            sent_any = False
+            for idx, message_text in enumerate(messages):
+                ok = await send_v2_message(sender, message_text, STEP_COMPANY_INTRO, status=STATUS_INTRO_SENT)
+                sent_any = sent_any or ok
+                if BOT_REPLY_DELAY_SEC > 0 and idx < len(messages) - 1:
+                    await asyncio.sleep(BOT_REPLY_DELAY_SEC)
+            return sent_any
+        return await run_v2_send_batch(sender, STEP_COMPANY_INTRO, _send)
 
     async def send_process_explainer(sender: User, state: PeerRuntimeState) -> bool:
-        await send_v2_message(sender, PROCESS_EXPLAINER_TEXT, STEP_BALANCE_CONFIRM, status=STATUS_EARNINGS_EXPLAINED)
-        if BOT_REPLY_DELAY_SEC > 0:
-            await asyncio.sleep(BOT_REPLY_DELAY_SEC)
-        await send_v2_message(sender, PROCESS_CONFIRM_PROMPT_TEXT, STEP_BALANCE_CONFIRM, status=STATUS_EARNINGS_EXPLAINED)
-        state.flow_step = STEP_BALANCE_CONFIRM
-        state.balance_confirm_clarify_count = 0
-        state.qa_gate_active = False
-        state.qa_gate_step = ""
-        state.qa_gate_opened_at = 0.0
-        state.qa_gate_reminder_sent = False
-        arm_step_wait(state, STEP_BALANCE_CONFIRM, time.time())
-        return True
+        async def _send():
+            await send_v2_message(sender, PROCESS_EXPLAINER_TEXT, STEP_BALANCE_CONFIRM, status=STATUS_EARNINGS_EXPLAINED)
+            if BOT_REPLY_DELAY_SEC > 0:
+                await asyncio.sleep(BOT_REPLY_DELAY_SEC)
+            await send_v2_message(sender, PROCESS_CONFIRM_PROMPT_TEXT, STEP_BALANCE_CONFIRM, status=STATUS_EARNINGS_EXPLAINED)
+            state.flow_step = STEP_BALANCE_CONFIRM
+            state.balance_confirm_clarify_count = 0
+            state.qa_gate_active = False
+            state.qa_gate_step = ""
+            state.qa_gate_opened_at = 0.0
+            state.qa_gate_reminder_sent = False
+            arm_step_wait(state, STEP_BALANCE_CONFIRM, time.time())
+            v2_runtime.set(state)
+            return True
+        return await run_v2_send_batch(sender, STEP_BALANCE_CONFIRM, _send)
 
     async def send_form_handoff_content(sender: User, state: PeerRuntimeState) -> bool:
-        await send_v2_message(sender, FORM_TRANSITION_TEXT, STEP_FORM_FORWARD, status=STATUS_FORM_REQUESTED)
-        if BOT_REPLY_DELAY_SEC > 0:
-            await asyncio.sleep(BOT_REPLY_DELAY_SEC)
-        await send_v2_message(sender, V2_FORM_TEXT, STEP_FORM_FORWARD, status=STATUS_FORM_REQUESTED)
-        state.flow_step = STEP_FORM_FORWARD
-        state.test_answers = []
-        state.test_help_sent = False
-        state.test_prompted_at = 0.0
-        state.test_message_count = 0
-        state.test_last_message = ""
-        state.test_ready_clarify_count = 0
-        state.form_waiting_photo = False
-        state.form_prompted_at = 0.0
-        state.form_photo_reminder_sent = False
-        state.form_text_received = False
-        state.form_photo_received = False
-        state.form_text_received_at = 0.0
-        state.form_photo_received_at = 0.0
-        arm_step_wait(state, STEP_FORM_FORWARD, time.time())
-        return True
+        async def _send():
+            await send_v2_message(sender, FORM_TRANSITION_TEXT, STEP_FORM_FORWARD, status=STATUS_FORM_REQUESTED)
+            if BOT_REPLY_DELAY_SEC > 0:
+                await asyncio.sleep(BOT_REPLY_DELAY_SEC)
+            await send_v2_message(sender, V2_FORM_TEXT, STEP_FORM_FORWARD, status=STATUS_FORM_REQUESTED)
+            state.flow_step = STEP_FORM_FORWARD
+            state.test_answers = []
+            state.test_help_sent = False
+            state.test_prompted_at = 0.0
+            state.test_message_count = 0
+            state.test_last_message = ""
+            state.test_ready_clarify_count = 0
+            state.form_waiting_photo = False
+            state.form_prompted_at = 0.0
+            state.form_photo_reminder_sent = False
+            state.form_text_received = False
+            state.form_photo_received = False
+            state.form_text_received_at = 0.0
+            state.form_photo_received_at = 0.0
+            arm_step_wait(state, STEP_FORM_FORWARD, time.time())
+            v2_runtime.set(state)
+            return True
+        return await run_v2_send_batch(sender, STEP_FORM_FORWARD, _send)
 
     async def send_earnings_training_explainer(
         sender: User,
@@ -5715,13 +5792,19 @@ async def main():
                 "Уточню коротко: якщо питання стосується умов, графіка, виплат або оформлення, поясню по суті.",
             )
             return_prompt = onboarding_question_return_prompt(state, step_name)
-            final_answer = combine_answer_with_return_prompt(answer_text, return_prompt)
+            answer_message, return_message = v2_question_response_messages(answer_text, return_prompt)
             await send_v2_message(
                 sender,
-                final_answer,
+                answer_message,
                 step_name,
                 status="знак питання",
                 delay_before=QUESTION_RESPONSE_DELAY_SEC,
+            )
+            await send_v2_message(
+                sender,
+                return_message,
+                step_name,
+                status=(STATUS_EARNINGS_EXPLAINED if step_name == STEP_BALANCE_CONFIRM else STATUS_INTRO_SENT),
             )
             state.qa_gate_active = False
             state.qa_gate_step = ""
@@ -5729,7 +5812,7 @@ async def main():
             state.qa_gate_reminder_sent = False
             arm_step_wait(state, step_name, time.time())
             v2_runtime.set(state)
-            enqueue_faq_question(sender.id, step_name, text, final_answer)
+            enqueue_faq_question(sender.id, step_name, text, answer_message)
             return True
 
         if step_name == STEP_COMPANY_INTRO:
@@ -6921,11 +7004,12 @@ async def main():
                     print(f"FILTER account={ACCOUNT_KEY} peer={peer_id} reason=not_enabled")
                     return
                 print(f"✅ Test user bypassed enabled check: {peer_id}")
+        v2_buffer_reason = v2_incoming_buffer_reason(peer_id, v2_sending_peers, processing_peers) if FLOW_V2_ENABLED else ""
+        if v2_buffer_reason:
+            buffer_v2_incoming(peer_id, text, incoming_has_photo, v2_buffer_reason)
+            return
         if peer_id in processing_peers:
             if FLOW_V2_ENABLED:
-                bucket = buffered_incoming.setdefault(peer_id, deque())
-                bucket.append((int(restart_generation.get(peer_id, 0)), text, incoming_has_photo))
-                print(f"BUFFER account={ACCOUNT_KEY} peer={peer_id} size={len(bucket)}")
                 return
             if not is_test:
                 print(f"FILTER account={ACCOUNT_KEY} peer={peer_id} reason=processing")

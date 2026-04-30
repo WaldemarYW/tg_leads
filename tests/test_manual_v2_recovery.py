@@ -98,6 +98,20 @@ class ManualV2RecoveryTests(unittest.TestCase):
         self.assertTrue(auto_reply.is_document_purpose_question("Навіщо потрібен паспорт або Дія?"))
         self.assertIn("договором ГПД", auto_reply.DOCUMENT_PURPOSE_REPLY_TEXT)
 
+    def test_v2_incoming_buffer_reason_prioritizes_send_lock(self):
+        self.assertEqual(auto_reply.v2_incoming_buffer_reason(10, {10}, set()), "send_lock")
+        self.assertEqual(auto_reply.v2_incoming_buffer_reason(10, set(), {10}), "processing")
+        self.assertEqual(auto_reply.v2_incoming_buffer_reason(10, set(), set()), "")
+
+    def test_v2_question_response_messages_are_separate(self):
+        answer, prompt = auto_reply.v2_question_response_messages(
+            "Ні, це не шлюбна агенція.",
+            auto_reply.MID_FUNNEL_YES_CLOSE_TEXT,
+        )
+        self.assertIn("шлюбна агенція", answer)
+        self.assertNotIn("Чудово. Скажіть", answer)
+        self.assertIn("Чудово. Скажіть", prompt)
+
     def test_runtime_tracks_form_text_and_photo_separately(self):
         state = PeerRuntimeState(peer_id=10)
         self.assertFalse(state.form_text_received)
