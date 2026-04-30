@@ -109,8 +109,9 @@ class ManualV2RecoveryTests(unittest.TestCase):
             auto_reply.MID_FUNNEL_YES_CLOSE_TEXT,
         )
         self.assertIn("шлюбна агенція", answer)
-        self.assertNotIn("Чудово. Скажіть", answer)
-        self.assertIn("Чудово. Скажіть", prompt)
+        self.assertNotIn("Чудово", answer)
+        self.assertNotIn("Чудово", prompt)
+        self.assertIn("Скажіть, будь ласка", prompt)
 
     def test_redundant_plus_after_v2_start_is_ignored_only_on_intro(self):
         self.assertTrue(auto_reply.is_v2_redundant_plus_after_start("+", auto_reply.STEP_COMPANY_INTRO))
