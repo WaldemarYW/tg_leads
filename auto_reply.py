@@ -1069,6 +1069,10 @@ def v2_question_response_messages(answer_text: str, return_prompt: str) -> Tuple
     return (str(answer_text or "").strip(), str(return_prompt or "").strip())
 
 
+def is_v2_redundant_plus_after_start(text: str, step_name: str) -> bool:
+    return is_plus_chat_start(text) and (step_name or "").strip() == STEP_COMPANY_INTRO
+
+
 def is_stop_phrase(text: str) -> bool:
     return is_stop_phrase_impl(text)
 
@@ -6377,6 +6381,9 @@ async def main():
             print(f"✅ V2 auto-enrolled peer={peer_id}")
             return True
         v2_state = v2_runtime.get(peer_id)
+        if is_v2_redundant_plus_after_start(text, v2_state.flow_step):
+            print(f"V2_REDUNDANT_PLUS_IGNORED peer={peer_id} step={v2_state.flow_step}")
+            return True
         reset_v2_followup_antispam(v2_state)
         v2_runtime.set(v2_state)
         v2_intent = await resolve_v2_intent(sender, text, v2_state.flow_step)

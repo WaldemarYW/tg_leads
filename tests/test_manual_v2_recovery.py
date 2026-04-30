@@ -112,6 +112,11 @@ class ManualV2RecoveryTests(unittest.TestCase):
         self.assertNotIn("Чудово. Скажіть", answer)
         self.assertIn("Чудово. Скажіть", prompt)
 
+    def test_redundant_plus_after_v2_start_is_ignored_only_on_intro(self):
+        self.assertTrue(auto_reply.is_v2_redundant_plus_after_start("+", auto_reply.STEP_COMPANY_INTRO))
+        self.assertFalse(auto_reply.is_v2_redundant_plus_after_start("+", auto_reply.STEP_BALANCE_CONFIRM))
+        self.assertFalse(auto_reply.is_v2_redundant_plus_after_start("так", auto_reply.STEP_COMPANY_INTRO))
+
     def test_runtime_tracks_form_text_and_photo_separately(self):
         state = PeerRuntimeState(peer_id=10)
         self.assertFalse(state.form_text_received)
