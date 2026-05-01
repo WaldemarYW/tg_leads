@@ -3,6 +3,8 @@ import re
 import sys
 import json
 import subprocess
+import threading
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Set, Optional, Tuple, Dict, List
@@ -36,6 +38,7 @@ AUTO_REPLY_PROCESS: Dict[str, subprocess.Popen] = {}
 
 AUTO_REPLY_PATH = os.environ.get("AUTO_REPLY_PATH", "auto_reply.py")
 AUTO_REPLY_CMD = os.environ.get("AUTO_REPLY_CMD")
+AUTO_REPLY_MONITOR_SEC = float(os.environ.get("AUTO_REPLY_MONITOR_SEC", "30"))
 
 
 @dataclass
@@ -272,6 +275,7 @@ def start_auto_reply(acct: AccountConfig) -> Tuple[bool, str]:
         cmd = [sys.executable, AUTO_REPLY_PATH]
     try:
         env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
         env["AUTO_REPLY_SESSION_FILE"] = acct.auto_reply_session_file
         env["TELETHON_SESSION_LOCK"] = acct.session_lock
         env["AUTO_REPLY_LOCK"] = acct.auto_reply_lock
@@ -755,5 +759,29 @@ async def handle_pending_text(message: types.Message):
         return
 
 
+def autostart_enabled_auto_replies():
+    for acct in ACCOUNTS:
+        if not is_account_enabled(acct):
+            print(f"AUTO_REPLY_AUTOSTART_SKIP account={acct.key} reason=disabled")
+            continue
+        ok, msg = start_auto_reply(acct)
+        print(f"AUTO_REPLY_AUTOSTART account={acct.key} ok={int(ok)} msg={msg}")
+
+
+def auto_reply_monitor_loop():
+    while True:
+        time.sleep(max(5.0, AUTO_REPLY_MONITOR_SEC))
+        for acct in ACCOUNTS:
+            if not is_account_enabled(acct):
+                continue
+            proc = AUTO_REPLY_PROCESS.get(acct.key)
+            if proc is not None and proc.poll() is None:
+                continue
+            ok, msg = start_auto_reply(acct)
+            print(f"AUTO_REPLY_MONITOR_RESTART account={acct.key} ok={int(ok)} msg={msg}")
+
+
 if __name__ == "__main__":
+    autostart_enabled_auto_replies()
+    threading.Thread(target=auto_reply_monitor_loop, daemon=True).start()
     executor.start_polling(dp, skip_updates=True)

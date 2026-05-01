@@ -233,7 +233,11 @@ def sheets_client(creds_path: str):
         "https://www.googleapis.com/auth/drive"
     ]
     creds = Credentials.from_service_account_file(creds_path, scopes=scopes)
-    return gspread.authorize(creds)
+    client = gspread.authorize(creds)
+    timeout = float(os.environ.get("GOOGLE_SHEETS_TIMEOUT_SEC", "30"))
+    if hasattr(client, "set_timeout"):
+        client.set_timeout(timeout)
+    return client
 
 
 def ensure_headers(ws, headers: List[str], strict: bool = True):

@@ -260,6 +260,7 @@ SHEETS_QUEUE_LOG_SEC = int(os.environ.get("AUTO_REPLY_SHEETS_QUEUE_LOG_SEC", "30
 SHEETS_QUEUE_STALL_SEC = float(
     os.environ.get("AUTO_REPLY_SHEETS_QUEUE_STALL_SEC", str(max(60, SHEETS_QUEUE_LOG_SEC * 2)))
 )
+SHEETS_QUEUE_EVENT_TIMEOUT_SEC = float(os.environ.get("AUTO_REPLY_SHEETS_QUEUE_EVENT_TIMEOUT_SEC", "60"))
 TODAY_UPSERT_DEBOUNCE_SEC = float(os.environ.get("TODAY_UPSERT_DEBOUNCE_SEC", "3.0"))
 GROUP_LEADS_LOOKUP_CACHE_TTL_SEC = int(os.environ.get("GROUP_LEADS_LOOKUP_CACHE_TTL_SEC", "60"))
 CONTINUE_DELAY_SEC = float(os.environ.get("AUTO_REPLY_CONTINUE_DELAY_SEC", "0"))
@@ -471,7 +472,7 @@ COMPANY_OVERVIEW_TEXT = (
 )
 EARNINGS_OVERVIEW_TEXT = (
     "💰 Заробіток формується у відсотках від активності користувачів:\n"
-    "• 1-й місяць — гарантована ставка 300 $ + 48% базових + 20% бонусних (за подарунки 20–27%)\n"
+    "• 1-й місяць — гарантована ставка 300 $ або 48% базових + 20% бонусних (за подарунки 20–27%)\n"
     "• З 2-го місяця — 40% базових із можливістю зростання до 45–47% за KPI + бонуси\n\n"
     "Середній дохід:\n"
     "1 місяць — 300–400 $\n"
@@ -1469,7 +1470,7 @@ def _company_intro_recap(signal_text: str) -> str:
     if "телефон" in t:
         return "З телефона цей формат не підійде: потрібен саме ПК або ноутбук. "
     if "ставк" in t or "фикс" in t or "фікс" in t:
-        return "Коротко нагадаю: у перший місяць є гарантована ставка 300 $ плюс відсотки та бонуси. "
+        return "Коротко нагадаю: у перший місяць є гарантована ставка 300 $ або 48% базових + 20% бонусних. "
     if "що саме" in t or "що робити" in t:
         return "Коротко відповів по задачах у роботі. "
     return ""
@@ -1489,7 +1490,7 @@ def _shift_recap(signal_text: str) -> str:
 def _balance_recap(signal_text: str) -> str:
     t = normalize_text(signal_text)
     if "ставк" in t:
-        return "Коротко нагадаю: у перший місяць є гарантована ставка 300 $, а далі дохід формується з відсотків і бонусів. "
+        return "Коротко нагадаю: у перший місяць є гарантована ставка 300 $ або 48% базових + 20% бонусних, а далі дохід формується з відсотків і бонусів. "
     if "виплат" in t or "выплат" in t:
         return "Коротко нагадаю: аванс можливий у будь-який день, а повний розрахунок проходить з 8 по 15 число. "
     if "навчан" in t or "обучен" in t:
@@ -6745,7 +6746,7 @@ async def main():
                 for event in batch:
                     attempts = int(event.attempts) + 1
                     try:
-                        await apply_sheet_event(event)
+                        await asyncio.wait_for(apply_sheet_event(event), timeout=max(1.0, SHEETS_QUEUE_EVENT_TIMEOUT_SEC))
                         sheets_queue.mark_done(event.id)
                         last_queue_progress_at = time.time()
                         last_queue_heartbeat_at = last_queue_progress_at
@@ -6761,6 +6762,14 @@ async def main():
                             f"SHEETS_QUEUE_FLUSH fail id={event.id} type={event.event_type} attempts={attempts} "
                             f"backoff={backoff:.1f}s err={type(err).__name__}: {err}"
                         )
+                        if status_code == 429:
+                            quota_pause = max(60.0, min(float(backoff), 180.0))
+                            print(
+                                f"SHEETS_QUEUE_QUOTA_PAUSE pid={os.getpid()} path={SHEETS_QUEUE_PATH} "
+                                f"sleep={quota_pause:.1f}s"
+                            )
+                            await asyncio.sleep(quota_pause)
+                            break
                 if (now_ts - last_queue_log_at) >= max(5, SHEETS_QUEUE_LOG_SEC):
                     stats = sheets_queue.stats(now_ts=now_ts)
                     pending = int(stats.get("pending") or 0)
@@ -7309,6 +7318,16 @@ async def main():
                                 f"idle_sec={idle_sec:.1f} heartbeat_age_sec={heartbeat_age_sec:.1f} "
                                 f"oldest_sec={oldest_fmt} next_ready_in_sec={next_ready_fmt}"
                             )
+                            if heartbeat_age_sec >= max(SHEETS_QUEUE_STALL_SEC, SHEETS_QUEUE_EVENT_TIMEOUT_SEC * 2):
+                                if sheets_task is not None and not sheets_task.done():
+                                    sheets_task.cancel()
+                                sheets_task = asyncio.create_task(sheet_flush_loop())
+                                last_queue_heartbeat_at = now_ts
+                                last_queue_progress_at = now_ts
+                                print(
+                                    f"✅ SHEETS_QUEUE_TASK_RESTART_STALLED pid={os.getpid()} "
+                                    f"path={SHEETS_QUEUE_PATH}"
+                                )
                             last_queue_stall_log_at = now_ts
                     except Exception as err:
                         print(
