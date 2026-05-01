@@ -118,6 +118,18 @@ class ManualV2RecoveryTests(unittest.TestCase):
         self.assertFalse(auto_reply.is_v2_redundant_plus_after_start("+", auto_reply.STEP_BALANCE_CONFIRM))
         self.assertFalse(auto_reply.is_v2_redundant_plus_after_start("так", auto_reply.STEP_COMPANY_INTRO))
 
+    def test_plus_first_message_does_not_restart_active_v2(self):
+        self.assertTrue(
+            auto_reply.should_ignore_plus_start_for_active_v2(
+                True,
+                True,
+                auto_reply.STEP_COMPANY_INTRO,
+            )
+        )
+        self.assertFalse(auto_reply.should_ignore_plus_start_for_active_v2(True, False, auto_reply.STEP_COMPANY_INTRO))
+        self.assertFalse(auto_reply.should_ignore_plus_start_for_active_v2(False, True, auto_reply.STEP_COMPANY_INTRO))
+        self.assertFalse(auto_reply.should_ignore_plus_start_for_active_v2(True, True, ""))
+
     def test_runtime_tracks_form_text_and_photo_separately(self):
         state = PeerRuntimeState(peer_id=10)
         self.assertFalse(state.form_text_received)

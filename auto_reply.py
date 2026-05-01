@@ -1074,6 +1074,10 @@ def is_v2_redundant_plus_after_start(text: str, step_name: str) -> bool:
     return is_plus_chat_start(text) and (step_name or "").strip() == STEP_COMPANY_INTRO
 
 
+def should_ignore_plus_start_for_active_v2(plus_start_first_message: bool, enrolled: bool, step_name: str) -> bool:
+    return bool(plus_start_first_message and enrolled and (step_name or "").strip())
+
+
 def is_stop_phrase(text: str) -> bool:
     return is_stop_phrase_impl(text)
 
@@ -6945,6 +6949,13 @@ async def main():
 
         if plus_start and not plus_start_first_message:
             print(f"FILTER account={ACCOUNT_KEY} peer={peer_id} reason=plus_not_first")
+        if should_ignore_plus_start_for_active_v2(
+            plus_start_first_message,
+            v2_enrollment.has(peer_id),
+            current_step_snapshot,
+        ):
+            plus_start_first_message = False
+            print(f"FILTER account={ACCOUNT_KEY} peer={peer_id} reason=plus_already_v2 step={current_step_snapshot}")
         if (not IS_ALT_ACCOUNT) and (plus_start_first_message or group_incoming_autostart):
             queue_today_upsert(
                 peer_id=sender.id,
