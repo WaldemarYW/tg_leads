@@ -4889,13 +4889,14 @@ async def main():
             video_from_cache = True
     if video_from_cache:
         print("✅ Використовую кеш відео")
-    if VIDEO_GROUP_LINK:
-        try:
-            video_group = await client.get_entity(VIDEO_GROUP_LINK)
-        except Exception:
-            video_group = None
-    if not video_group and VIDEO_GROUP_TITLE:
-        video_group = await find_group_by_title(client, VIDEO_GROUP_TITLE)
+    if not video_message:
+        if VIDEO_GROUP_LINK:
+            try:
+                video_group = await client.get_entity(VIDEO_GROUP_LINK)
+            except Exception:
+                video_group = None
+        if not video_group and VIDEO_GROUP_TITLE:
+            video_group = await find_group_by_title(client, VIDEO_GROUP_TITLE)
     if not video_message and not video_group:
         print("⚠️ Не знайшов групу з відео")
     if not video_message and video_group:
