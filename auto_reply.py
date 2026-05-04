@@ -7178,7 +7178,15 @@ async def main():
                                     and time.time() - prompted_at >= max(0.0, FORM_PHOTO_REMINDER_DELAY_SEC)
                                 ):
                                     reminder_text = FORM_MISSING_PHOTO_TEXT if missing_photo else FORM_MISSING_TEXT_TEXT
-                                    await send_v2_message(entity, reminder_text, STEP_FORM_FORWARD, status=STATUS_FORM_REQUESTED)
+                                    sent_ok = await send_v2_message(
+                                        entity,
+                                        reminder_text,
+                                        STEP_FORM_FORWARD,
+                                        status=STATUS_FORM_REQUESTED,
+                                    )
+                                    if not sent_ok:
+                                        print(f"FORM_PARTIAL_REMINDER_SEND_FAILED peer={peer_id} step={STEP_FORM_FORWARD}")
+                                        continue
                                     v2s.form_photo_reminder_sent = True
                                     v2s.form_waiting_photo = missing_photo
                                     v2_runtime.set(v2s)
@@ -7254,7 +7262,15 @@ async def main():
                         if abort_reason:
                             print(f"STEP_WAIT_ABORTED peer={peer_id} step={current_step} reason={abort_reason}")
                             continue
-                        await send_v2_message(entity, final_text, current_step, status=status_for_text(final_text) or "знак питання")
+                        sent_ok = await send_v2_message(
+                            entity,
+                            final_text,
+                            current_step,
+                            status=status_for_text(final_text) or "знак питання",
+                        )
+                        if not sent_ok:
+                            print(f"{log_label}_SEND_FAILED peer={peer_id} step={current_step}")
+                            continue
                         sent_at = time.time()
                         mark_global_fallback_sent(now, tz)
                         mark_v2_peer_followup_sent(v2s)
