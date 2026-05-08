@@ -103,6 +103,31 @@ class ManualV2RecoveryTests(unittest.TestCase):
         self.assertEqual(auto_reply.v2_incoming_buffer_reason(10, set(), {10}), "processing")
         self.assertEqual(auto_reply.v2_incoming_buffer_reason(10, set(), set()), "")
 
+    def test_build_v2_aggregated_incoming_keeps_order_and_skips_empty_texts(self):
+        text, has_photo = auto_reply.build_v2_aggregated_incoming(
+            [
+                (1, "Перше питання", False),
+                (1, "   ", False),
+                (1, "Друге питання", True),
+            ]
+        )
+        self.assertEqual(text, "Перше питання\n\nДруге питання")
+        self.assertTrue(has_photo)
+
+    def test_build_v2_aggregated_incoming_accepts_dict_items(self):
+        text, has_photo = auto_reply.build_v2_aggregated_incoming(
+            [
+                {"text": "Добрий день", "has_photo": False},
+                {"text": "Що по графіку?", "has_photo": False},
+            ]
+        )
+        self.assertEqual(text, "Добрий день\n\nЩо по графіку?")
+        self.assertFalse(has_photo)
+
+    def test_v2_aggregation_waits_for_full_silence_window(self):
+        self.assertFalse(auto_reply.should_process_v2_aggregated_incoming(100.0, 159.9, 60.0))
+        self.assertTrue(auto_reply.should_process_v2_aggregated_incoming(100.0, 160.0, 60.0))
+
     def test_v2_question_response_messages_are_separate(self):
         answer, prompt = auto_reply.v2_question_response_messages(
             "Ні, це не шлюбна агенція.",

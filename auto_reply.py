@@ -141,6 +141,7 @@ SCREENING_REPLY_DEBOUNCE_SEC = float(os.environ.get("SCREENING_REPLY_DEBOUNCE_SE
 BOT_REPLY_DELAY_SEC = float(os.environ.get("BOT_REPLY_DELAY_SEC", "5"))
 QUESTION_GAP_SEC = float(os.environ.get("QUESTION_GAP_SEC", "5"))
 QUESTION_RESPONSE_DELAY_SEC = float(os.environ.get("QUESTION_RESPONSE_DELAY_SEC", "10"))
+V2_INBOUND_AGGREGATION_SEC = float(os.environ.get("V2_INBOUND_AGGREGATION_SEC", "60"))
 QUESTION_RESUME_DELAY_SEC = float(os.environ.get("QUESTION_RESUME_DELAY_SEC", "300"))
 QA_GATE_REMINDER_DELAY_SEC = float(os.environ.get("QA_GATE_REMINDER_DELAY_SEC", "300"))
 TRAINING_TO_FORM_DELAY_SEC = float(os.environ.get("TRAINING_TO_FORM_DELAY_SEC", "30"))
@@ -1064,6 +1065,38 @@ def v2_incoming_buffer_reason(peer_id: int, sending_peers, processing_peers) -> 
     if int(peer_id or 0) in processing_peers:
         return "processing"
     return ""
+
+
+def build_v2_aggregated_incoming(items) -> Tuple[str, bool]:
+    parts = []
+    has_photo = False
+    for item in items or []:
+        text = ""
+        item_has_photo = False
+        if isinstance(item, dict):
+            text = item.get("text", "")
+            item_has_photo = bool(item.get("has_photo", False))
+        elif isinstance(item, tuple):
+            if len(item) >= 3:
+                text = item[1]
+                item_has_photo = bool(item[2])
+            elif len(item) >= 2:
+                text = item[1]
+            elif len(item) == 1:
+                text = item[0]
+        else:
+            text = item
+        clean = str(text or "").strip()
+        if clean:
+            parts.append(clean)
+        has_photo = has_photo or item_has_photo
+    return "\n\n".join(parts), has_photo
+
+
+def should_process_v2_aggregated_incoming(last_received_at: float, now_ts: float, delay_sec: float) -> bool:
+    if float(last_received_at or 0) <= 0:
+        return True
+    return float(now_ts or 0) - float(last_received_at or 0) >= max(0.0, float(delay_sec or 0))
 
 
 def v2_question_response_messages(answer_text: str, return_prompt: str) -> Tuple[str, str]:
@@ -4701,6 +4734,8 @@ async def main():
     processing_peers = set()
     v2_sending_peers = set()
     buffered_incoming: Dict[int, deque] = {}
+    buffered_incoming_context: Dict[int, dict] = {}
+    buffered_incoming_handles: Dict[int, asyncio.TimerHandle] = {}
     restart_generation: Dict[int, int] = {}
     paused_peers = set()
     enabled_peers = set()
@@ -5313,7 +5348,7 @@ async def main():
         last_reply_at.pop(peer_id, None)
         last_incoming_at.pop(peer_id, None)
         processing_peers.discard(peer_id)
-        buffered_incoming.pop(peer_id, None)
+        clear_v2_pending_incoming(peer_id)
         name = getattr(entity, "first_name", "") or "Unknown"
         username = getattr(entity, "username", "") or ""
         chat_link = build_chat_link_app(entity, peer_id)
@@ -5344,44 +5379,129 @@ async def main():
         print(f"SPECIAL_START peer={peer_id} source={start_source} reason={special_reason}")
         return True
 
-    def buffer_v2_incoming(peer_id: int, text: str, has_photo: bool, reason: str) -> None:
+    def clear_v2_pending_incoming(peer_id: int) -> None:
+        peer_id = int(peer_id or 0)
+        handle = buffered_incoming_handles.pop(peer_id, None)
+        if handle:
+            handle.cancel()
+        buffered_incoming.pop(peer_id, None)
+        buffered_incoming_context.pop(peer_id, None)
+
+    def schedule_v2_pending_process(peer_id: int, delay_sec: Optional[float] = None) -> None:
+        peer_id = int(peer_id or 0)
+        if not peer_id:
+            return
+        existing = buffered_incoming_handles.pop(peer_id, None)
+        if existing:
+            existing.cancel()
+        wait_sec = V2_INBOUND_AGGREGATION_SEC if delay_sec is None else delay_sec
+        buffered_incoming_handles[peer_id] = loop.call_later(
+            max(0.0, float(wait_sec or 0)),
+            lambda: asyncio.create_task(process_v2_buffered_incoming(peer_id)),
+        )
+
+    def buffer_v2_incoming(
+        peer_id: int,
+        text: str,
+        has_photo: bool,
+        reason: str,
+        context: Optional[dict] = None,
+    ) -> None:
         bucket = buffered_incoming.setdefault(int(peer_id), deque())
         bucket.append((int(restart_generation.get(peer_id, 0)), text, bool(has_photo)))
+        ctx = dict(buffered_incoming_context.get(int(peer_id), {}))
+        if context:
+            ctx.update(context)
+        ctx["last_received_at"] = time.time()
+        buffered_incoming_context[int(peer_id)] = ctx
+        schedule_v2_pending_process(int(peer_id))
         print(f"BUFFER account={ACCOUNT_KEY} peer={peer_id} reason={reason} size={len(bucket)}")
 
     async def drain_v2_buffered_incoming(entity: User) -> None:
         peer_id = int(getattr(entity, "id", 0) or 0)
         if not peer_id or peer_id in v2_sending_peers or peer_id in processing_peers:
             return
-        while True:
-            queued = buffered_incoming.get(peer_id)
-            if not queued:
-                break
-            item = queued.popleft()
-            if not queued:
-                buffered_incoming.pop(peer_id, None)
-            if isinstance(item, tuple):
-                if len(item) >= 3:
-                    msg_generation, next_text, next_has_photo = item[0], item[1], bool(item[2])
-                else:
-                    msg_generation, next_text = item
-                    next_has_photo = False
-            else:
-                msg_generation, next_text = int(restart_generation.get(peer_id, 0)), str(item)
-                next_has_photo = False
-            if int(msg_generation) != int(restart_generation.get(peer_id, 0)):
-                continue
-            if peer_id in v2_sending_peers:
-                buffer_v2_incoming(peer_id, str(next_text), bool(next_has_photo), "send_lock_requeue")
-                break
-            processing_peers.add(peer_id)
+        if buffered_incoming.get(peer_id) and peer_id not in buffered_incoming_handles:
+            schedule_v2_pending_process(peer_id)
+
+    async def process_v2_buffered_incoming(peer_id: int) -> None:
+        peer_id = int(peer_id or 0)
+        buffered_incoming_handles.pop(peer_id, None)
+        queued = list(buffered_incoming.get(peer_id) or [])
+        ctx = dict(buffered_incoming_context.get(peer_id) or {})
+        if not peer_id or not queued:
+            clear_v2_pending_incoming(peer_id)
+            return
+        if peer_id in v2_sending_peers or peer_id in processing_peers:
+            schedule_v2_pending_process(peer_id, 1.0)
+            return
+        last_received_at = float(ctx.get("last_received_at") or 0.0)
+        now_ts = time.time()
+        if not should_process_v2_aggregated_incoming(last_received_at, now_ts, V2_INBOUND_AGGREGATION_SEC):
+            schedule_v2_pending_process(
+                peer_id,
+                max(0.0, V2_INBOUND_AGGREGATION_SEC - (now_ts - last_received_at)),
+            )
+            return
+        current_generation = int(restart_generation.get(peer_id, 0))
+        valid_items = []
+        for item in queued:
+            item_generation = int(item[0]) if isinstance(item, tuple) and item else current_generation
+            if item_generation == current_generation:
+                valid_items.append(item)
+        clear_v2_pending_incoming(peer_id)
+        combined_text, combined_has_photo = build_v2_aggregated_incoming(valid_items)
+        if not combined_text and not combined_has_photo:
+            return
+        entity = ctx.get("entity")
+        if not entity:
             try:
-                await process_v2_turn(entity, str(next_text), has_photo=bool(next_has_photo))
-                last_reply_at[peer_id] = time.time()
+                entity = await client.get_entity(peer_id)
             except Exception as err:
-                print(f"⚠️ Buffered V2 process error peer={peer_id}: {type(err).__name__}: {err}")
-            finally:
-                processing_peers.discard(peer_id)
+                print(f"⚠️ Buffered V2 entity resolve error peer={peer_id}: {type(err).__name__}: {err}")
+                return
+        if is_paused(entity) and not is_test_user(entity):
+            print(f"FILTER account={ACCOUNT_KEY} peer={peer_id} reason=paused_after_aggregation")
+            return
+        name = ctx.get("name") or getattr(entity, "first_name", "") or "Unknown"
+        username = ctx.get("username") or getattr(entity, "username", "") or ""
+        chat_link = ctx.get("chat_link") or build_chat_link_app(entity, peer_id)
+        incoming_mode = ctx.get("incoming_mode") or "ON"
+        step_snapshot = ctx.get("step_snapshot") or (v2_runtime.get(peer_id).flow_step if FLOW_V2_ENABLED else "")
+        queue_today_upsert(
+            peer_id=peer_id,
+            name=name,
+            username=username,
+            chat_link=chat_link,
+            last_in=combined_text[:200],
+            status=(MANUAL_OFF_STATUS if incoming_mode == "OFF" else None),
+            sender_role="lead",
+            dialog_mode=incoming_mode,
+            step_snapshot=step_snapshot,
+            full_text=combined_text,
+        )
+        if not IS_ALT_ACCOUNT:
+            owner_store.set_owner(peer_id, PRIMARY_ACCOUNT_KEY, "incoming", tz)
+        processing_peers.add(peer_id)
+        try:
+            last_incoming_at[peer_id] = time.time()
+            followup_state.clear(peer_id)
+            queue_today_upsert(
+                peer_id=peer_id,
+                name=name,
+                username=username,
+                chat_link=chat_link,
+                followup_stage="",
+                followup_next_at="",
+                followup_last_sent_at="",
+            )
+            handled_v2 = await process_v2_turn(entity, combined_text, has_photo=combined_has_photo)
+            if handled_v2:
+                last_reply_at[peer_id] = time.time()
+        except Exception as err:
+            print(f"⚠️ Buffered V2 process error peer={peer_id}: {type(err).__name__}: {err}")
+        finally:
+            processing_peers.discard(peer_id)
 
     async def run_v2_send_batch(sender: User, expected_step: str, send_batch) -> bool:
         peer_id = int(getattr(sender, "id", 0) or 0)
@@ -6978,7 +7098,7 @@ async def main():
             last_reply_at.pop(peer_id, None)
             last_incoming_at.pop(peer_id, None)
             processing_peers.discard(peer_id)
-            buffered_incoming.pop(peer_id, None)
+            clear_v2_pending_incoming(peer_id)
             start_source = "plus_start" if (plus_start_first_message or plus_start) else "group_incoming_start"
             handled_special_start = await handle_special_start(sender, lead_info, start_source)
             if handled_special_start:
@@ -7003,7 +7123,7 @@ async def main():
             last_reply_at.pop(peer_id, None)
             last_incoming_at.pop(peer_id, None)
             processing_peers.discard(peer_id)
-            buffered_incoming.pop(peer_id, None)
+            clear_v2_pending_incoming(peer_id)
             pause_store.set_status(sender.id, username, name, chat_link, "ACTIVE", updated_by="test")
             v2_enrollment.add(peer_id)
             v2_state = PeerRuntimeState(
@@ -7032,13 +7152,23 @@ async def main():
                     print(f"FILTER account={ACCOUNT_KEY} peer={peer_id} reason=not_enabled")
                     return
                 print(f"✅ Test user bypassed enabled check: {peer_id}")
-        v2_buffer_reason = v2_incoming_buffer_reason(peer_id, v2_sending_peers, processing_peers) if FLOW_V2_ENABLED else ""
-        if v2_buffer_reason:
-            buffer_v2_incoming(peer_id, text, incoming_has_photo, v2_buffer_reason)
+        if FLOW_V2_ENABLED:
+            buffer_v2_incoming(
+                peer_id,
+                text,
+                incoming_has_photo,
+                v2_incoming_buffer_reason(peer_id, v2_sending_peers, processing_peers) or "aggregation",
+                {
+                    "entity": sender,
+                    "name": name,
+                    "username": username,
+                    "chat_link": chat_link,
+                    "incoming_mode": incoming_mode,
+                    "step_snapshot": current_step_snapshot,
+                },
+            )
             return
         if peer_id in processing_peers:
-            if FLOW_V2_ENABLED:
-                return
             if not is_test:
                 print(f"FILTER account={ACCOUNT_KEY} peer={peer_id} reason=processing")
                 return
@@ -7083,41 +7213,8 @@ async def main():
                 followup_next_at="",
                 followup_last_sent_at="",
             )
-
-            if FLOW_V2_ENABLED:
-                handled_v2 = await process_v2_turn(sender, text, has_photo=incoming_has_photo)
-                if handled_v2:
-                    last_reply_at[peer_id] = time.time()
-                return
         finally:
             processing_peers.discard(peer_id)
-            if FLOW_V2_ENABLED:
-                while True:
-                    queued = buffered_incoming.get(peer_id)
-                    if not queued:
-                        break
-                    item = queued.popleft()
-                    if isinstance(item, tuple):
-                        if len(item) >= 3:
-                            msg_generation, next_text, next_has_photo = item[0], item[1], bool(item[2])
-                        else:
-                            msg_generation, next_text = item
-                            next_has_photo = False
-                    else:
-                        msg_generation, next_text = int(restart_generation.get(peer_id, 0)), str(item)
-                        next_has_photo = False
-                    if not queued:
-                        buffered_incoming.pop(peer_id, None)
-                    if int(msg_generation) != int(restart_generation.get(peer_id, 0)):
-                        continue
-                    processing_peers.add(peer_id)
-                    try:
-                        await process_v2_turn(sender, next_text, has_photo=next_has_photo)
-                        last_reply_at[peer_id] = time.time()
-                    except Exception as err:
-                        print(f"⚠️ Buffered V2 process error peer={peer_id}: {type(err).__name__}: {err}")
-                    finally:
-                        processing_peers.discard(peer_id)
 
     print("🤖 Автовідповідач запущено")
     async def followup_loop():

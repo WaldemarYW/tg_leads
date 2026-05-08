@@ -295,6 +295,7 @@ def start_auto_reply(acct: AccountConfig) -> Tuple[bool, str]:
             "REPLY_DEBOUNCE_SEC",
             "QUESTION_GAP_SEC",
             "QUESTION_RESPONSE_DELAY_SEC",
+            "V2_INBOUND_AGGREGATION_SEC",
             "AUTO_REPLY_CONTINUE_DELAY_SEC",
             "AUTO_REPLY_LOCK_TTL",
             "AUTO_REPLY_FOLLOWUP_CHECK_SEC",
