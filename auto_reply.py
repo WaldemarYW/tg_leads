@@ -2253,6 +2253,14 @@ def arm_step_wait(state: PeerRuntimeState, step_name: str, now_ts: float):
         print(f"STEP_WAIT_ARM peer={state.peer_id} step={step_name}")
 
 
+def suppress_step_followups(state: PeerRuntimeState):
+    state.step_followup_enabled_at = 0.0
+    state.step_followup_stage = 0
+    state.step_followup_last_at = 0.0
+    state.last_followup_text = ""
+    state.last_followup_step = ""
+
+
 def clear_step_wait(state: PeerRuntimeState):
     state.step_wait_started_at = 0.0
     state.step_wait_step = ""
@@ -5666,7 +5674,7 @@ async def main():
         except Exception:
             return False
 
-    async def start_v2_onboarding(entity: User, start_source: str) -> bool:
+    async def start_v2_onboarding(entity: User, start_source: str, suppress_initial_followups: bool = False) -> bool:
         peer_id = int(getattr(entity, "id", 0) or 0)
         if not peer_id:
             return False
@@ -5688,6 +5696,11 @@ async def main():
         if not sent_ok:
             print(f"⚠️ ONBOARDING_SEND_FAIL peer={peer_id} source={start_source} err=no_messages_sent")
             return False
+        if suppress_initial_followups:
+            latest_state = v2_runtime.get(peer_id)
+            suppress_step_followups(latest_state)
+            v2_runtime.set(latest_state)
+            print(f"STEP_WAIT_FOLLOWUPS_SUPPRESSED peer={peer_id} source={start_source}")
         if not IS_ALT_ACCOUNT:
             owner_store.set_owner(peer_id, PRIMARY_ACCOUNT_KEY, start_source, tz)
         else:
@@ -7104,7 +7117,11 @@ async def main():
             if handled_special_start:
                 return
             pause_store.set_status(sender.id, username, name, chat_link, "ACTIVE", updated_by=start_source)
-            ok = await start_v2_onboarding(sender, start_source)
+            ok = await start_v2_onboarding(
+                sender,
+                start_source,
+                suppress_initial_followups=bool(group_incoming_autostart),
+            )
             if not ok:
                 return
             if group_incoming_autostart:

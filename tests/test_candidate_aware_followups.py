@@ -143,6 +143,15 @@ class CandidateAwareFollowupTests(unittest.TestCase):
         )
         self.assertFalse(auto_reply.is_v2_step_followup_enabled(state, auto_reply.STEP_COMPANY_INTRO))
 
+    def test_suppress_step_followups_keeps_current_wait_step_without_opt_in(self):
+        state = PeerRuntimeState(peer_id=62, flow_step=auto_reply.STEP_COMPANY_INTRO)
+        auto_reply.arm_step_wait(state, auto_reply.STEP_COMPANY_INTRO, 123.0)
+        auto_reply.suppress_step_followups(state)
+        self.assertEqual(state.step_wait_step, auto_reply.STEP_COMPANY_INTRO)
+        self.assertEqual(state.step_wait_started_at, 123.0)
+        self.assertEqual(state.step_followup_enabled_at, 0.0)
+        self.assertFalse(auto_reply.is_v2_step_followup_enabled(state, auto_reply.STEP_COMPANY_INTRO))
+
     def test_v2_followup_has_only_two_send_stages(self):
         tz = ZoneInfo("Europe/Kyiv")
         started_at = datetime(2026, 2, 19, 10, 0, tzinfo=tz).timestamp()
